@@ -86,7 +86,8 @@ export interface PoolOptions {
   maxCooldownMs?: number;
   /**
    * 冷却阶梯（ms），下标 = 连续失败次数 - 1，最后一档即封顶档。
-   * 缺省 = 冻结常量 1m → 5m → 15m → 30m。来源 env `COOLDOWN_LADDER_SECONDS`（`src/config.ts` 校验）。
+   * 缺省 = 冻结常量 0 → 1m → 5m → 15m → 30m（首档 0：首次失败只吃该 reason 的基础冷却）。
+   * 来源 env `COOLDOWN_LADDER_SECONDS`（`src/config.ts` 校验）。
    * 注意：**只换阶梯，不换封顶** —— 结果仍受 MAX_COOLDOWN_MS 与各 reason 基础冷却约束。
    */
   cooldownLadderMs?: readonly number[];

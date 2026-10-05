@@ -28,6 +28,10 @@ const LADDER_MS: readonly number[] = [0, MINUTE, 5 * MINUTE, 15 * MINUTE, MAX_CO
  * 可经 `PoolOptions.cooldownLadderMs`（env `COOLDOWN_LADDER_SECONDS`）整条替换，
  * 但**封顶不变**：结果仍受 `MAX_COOLDOWN_MS` 与各 reason 的基础冷却约束，
  * 所以换阶梯只影响"连续失败后的升档速度"，不会把 AUTH_INVALID 的 30min 长冷却改短。
+ *
+ * 注意：env 未设时，`runtime.ts` 会把 `src/config.ts` 的默认阶梯**原样灌进** `PoolOptions`，
+ * 本常量并不参与计算。所以那份默认值必须与本数组逐项同值（首档 0 也算），
+ * 由 `src/config.spec.ts` 的一例回归守住 —— 两处漂移过一次，症状是所有 key 的冷却整体上移一档。
  */
 export const DEFAULT_COOLDOWN_LADDER_MS: readonly number[] = LADDER_MS;
 

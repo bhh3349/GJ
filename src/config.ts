@@ -27,12 +27,26 @@ export interface AppConfig {
   maxAttempts: number;
   /** 每把上游 key 的并发上限；默认 4（冻结常量） */
   maxConcurrencyPerKey: number;
-  /** 失败冷却阶梯（秒），下标 = 连续失败次数 - 1；默认 1m/5m/15m/30m（冻结常量） */
+  /**
+   * 失败冷却阶梯（秒），下标 = 连续失败次数 - 1。
+   * 默认 = 冻结阶梯 0/1m/5m/15m/30m（首档 0，即首次失败只吃该 reason 的基础冷却）
+   */
   cooldownLadderSeconds: number[];
 }
 
-/** 冻结默认阶梯（与 `src/gateway/cooldown.ts` 的常量同值；这里是唯一读取 env 的地方） */
-const DEFAULT_COOLDOWN_LADDER_SECONDS: readonly number[] = [60, 300, 900, 1800];
+/**
+ * 冻结默认阶梯（秒）：0 / 1m / 5m / 15m / 30m。
+ *
+ * 与 `src/gateway/cooldown.ts` 的 `DEFAULT_COOLDOWN_LADDER_MS` **逐项同值**（乘 1000 后）。
+ * 这条等价关系是硬约束，不是巧合：env 未设时 `runtime.ts` 仍会把本值灌进 `PoolOptions`，
+ * 于是"默认路径"完全绕开内核常量 —— 两边一旦漂移，真实进程用的就是另一个阶梯，
+ * 而门禁全绿也看不出来。`config.spec.ts` 里有一例回归专门钉死这个等式。
+ *
+ * 首档必须是 0，别"修"成 60：冻结语义是 n=1 → 用 reason 基础冷却
+ * （NETWORK 15s / UPSTREAM_ERROR 10s / RATE_LIMITED 60s），
+ * 首档给 60 会让一次失败的 key 被停 60s 而不是 15s。
+ */
+const DEFAULT_COOLDOWN_LADDER_SECONDS: readonly number[] = [0, 60, 300, 900, 1800];
 
 function intFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
   const raw = env[name];
@@ -62,11 +76,16 @@ function boolFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: boolean): b
 }
 
 /**
- * 冷却阶梯（秒）。逗号分隔，如 `60,300,900,1800`。
+ * 冷却阶梯（秒）。逗号分隔，如 `0,60,300,900,1800`。
  *
  * 为什么在这里做严格校验而不是读进来直接用：阶梯是**单调升档**语义，配错不会报错，
  * 只会让某把 key 冷却成 1ms 或被长期锁死，而症状看起来像"上游挂了"。
- * 所以非空、正整数、非递减三条不满足就拒绝启动（与 MAX_CONCURRENCY_PER_KEY 同款纪律）。
+ * 所以非空、非负整数、非递减三条不满足就拒绝启动（与 MAX_CONCURRENCY_PER_KEY 同款纪律）。
+ *
+ * **首档允许 0**，这一条是有来历的：冻结阶梯的首档就是 0（首次失败 = 只吃 reason 基础冷却）。
+ * 早先要求"正整数"时，默认值只能编成 `60,300,900,1800`，整条阶梯相对冻结值上移一档、
+ * 丢掉首档 0，一次失败的 NETWORK key 被停 60s 而不是 15s —— 门禁绿着，谁也没发现。
+ * 别再把 0 判成非法；同时 0 只在首档有意义，`60,0` 这种递减仍照旧拒绝。
  * 注意封顶仍是 `MAX_COOLDOWN_MS`：最后一档超过 30min 会被封顶，不是静默截断阶梯。
  */
 function cooldownLadderFromEnv(env: NodeJS.ProcessEnv): number[] {
@@ -76,8 +95,8 @@ function cooldownLadderFromEnv(env: NodeJS.ProcessEnv): number[] {
   const parts = raw.split(',').map((s) => s.trim());
   const secs = parts.map((p) => {
     const n = Number(p);
-    if (p === '' || !Number.isInteger(n) || n < 1) {
-      throw new Error(`COOLDOWN_LADDER_SECONDS 必须是逗号分隔的正整数秒，实际为 ${JSON.stringify(raw)}`);
+    if (p === '' || !Number.isInteger(n) || n < 0) {
+      throw new Error(`COOLDOWN_LADDER_SECONDS 必须是逗号分隔的非负整数秒，实际为 ${JSON.stringify(raw)}`);
     }
     return n;
   });

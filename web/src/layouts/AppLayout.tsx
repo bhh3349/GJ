@@ -1,10 +1,15 @@
-import { Layout, Menu, Typography } from 'antd';
+import { DownOutlined, LogoutOutlined, UserOutlined } from '@ant-design/icons';
+import { App, Dropdown, Layout, Menu, Typography } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 
+import { authApi } from '@/api/endpoints';
 import { SESSION_EXPIRED_EVENT } from '@/api/http';
+import { useAction } from '@/api/hooks';
+import { useSession } from '@/auth/AuthGate';
 import { ConnectionBadge } from '@/components/ConnectionBadge';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { resetLiveData, startLive, stopLive } from '@/realtime/live';
 import { findNavItem, navItems } from '@/router/nav';
 import { tokens } from '@/theme/tokens';
 
@@ -15,12 +20,26 @@ export function AppLayout() {
   const [collapsed, setCollapsed] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
+  const session = useSession();
+  const { modal } = App.useApp();
+  const { run } = useAction();
 
   const current = useMemo(() => findNavItem(location.pathname), [location.pathname]);
 
-  // 会话失效（401 UNAUTHORIZED / SESSION_EXPIRED）统一跳登录。
+  // 实时通道只在受保护区域内开启：登录页不建连，退出登录立即断开并清帧。
+  useEffect(() => {
+    startLive();
+    return () => {
+      stopLive();
+      resetLiveData();
+    };
+  }, []);
+
+  // 会话失效（401 UNAUTHORIZED / SESSION_EXPIRED，含 WS 4401）统一跳登录。
   useEffect(() => {
     const onExpired = () => {
+      stopLive();
+      resetLiveData();
       navigate('/login', { replace: true, state: { from: location.pathname } });
     };
     window.addEventListener(SESSION_EXPIRED_EVENT, onExpired);
@@ -28,6 +47,21 @@ export function AppLayout() {
       window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired);
     };
   }, [navigate, location.pathname]);
+
+  const onLogout = () => {
+    modal.confirm({
+      title: '退出登录',
+      content: '将清除当前会话并断开实时通道，需要重新登录。',
+      okText: '退出',
+      cancelText: '取消',
+      onOk: async () => {
+        await run('logout', () => authApi.logout());
+        stopLive();
+        resetLiveData();
+        navigate('/login', { replace: true });
+      },
+    });
+  };
 
   const selectedKey = current?.path ?? location.pathname;
 
@@ -115,7 +149,51 @@ export function AppLayout() {
               </Text>
             ) : null}
           </div>
-          <ConnectionBadge />
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: tokens.space.lg,
+              flex: 'none',
+            }}
+          >
+            <ConnectionBadge />
+            <Dropdown
+              trigger={['click']}
+              menu={{
+                items: [
+                  {
+                    key: 'account',
+                    label: session?.username ?? '未知账号',
+                    disabled: true,
+                    icon: <UserOutlined />,
+                  },
+                  { type: 'divider' },
+                  { key: 'logout', label: '退出登录', icon: <LogoutOutlined />, danger: true },
+                ],
+                onClick: ({ key }) => {
+                  if (key === 'logout') onLogout();
+                },
+              }}
+            >
+              <span
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: tokens.space.sm,
+                  cursor: 'pointer',
+                  fontSize: 12,
+                  color: tokens.color.textSecondary,
+                  padding: '4px 8px',
+                  borderRadius: tokens.radius.sm,
+                }}
+              >
+                <UserOutlined />
+                {session?.username ?? '—'}
+                <DownOutlined style={{ fontSize: 10 }} />
+              </span>
+            </Dropdown>
+          </div>
         </Header>
 
         <Content

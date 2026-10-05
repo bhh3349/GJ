@@ -1,5 +1,6 @@
 import { createBrowserRouter, Navigate } from 'react-router-dom';
 
+import { AuthGate } from '@/auth/AuthGate';
 import { AppLayout } from '@/layouts/AppLayout';
 import { NotFoundPage } from '@/pages/NotFoundPage';
 import { lazyPage } from '@/router/lazyPage';
@@ -12,7 +13,12 @@ export const router = createBrowserRouter([
   },
   {
     path: '/',
-    element: <AppLayout />,
+    // 契约 §0.5：/api/* 全量鉴权、无白名单例外 → 受保护区域统一先过会话校验。
+    element: (
+      <AuthGate>
+        <AppLayout />
+      </AuthGate>
+    ),
     errorElement: <RouteErrorPage />,
     children: [
       { index: true, element: <Navigate to="/dashboard" replace /> },

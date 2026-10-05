@@ -48,6 +48,17 @@
 
 - 一人一分支 + 一人一 worktree（ADR-0007）：`dev/api`（管家）、`dev/gateway-m3`（路由者）、`dev/web-m2`（画师）、`dev/infra`（基建/收口）。
 - 新工作一律从**当前 `main`** 起开分支；`main` 只进快进，不合并不动共享检出 HEAD。
+- **禁止裸 `update-ref`**（触发案例：M3 适配层合流前，一次裸 `update-ref` 差点把 flusher + 冷却阶梯
+  修复静默回滚，14 个文件）。它只挪分支指针，**不动 HEAD / index / 工作区**：于是 `git status` 会把
+  "工作区落后于新 tip" 显示成一大片反向改动，此时一次误提交或一次 `checkout --` 就把新 tip 的内容
+  抹掉了，而表面完全看不出异常。规则：
+  - 在**已 checkout 该分支的 worktree 内**，一律禁止裸 `update-ref`。快进走
+    `git merge --ff-only <tip>`（或 `checkout` / `reset --hard <tip>`），让 HEAD + index + 工作区
+    **一起**移到新 tip。
+  - `main` 没有专属 worktree，仍可用三参 CAS `git update-ref refs/heads/main <new> <old>`（带旧值做
+    compare-and-swap，防并发覆盖）；执行完必须核 `git rev-parse main^{tree}` 与目标 tip 的 tree 一致。
+  - **合流后 `git status --porcelain` 为空才算收口**（R1：合并 ≠ 收口）。非空说明指针与工作区没同步，
+    这时报"已合流"是假回执。回执里带上新 tip 与空 status 两样。
 - Conventional Commits。不装 husky，门禁走 CI。
 - 决策记录写 `docs/adr/`（MADR 格式，`NNNN-标题.md`），不要只留在聊天记录里。
 - 长代码不写进 `AGENTS.md`；守则短写，写「读代码猜不到」的部分。

@@ -48,12 +48,32 @@ export interface AppConfig {
  */
 const DEFAULT_COOLDOWN_LADDER_SECONDS: readonly number[] = [0, 60, 300, 900, 1800];
 
+/**
+ * 「十进制整数字面量」两张网，只认 0-9（可带一个前导负号）。
+ *
+ * 为什么不直接 `Number(raw)`：`Number` 的接受面比"配置项"该有的宽得多，
+ * 且**全部静默**——`0x10`=16、`1e3`=1000、`30.9` 被 `Math.floor` 成 30、
+ * `-0` 满足 `n < 0` 为假。这类值读进来不会报错，只会让端口/保留天数/冷却档位
+ * 变成另一个数，症状看起来像"代码有 bug"。所以入口只放十进制字面量过，
+ * 其余一律 fail-fast（与 MASTER_KEY 缺失即拒绝启动同款纪律）。
+ * 注意 `Number('abc')`=NaN、`Number('1_000')`=NaN 本来就会被有限性检查拦下，
+ * 这里收的是那些"能算出数、但显然不是配置本意"的形状。
+ */
+const DECIMAL_INT_RE = /^-?\d+$/;
+/** 非负变体（冷却阶梯按定义不允许负数，连 `-0` 也不放行）。 */
+const DECIMAL_UINT_RE = /^\d+$/;
+
 function intFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
   const raw = env[name];
   if (raw === undefined || raw.trim() === '') return fallback;
-  const n = Number(raw);
-  if (!Number.isFinite(n)) throw new Error(`${name} 必须是数字，实际为 ${JSON.stringify(raw)}`);
-  return Math.floor(n);
+  const text = raw.trim();
+  if (!DECIMAL_INT_RE.test(text)) {
+    throw new Error(`${name} 必须是十进制整数（不接受 0x/科学计数/小数），实际为 ${JSON.stringify(raw)}`);
+  }
+  const n = Number(text);
+  // 位数多到溢出成 Infinity 的照样拦下；其余情况正则已保证是整数，不需要 Math.floor
+  if (!Number.isFinite(n)) throw new Error(`${name} 必须是十进制整数，实际为 ${JSON.stringify(raw)}`);
+  return n;
 }
 
 /**
@@ -94,9 +114,11 @@ function cooldownLadderFromEnv(env: NodeJS.ProcessEnv): number[] {
 
   const parts = raw.split(',').map((s) => s.trim());
   const secs = parts.map((p) => {
+    // 同样只认十进制字面量：`0x10`/`1e3`/`60.0` 用 Number 都能算出合法的非负整数，
+    // 于是"配错"被静默吞成"另一个档位"——正是上面那段注释说的那类故障。
     const n = Number(p);
-    if (p === '' || !Number.isInteger(n) || n < 0) {
-      throw new Error(`COOLDOWN_LADDER_SECONDS 必须是逗号分隔的非负整数秒，实际为 ${JSON.stringify(raw)}`);
+    if (!DECIMAL_UINT_RE.test(p) || !Number.isInteger(n)) {
+      throw new Error(`COOLDOWN_LADDER_SECONDS 必须是逗号分隔的非负整数秒（十进制字面量，不接受 0x/科学计数/小数），实际为 ${JSON.stringify(raw)}`);
     }
     return n;
   });

@@ -63,6 +63,23 @@ describe('COOLDOWN_LADDER_SECONDS', () => {
     }
   });
 
+  /**
+   * 回归：档位只认十进制字面量。
+   *
+   * 这些形状用 `Number` 全都能算出**合法的非负整数**——`0x10`=16、`1e3`=1000、
+   * `60.0`=60、`+30`=30、`-0` 还满足 `n < 0` 为假——于是"配错"被静默吞成
+   * "另一个档位"，冷却时长不对但门禁全绿。收紧了才好，配错就必须起不来。
+   */
+  it('非十进制字面量一律拒绝启动（0x / 科学计数 / 小数 / 正号 / -0）', () => {
+    for (const bad of ['0x10', '0,1e3', '60.0', '+30', '-0', '0x1e']) {
+      assert.throws(
+        () => loadConfig(env({ COOLDOWN_LADDER_SECONDS: bad })),
+        /COOLDOWN_LADDER_SECONDS/,
+        `${JSON.stringify(bad)} 用 Number 能算出数，但显然不是配置本意，必须 fail-fast`,
+      );
+    }
+  });
+
   it('相等档位不算递减（允许 "60,60,300"）', () => {
     assert.deepEqual(loadConfig(env({ COOLDOWN_LADDER_SECONDS: '60,60,300' })).cooldownLadderSeconds, [60, 60, 300]);
   });
@@ -71,5 +88,25 @@ describe('COOLDOWN_LADDER_SECONDS', () => {
 describe('其余项仍然 fail-fast', () => {
   it('MAX_CONCURRENCY_PER_KEY=0 拒绝启动（会让池子恒"已满"）', () => {
     assert.throws(() => loadConfig(env({ MAX_CONCURRENCY_PER_KEY: '0' })), /MAX_CONCURRENCY_PER_KEY/);
+  });
+
+  /**
+   * 回归：`Number(raw)` 的接受面比"配置项"宽得多，而且**全部静默**。
+   * `0x10`→16、`1e3`→1000 会被原样收下；`30.9` 更阴——先被 `Math.floor` 截成 30
+   * （日志保留天数），字面量写错了，进程照起，谁也没法从行为上看出来。
+   * 这些形状必须在启动时打脸，而不是变成另一个数。
+   */
+  it('非十进制整数字面量一律拒绝启动（0x / 科学计数 / 小数）', () => {
+    assert.throws(() => loadConfig(env({ PORT_GATEWAY: '0x10' })), /PORT_GATEWAY/);
+    assert.throws(() => loadConfig(env({ SESSION_TTL_HOURS: '1e3' })), /SESSION_TTL_HOURS/);
+    assert.throws(() => loadConfig(env({ LOG_RETENTION_DAYS: '30.9' })), /LOG_RETENTION_DAYS/);
+    assert.throws(() => loadConfig(env({ MAX_ATTEMPTS: '3.5' })), /MAX_ATTEMPTS/);
+    assert.throws(() => loadConfig(env({ MAX_ATTEMPTS: '-1' })), /MAX_ATTEMPTS/, '负数归 >=1 那条管，不归字面量这条');
+  });
+
+  it('十进制整数照旧生效（收紧不误伤正常写法，两侧空白仍去）', () => {
+    assert.equal(loadConfig(env({ PORT_GATEWAY: '8080' })).portGateway, 8080);
+    assert.equal(loadConfig(env({ PORT_ADMIN: ' 4002 ' })).portAdmin, 4002);
+    assert.equal(loadConfig(env({ LOG_RETENTION_DAYS: '030' })).logRetentionDays, 30);
   });
 });

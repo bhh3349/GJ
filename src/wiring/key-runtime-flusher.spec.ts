@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { afterEach, describe, it } from 'vitest';
+import { afterEach, describe, it, vi } from 'vitest';
 
 import { openDatabase, type Db } from '../db/database.js';
 import { createKey, listKeys } from '../db/repo/keys.js';
@@ -59,6 +59,8 @@ afterEach(() => {
       /* Windows 上偶尔仍被短时占用 */
     }
   }
+  // 放在最后：先让 close() 用假定时器把手上的 interval 清掉，再卸掉假时钟
+  vi.useRealTimers();
 });
 
 interface Harness {
@@ -312,22 +314,33 @@ describe('失败与退出', () => {
     assert.equal(row?.last_failure_reason, 'NETWORK');
   });
 
-  it('定时器到点自动刷（不是只在退出时刷）', async () => {
+  // 下面两条是**定时器语义**的用例，用假定时器把时间轴交给测试推：
+  // 原来的形态是 `setInterval(20)` + `await sleep(90)`，那是拿"机器在这 90ms 里
+  // 有没有被别的东西占住"当判据 —— 负载一高就偶发红，而且红得没有信息量。
+  // `toFake` 只点名 interval，**不碰 Date**：`clockNearNow()` 与读路径的 deriveHealth
+  // 都靠真实当下，冻结时钟会让"冷却中"在管理端恒不成立（那就变成测假结论了）。
+  it('定时器到点自动刷（不是只在退出时刷）', () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     const h = setup({ flushIntervalMs: 20 });
     h.pool.reportFailure(h.keyIds[0], 'UPSTREAM_ERROR');
-    await new Promise((resolve) => setTimeout(resolve, 90));
 
+    assert.equal(runtimeRows(h.db).length, 0, '没到点之前一行都不该有');
+
+    vi.advanceTimersByTime(20);
     const row = runtimeRows(h.db).find((r) => r.key_id === h.keyIds[0]);
     assert.equal(row?.last_failure_reason, 'UPSTREAM_ERROR');
   });
 
-  it('close() 停表 + 最后一次 flush（退出时不丢最后一拍）', async () => {
+  it('close() 停表 + 最后一次 flush（退出时不丢最后一拍）', () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     const h = setup({ flushIntervalMs: 5 });
     h.flusher.close();
     assert.equal(runtimeRows(h.db).length, 2, 'close 里带了最后一次 flush');
 
     h.pool.reportFailure(h.keyIds[0], 'NETWORK');
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    // 推进 200 拍。停表必须是**结构性**的：原来那条 `sleep(40)` 只能证明
+    // "这 40ms 里恰好没触发"，而 40ms 刚好是 flushIntervalMs 的 8 倍，纯属碰运气。
+    vi.advanceTimersByTime(1000);
     const row = runtimeRows(h.db).find((r) => r.key_id === h.keyIds[0]);
     assert.equal(row?.last_failure_reason, null, '表已停，不该再有自动写入');
     assert.equal(h.flusher.flush(), 1, '但 flush 仍可显式调用');

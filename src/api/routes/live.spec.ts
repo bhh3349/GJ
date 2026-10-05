@@ -12,6 +12,15 @@
 //
 // 关闭码在断言里写**字面量**而不是引 `WS_CLOSE`：契约 §7 才是判据，
 // 引用被测代码里的常量会让"常量被改错"这类回归测试不出来。
+//
+// **确定性纪律**（本文件不接受"睡一觉再断言"）：
+//   帧到达是事件，不是时间。等待一律挂在 socket 的 `message`/`close` 事件上
+//   （`waitFor*` 的 timeout 只把"永远等不到"变成一条带上下文的失败信息，不参与通过路径）；
+//   "状态没变就不推"这类**否定断言**用 `metrics` 做拍边界屏障 —— 同一拍里它是**首帧**，
+//   所以"收到第 n 帧 metrics"等价于"第 n-1 拍发出的帧全部已经过线"，无需赌时间窗。
+//   拍子本身也归测试所有（`liveAutoTick: false`）：真实的 1s 定时器只要还在跑，
+//   长用例就会被它插进额外的拍，屏障计数随之失真。
+//   唯一的真实时钟断言是就绪超时：那个 5s 是契约自己规定的数字，缩短它就是在测另一个契约。
 
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -89,7 +98,9 @@ async function setup(): Promise<Harness> {
   dirs.push(dir);
   const dbPath = join(dir, 'gateway.db');
   const db = openDatabase({ path: dbPath });
-  const app = buildApp({ db, config: makeConfig(dbPath) });
+  // 关掉真实的 1s 推帧定时器：拍子只由 `tick(h, box, n)` 驱动。
+  // 留着它的话，一条用例只要跑过 1s，屏障计数就会被它插进来的拍污染。
+  const app = buildApp({ db, config: makeConfig(dbPath), liveAutoTick: false });
   bootstrapAdmin(db, { ADMIN_USERNAME: ADMIN_USER, ADMIN_PASSWORD: ADMIN_PASS });
 
   const res = await app.inject({
@@ -125,16 +136,33 @@ interface Box {
   closeCode: number | null;
   closeReason: string;
   count(type: string): number;
+  frames(type: string): Frame[];
   last(type: string): Frame | undefined;
   waitFor(type: string, timeoutMs?: number): Promise<Frame>;
+  /** 等**任意一帧**满足谓词（用于"同一个 type 的第二个/第三个值"这种断言）。 */
+  waitForFrame(pred: (f: Frame) => boolean, label: string, timeoutMs?: number): Promise<Frame>;
+  waitForCount(type: string, n: number, timeoutMs?: number): Promise<void>;
   waitClose(timeoutMs?: number): Promise<number>;
 }
 
-/** 收帧盒子：把异步到达的帧攒起来，断言侧按类型取。 */
+/** 收帧盒子：把异步到达的帧攒起来，并在帧到达的那一刻唤醒等待者。 */
 function createBox(socket: WebSocket): Box {
   const received: Frame[] = [];
   let closeCode: number | null = null;
   let closeReason = '';
+
+  /**
+   * 等待者只在**事件**里被唤醒：帧到达即检查，不轮询。
+   * 轮询式等待（`for(;;) sleep(5)`）在实现上仍是对的，但它把"多久之后算失败"和
+   * "多久之后算成功"绑在同一个真实时钟上 —— 这里是刻意不留这条缝。
+   */
+  const waiters = new Set<{ check: () => boolean }>();
+
+  const signal = (): void => {
+    for (const w of [...waiters]) {
+      if (w.check()) waiters.delete(w); // check() 命中时内部已经 resolve
+    }
+  };
 
   socket.on('message', (raw: unknown) => {
     try {
@@ -142,23 +170,37 @@ function createBox(socket: WebSocket): Box {
     } catch {
       // 非 JSON 帧不该出现；丢掉，让"等不到某帧"的断言去暴露
     }
+    signal();
   });
   socket.on('close', (code: number, reason: Buffer) => {
     closeCode = code;
     closeReason = reason.toString('utf8');
+    signal();
   });
 
-  const waitUntil = async <T>(get: () => T | undefined, label: string, timeoutMs: number): Promise<T> => {
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-      const value = get();
-      if (value !== undefined) return value;
-      if (Date.now() >= deadline) {
-        throw new Error(`等待「${label}」超时（${timeoutMs}ms）；已收帧：${received.map((m) => String(m['type'])).join(',') || '（无）'}`);
-      }
-      await new Promise((r) => setTimeout(r, 5));
-    }
-  };
+  const describeReceived = (): string =>
+    received.map((m) => String(m['type'])).join(',') || '（无）';
+
+  function waitFor<T>(check: () => T | undefined, label: string, timeoutMs: number): Promise<T> {
+    const hit = check();
+    if (hit !== undefined) return Promise.resolve(hit);
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        waiters.delete(waiter);
+        reject(new Error(`等待「${label}」超时（${timeoutMs}ms）；已收帧：${describeReceived()}`));
+      }, timeoutMs);
+      const waiter: { check: () => boolean } = {
+        check: () => {
+          const value = check();
+          if (value === undefined) return false;
+          clearTimeout(timer);
+          resolve(value);
+          return true;
+        },
+      };
+      waiters.add(waiter);
+    });
+  }
 
   return {
     socket,
@@ -170,10 +212,32 @@ function createBox(socket: WebSocket): Box {
       return closeReason;
     },
     count: (type) => received.filter((m) => m['type'] === type).length,
+    frames: (type) => received.filter((m) => m['type'] === type),
     last: (type) => received.filter((m) => m['type'] === type).pop(),
-    waitFor: (type, timeoutMs = 3000) => waitUntil(() => received.find((m) => m['type'] === type), type, timeoutMs),
-    waitClose: (timeoutMs = 3000) => waitUntil(() => (closeCode === null ? undefined : closeCode), 'close', timeoutMs),
+    waitFor: (type, timeoutMs = 3000) => waitFor(() => received.find((m) => m['type'] === type), type, timeoutMs),
+    waitForFrame: (pred, label, timeoutMs = 3000) => waitFor(() => received.find(pred), label, timeoutMs),
+    waitForCount: async (type, n, timeoutMs = 3000) => {
+      await waitFor(
+        () => (received.filter((m) => m['type'] === type).length >= n ? true : undefined),
+        `第 ${n} 帧 ${type}`,
+        timeoutMs,
+      );
+    },
+    waitClose: (timeoutMs = 3000) => waitFor(() => (closeCode === null ? undefined : closeCode), 'close', timeoutMs),
   };
+}
+
+/**
+ * 跑第 `n` 拍，返回时保证**第 `n-1` 拍**发出的帧全部已经到齐。
+ *
+ * 屏障之所以成立：`live.ts` 在同一拍里把 `metrics` 作为**首帧**发出（下一用例钉死这条），
+ * 而单条连接上的帧保序，所以"收到第 n 帧 metrics"⇒"第 n-1 拍的所有帧都已经过线"。
+ * 于是否定断言（"不该多出一帧 key_health"）不必再靠 settle 赌时间窗：
+ * 想断言前 n 拍，就多跑一拍当屏障，然后读到的就是前 n 拍的完整集合。
+ */
+async function tick(h: Harness, box: Box, n: number): Promise<void> {
+  h.app.liveHub.tickNow();
+  await box.waitForCount('metrics', n);
 }
 
 /** 仅注入连接（不握手），用于"握手之前就该被拒"的用例。 */
@@ -189,11 +253,6 @@ async function attach(h: Harness): Promise<Box> {
   box.socket.send(JSON.stringify({ type: 'auth' }));
   await box.waitFor('ready');
   return box;
-}
-
-/** 让已写出的帧走完事件循环（帧是异步到达的，断言前要让它落地）。 */
-async function settle(): Promise<void> {
-  await new Promise((r) => setTimeout(r, 30));
 }
 
 async function createUpstream(h: Harness): Promise<string> {
@@ -263,16 +322,33 @@ describe('WS /api/stats/live 握手与鉴权', () => {
     expect(res.statusCode).toBe(404);
   });
 
-  it('就绪超时：5s 内不发 auth 帧 → 服务端 4408', { timeout: 15_000 }, async () => {
+  it('就绪超时：5s 内不发 auth 帧 → 服务端 4408', { timeout: 20_000 }, async () => {
     const h = await setup();
     const box = await openSocket(h, { cookie: h.cookie });
-    // 这里的 5s 是契约自己规定的数字，缩短它就等于在测另一个契约
-    expect(await box.waitClose(8000)).toBe(4408);
+    const startedAt = Date.now();
+    // 唯一一处必须走真实时钟的断言。5s 是契约自己规定的数字，缩短它就等于在测另一个契约。
+    // 下界是确定的（定时器不会提前触发）：没有它，"实现改成 1s 就关"这种回归测不出来。
+    expect(await box.waitClose(15_000)).toBe(4408);
+    expect(Date.now() - startedAt).toBeGreaterThanOrEqual(4_800);
     expect(box.count('ready')).toBe(0);
   });
 });
 
 describe('WS /api/stats/live 推帧', () => {
+  it('同一拍内 metrics 是首帧 —— 本文件所有「第 n 帧 metrics = 拍屏障」都建立在这条上', async () => {
+    const h = await setup();
+    const upstreamId = await createUpstream(h);
+    await createBalanceKey(h, upstreamId, 500);
+
+    const box = await attach(h);
+    await tick(h, box, 1);
+    await box.waitFor('key_health');
+    // 屏障锚点：metrics 先于本拍的差分帧。顺序变了这条会当场红，
+    // 而不是让别的用例静默失去屏障、退回"赌时间窗"。
+    expect(box.received[0]?.['type']).toBe('ready');
+    expect(box.received[1]?.['type']).toBe('metrics');
+  });
+
   it('ready 带 serverTime/intervalMs；metrics 每 tick 一帧，口径与 §7 对齐', async () => {
     const h = await setup();
     const box = await openSocket(h, { cookie: h.cookie });
@@ -282,7 +358,7 @@ describe('WS /api/stats/live 推帧', () => {
     expect(ready['intervalMs']).toBe(1000);
     expect(new Date(String(ready['serverTime'])).toISOString()).toBe(ready['serverTime']);
 
-    h.app.liveHub.tickNow();
+    await tick(h, box, 1);
     const metrics = await box.waitFor('metrics');
     expect(metrics['window']).toBe('60s');
     expect(metrics['requests']).toBe(0);
@@ -298,7 +374,7 @@ describe('WS /api/stats/live 推帧', () => {
     const keyId = await createBalanceKey(h, upstreamId, 1200);
 
     const box = await attach(h);
-    h.app.liveHub.tickNow();
+    await tick(h, box, 1);
     const first = await box.waitFor('balance');
     expect(first['keyId']).toBe(keyId);
     expect(first['balance']).toBe(1200);
@@ -313,9 +389,8 @@ describe('WS /api/stats/live 推帧', () => {
       payload: { balance: 300 },
     });
     expect(put.statusCode, put.body).toBe(200);
-    h.app.liveHub.tickNow();
-    await settle();
-    expect(box.last('balance')?.['balance']).toBe(300);
+    await tick(h, box, 2);
+    await box.waitForFrame((f) => f['type'] === 'balance' && f['balance'] === 300, 'balance=300');
 
     // 置回"未知"：必须是 null，不能被顺手写成 0
     const cleared = await h.app.inject({
@@ -325,12 +400,13 @@ describe('WS /api/stats/live 推帧', () => {
       payload: { balance: null },
     });
     expect(cleared.statusCode, cleared.body).toBe(200);
-    h.app.liveHub.tickNow();
-    const afterClear = box.last('balance');
-    await settle();
-    const frames = box.received.filter((m) => m['type'] === 'balance');
-    expect(frames[frames.length - 1]?.['balance']).toBeNull();
-    expect(afterClear?.['balance']).toBe(300); // settle 前最后一帧仍是旧值：确认不是碰巧
+    await tick(h, box, 3);
+    await box.waitForFrame((f) => f['type'] === 'balance' && f['balance'] === null, 'balance=null');
+    await tick(h, box, 4); // 屏障：第 3 拍全部到齐
+
+    // 断言**整条序列**而不是"最后读到什么就是什么"：多推一帧、漏推一帧、
+    // 或把 null 写成 0，都会在这里现形
+    expect(box.frames('balance').map((f) => f['balance'])).toEqual([1200, 300, null]);
   });
 
   it('差分：状态没变的 key 不重复推 key_health', async () => {
@@ -339,16 +415,17 @@ describe('WS /api/stats/live 推帧', () => {
     await createBalanceKey(h, upstreamId, 500);
 
     const box = await attach(h);
-    h.app.liveHub.tickNow();
+    await tick(h, box, 1);
     await box.waitFor('key_health');
-    await settle();
 
-    h.app.liveHub.tickNow();
-    h.app.liveHub.tickNow();
-    await settle();
-    // 三帧 metrics（每 tick 都有），但 key_health 只在第一 tick 出现一次
+    // 第 2、3 拍照跑，第 4 拍只当屏障：它到齐即证明前 3 拍一帧不漏地都在
+    await tick(h, box, 2);
+    await tick(h, box, 3);
+    await tick(h, box, 4);
+
+    // 新连接的首拍推全量（它什么都没记过），此后状态没变就不该再有 key_health
     expect(box.count('key_health')).toBe(1);
-    expect(box.count('metrics')).toBeGreaterThanOrEqual(3);
+    expect(box.count('metrics')).toBe(4); // 每拍恰好一帧
   });
 
   it('会话在连接中途失效：4401 关连接（不是等到自然过期）', async () => {

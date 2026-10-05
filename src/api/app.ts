@@ -95,6 +95,15 @@ export interface BuildAppOptions {
    * 否则这里创建的实例没人有机会 prune（进程不重启就一直攒）。
    */
   loginLimiter?: LoginRateLimiter;
+  /**
+   * 推帧节拍是否由真实定时器驱动，默认 `true`（线上行为）。
+   *
+   * 测试注入 `false`：拍子完全由 `tickNow()` 驱动。不这么做的后果不是"慢"，而是**错**——
+   * 一条用例只要整体跑了 1s 以上，真实的 1s 定时器就会插进额外的拍，
+   * 于是"收到第 n 帧 metrics = 前 n-1 拍已全部过线"的屏障推理静默失效，
+   * 断言退化成"赌这个用例跑得比定时器快"。
+   */
+  liveAutoTick?: boolean;
 }
 
 export function buildApp(opts: BuildAppOptions): FastifyInstance {
@@ -184,7 +193,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   //   2. WS 路由必须写在 `register` 回调里（见下面那段）。这不是风格问题 ——
   //      直接 `registerLiveRoutes(app, ...)` 会让这条路由**静默地变成一个普通 GET**。
   //   3. 其余路由不这么写，因为它们的注册只依赖已经就绪的钩子，与加载次序无关。
-  const liveHub = createLiveHub(db, app.log);
+  const liveHub = createLiveHub(db, app.log, { autoTick: opts.liveAutoTick ?? true });
   app.decorate('liveHub', liveHub);
   app.register(fastifyWebsocket, {
     preClose: (done) => {

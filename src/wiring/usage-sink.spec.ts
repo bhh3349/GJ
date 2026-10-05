@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
-import { afterEach, describe, it } from 'vitest';
+import { afterEach, describe, it, vi } from 'vitest';
 
 import { openDatabase, type Db } from '../db/database.js';
 import type { UsageLogEntry } from '../gateway/ports.js';
@@ -41,6 +41,8 @@ afterEach(() => {
       /* Windows 上偶尔仍被短时占用 */
     }
   }
+  // 放在最后：先让 close() 用假定时器把手上的 interval 清掉，再卸掉假时钟
+  vi.useRealTimers();
 });
 
 interface Harness {
@@ -196,11 +198,17 @@ describe('落库', () => {
     assert.equal(row.error_code, 'NO_AVAILABLE_KEY');
   });
 
-  it('定时器到点自动落库（不是只在退出时刷）', async () => {
+  // 假定时器：到点由测试推进。原来那条 `setInterval(20)` + `sleep(80)` 的判据里
+  // 掺了"机器这 80ms 有多闲"，在 CI 上偶发红；推进时间轴才是"到点"的确定含义。
+  // `toFake` 只点名 interval，不碰 Date（本文件没有依赖真实当下的断言，但不留这条缝）。
+  it('定时器到点自动落库（不是只在退出时刷）', () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
     const h = setup({ flushIntervalMs: 20 });
     h.sink.record(entry());
-    await new Promise((resolve) => setTimeout(resolve, 80));
 
+    assert.equal(rowCount(h.db), 0, 'record 只入队：没到点前一行都不该有');
+
+    vi.advanceTimersByTime(20);
     assert.equal(rowCount(h.db), 1);
     assert.equal(h.sink.pending(), 0);
   });

@@ -246,6 +246,8 @@ class Hub implements LiveHub {
   constructor(
     private readonly db: Db,
     private readonly log: FastifyBaseLogger,
+    /** false = 不装真实定时器（拍子只由 `tickNow()` 驱动，见 `LiveHubOptions`）。 */
+    private readonly autoTick: boolean = true,
   ) {}
 
   size(): number {
@@ -280,6 +282,7 @@ class Hub implements LiveHub {
 
   private ensureTimer(): void {
     if (this.timer !== null) return;
+    if (!this.autoTick) return;
     const timer = setInterval(() => this.tickNow(), TICK_MS);
     // 不为进程续命：ticker 活着只说明"有人在看仪表盘"，不说明"服务该运行"
     timer.unref();
@@ -366,8 +369,16 @@ class Hub implements LiveHub {
   }
 }
 
-export function createLiveHub(db: Db, log: FastifyBaseLogger): LiveHub {
-  return new Hub(db, log);
+export interface LiveHubOptions {
+  /**
+   * 是否由真实 1s 定时器驱动推帧，默认 `true`（契约 §7 的线上节奏）。
+   * 测试传 `false`，把拍子完全交给 `tickNow()` —— 理由与 `BuildAppOptions.liveAutoTick` 同。
+   */
+  autoTick?: boolean;
+}
+
+export function createLiveHub(db: Db, log: FastifyBaseLogger, options: LiveHubOptions = {}): LiveHub {
+  return new Hub(db, log, options.autoTick ?? true);
 }
 
 /**

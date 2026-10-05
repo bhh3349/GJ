@@ -8,7 +8,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'vitest';
 
-import { MAX_COOLDOWN_MS, MINUTE, NETWORK_BASE_MS, nextCooldownMs } from './cooldown.js';
+import { MAX_COOLDOWN_MS, MINUTE, NETWORK_BASE_MS, UPSTREAM_ERROR_BASE_MS, nextCooldownMs } from './cooldown.js';
 import { createKeyPool } from './key-pool.js';
 import type { KeyConfig, PoolSnapshot, TokenUsage } from './types.js';
 
@@ -111,6 +111,31 @@ describe('冷却映射', () => {
     assert.equal(nextCooldownMs({ reason: 'INSUFFICIENT_BALANCE', consecutiveFails: 1 }), MAX_COOLDOWN_MS);
     assert.equal(nextCooldownMs({ reason: 'RATE_LIMITED', consecutiveFails: 1 }), MINUTE);
     assert.equal(nextCooldownMs({ reason: 'RATE_LIMITED', consecutiveFails: 1, retryAfterMs: 120_000 }), 120_000);
+  });
+
+  it('阶梯可整条替换（env COOLDOWN_LADDER_SECONDS）：升档按自定义，封顶与基础冷却不变', () => {
+    // 阶梯与基础冷却取 max：调低阶梯不会把某类失败压到基础冷却以下
+    assert.equal(nextCooldownMs({ reason: 'UPSTREAM_ERROR', consecutiveFails: 3, ladderMs: [1_000, 2_000] }), UPSTREAM_ERROR_BASE_MS);
+    // 调高阶梯立刻生效（第 2 档 60s 而不是冻结的 5m），超出长度取最后一档
+    assert.equal(nextCooldownMs({ reason: 'UPSTREAM_ERROR', consecutiveFails: 2, ladderMs: [30_000, 60_000] }), 60_000);
+    assert.equal(nextCooldownMs({ reason: 'UPSTREAM_ERROR', consecutiveFails: 9, ladderMs: [30_000, 60_000] }), 60_000);
+    // 超长阶梯仍被封顶在 MAX_COOLDOWN_MS（30min），不是静默截断阶梯
+    assert.equal(nextCooldownMs({ reason: 'NETWORK', consecutiveFails: 2, ladderMs: [0, 99 * MINUTE] }), MAX_COOLDOWN_MS);
+    // 长冷却不会因为换阶梯而变短
+    assert.equal(nextCooldownMs({ reason: 'AUTH_INVALID', consecutiveFails: 3, ladderMs: [1_000, 2_000] }), MAX_COOLDOWN_MS);
+  });
+
+  it('池按自定义阶梯计算冷却（PoolOptions.cooldownLadderMs 真的生效）', () => {
+    clock = 1_700_000_000_000;
+    const pool = createKeyPool({ now, cooldownLadderMs: [30_000, 60_000, 120_000] });
+    pool.applySnapshot(snapshot([balanceKey('k1')]));
+
+    pool.reportFailure('k1', 'UPSTREAM_ERROR');
+    assert.equal((pool.view()[0]?.cooldownUntil ?? 0) - clock, 30_000, '第 1 档');
+
+    clock += 30_001; // 等冷却过去，制造第 2 次连续失败
+    pool.reportFailure('k1', 'UPSTREAM_ERROR');
+    assert.equal((pool.view()[0]?.cooldownUntil ?? 0) - clock, 60_000, '第 2 档，而不是冻结的 5m');
   });
 });
 

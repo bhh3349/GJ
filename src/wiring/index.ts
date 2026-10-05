@@ -10,5 +10,7 @@ export { createSecretResolver } from './secrets.js';
 export type { DbSecretResolver, SecretRow, SecretResolverOptions } from './secrets.js';
 export { createUsageLogSink } from './usage-sink.js';
 export type { UsageSink, UsageSinkOptions } from './usage-sink.js';
+export { createKeyRuntimeFlusher } from './key-runtime-flusher.js';
+export type { KeyPoolView, KeyRuntimeFlusher, KeyRuntimeFlusherOptions } from './key-runtime-flusher.js';
 export { createGatewayRuntime, mountGatewayRoutes } from './runtime.js';
 export type { GatewayRuntime, GatewayRuntimeOptions } from './runtime.js';

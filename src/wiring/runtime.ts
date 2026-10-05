@@ -28,6 +28,8 @@ import type { FetchLike } from '../gateway/engine.js';
 import { createGatewayStack } from '../gateway/stack.js';
 import type { GatewayStack } from '../gateway/stack.js';
 import { createDbGatewayAuth } from './auth.js';
+import { createKeyRuntimeFlusher } from './key-runtime-flusher.js';
+import type { KeyRuntimeFlusher } from './key-runtime-flusher.js';
 import { createGatewayStore } from './store.js';
 import type { GatewayStore } from './store.js';
 import { createUsageLogSink } from './usage-sink.js';
@@ -55,6 +57,11 @@ export interface GatewayRuntime {
   stack: GatewayStack;
   store: GatewayStore;
   sink: UsageSink;
+  /**
+   * `key_runtime` 运行态镜像（ADR-0010）。管理端的 `?health=` 与健康灯读的就是它写的表 ——
+   * 没有它，契约 §3 的四个字段恒为 healthy/0，看板上是假数据。
+   */
+  mirror: KeyRuntimeFlusher;
   /** 启动 1s 快照轮询（幂等） */
   start(): void;
   /** 停轮询 + 最后一次用量落库 + 丢弃明文。不关 app（由调用方 `app.close()`） */
@@ -97,7 +104,11 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions): GatewayRun
     auth: createDbGatewayAuth(db),
     logs: sink,
     maxAttempts: config.maxAttempts,
-    poolOptions: { defaultMaxConcurrency: config.maxConcurrencyPerKey },
+    poolOptions: {
+      defaultMaxConcurrency: config.maxConcurrencyPerKey,
+      // 阶梯的单位在配置层是秒（与 env 同口径），内核一律用 ms
+      cooldownLadderMs: config.cooldownLadderSeconds.map((s) => s * 1000),
+    },
     ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
   });
 
@@ -105,6 +116,17 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions): GatewayRun
   stack.pool.onAlert = (event) => {
     app.log.warn({ alert: event }, 'KeyPool 告警');
   };
+
+  // 运行态镜像：必须在 applySnapshot 之后建（否则第一个周期看到的池子是空的，
+  // 会把"上一进程的陈旧行"当成现状原样留在表里）。ADR-0010。
+  const mirror = createKeyRuntimeFlusher({
+    db,
+    pool: stack.pool,
+    onError: (err) => {
+      // 镜像不是账，丢一拍可以，但必须留痕：管理端健康灯停更只有日志能解释
+      app.log.error({ err }, 'key_runtime 镜像刷写失败');
+    },
+  });
 
   let pollTimer: NodeJS.Timeout | null = null;
 
@@ -119,8 +141,12 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions): GatewayRun
       clearInterval(pollTimer);
       pollTimer = null;
     }
-    // 顺序有意义：先落库（队列里最后一批是真实流量，丢了就是对账缺口），再丢明文
+    // 顺序有意义：
+    //   1. 先落用量（队列里最后一批是真实流量，丢了就是对账缺口）；
+    //   2. 再把最后一版运行态镜像写进 key_runtime（否则管理端停在上一拍，健康灯看着像卡住）；
+    //   3. 最后丢明文 —— 前两步都还在用池/库，明文缓存得活到最后。
     sink.close();
+    mirror.close();
     store.secrets.clear();
     return Promise.resolve();
   }
@@ -130,6 +156,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions): GatewayRun
     stack,
     store,
     sink,
+    mirror,
 
     start(): void {
       if (pollTimer !== null) return;

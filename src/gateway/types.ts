@@ -84,6 +84,12 @@ export interface PoolOptions {
   defaultMaxConcurrency?: number;
   /** 冷却封顶，默认 30min */
   maxCooldownMs?: number;
+  /**
+   * 冷却阶梯（ms），下标 = 连续失败次数 - 1，最后一档即封顶档。
+   * 缺省 = 冻结常量 1m → 5m → 15m → 30m。来源 env `COOLDOWN_LADDER_SECONDS`（`src/config.ts` 校验）。
+   * 注意：**只换阶梯，不换封顶** —— 结果仍受 MAX_COOLDOWN_MS 与各 reason 基础冷却约束。
+   */
+  cooldownLadderMs?: readonly number[];
   /** 注入时钟，便于单测；默认 Date.now */
   now?: () => number;
   /** 连续失败达到该值上报自动禁用告警（v1.1 §四.2「连续 N 次自动禁用」），默认 5 */

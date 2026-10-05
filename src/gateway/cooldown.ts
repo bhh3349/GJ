@@ -22,6 +22,15 @@ export const MAX_COOLDOWN_MS = 30 * MINUTE;
 /** 半开探测阶梯：下标 = 连续失败次数 - 1 */
 const LADDER_MS: readonly number[] = [0, MINUTE, 5 * MINUTE, 15 * MINUTE, MAX_COOLDOWN_MS];
 
+/**
+ * 默认阶梯（冻结常量）。
+ *
+ * 可经 `PoolOptions.cooldownLadderMs`（env `COOLDOWN_LADDER_SECONDS`）整条替换，
+ * 但**封顶不变**：结果仍受 `MAX_COOLDOWN_MS` 与各 reason 的基础冷却约束，
+ * 所以换阶梯只影响"连续失败后的升档速度"，不会把 AUTH_INVALID 的 30min 长冷却改短。
+ */
+export const DEFAULT_COOLDOWN_LADDER_MS: readonly number[] = LADDER_MS;
+
 /** 未给 Retry-After 时 429 的默认冷却 */
 export const RATE_LIMITED_DEFAULT_MS = 60 * SECOND;
 
@@ -51,10 +60,10 @@ export function reasonBaseCooldownMs(reason: FailureReason, retryAfterMs?: numbe
   }
 }
 
-/** 半开探测阶梯值；n<1 视为首次 */
-export function ladderCooldownMs(consecutiveFails: number): number {
-  const idx = Math.max(0, Math.min(consecutiveFails - 1, LADDER_MS.length - 1));
-  return LADDER_MS[idx] ?? MAX_COOLDOWN_MS;
+/** 半开探测阶梯值；n<1 视为首次。超出阶梯长度取最后一档（封顶档） */
+export function ladderCooldownMs(consecutiveFails: number, ladderMs: readonly number[] = LADDER_MS): number {
+  const idx = Math.max(0, Math.min(consecutiveFails - 1, ladderMs.length - 1));
+  return ladderMs[idx] ?? MAX_COOLDOWN_MS;
 }
 
 /** 计算本次应进入的冷却时长（ms），结果恒落在 [0, MAX_COOLDOWN_MS] */
@@ -63,9 +72,11 @@ export function nextCooldownMs(input: {
   consecutiveFails: number;
   retryAfterMs?: number;
   maxCooldownMs?: number;
+  /** 覆盖阶梯；缺省用冻结常量。见 `DEFAULT_COOLDOWN_LADDER_MS` 的封顶说明 */
+  ladderMs?: readonly number[];
 }): number {
   const cap = input.maxCooldownMs ?? MAX_COOLDOWN_MS;
   const base = reasonBaseCooldownMs(input.reason, input.retryAfterMs);
-  const ladder = ladderCooldownMs(input.consecutiveFails);
+  const ladder = ladderCooldownMs(input.consecutiveFails, input.ladderMs);
   return Math.min(Math.max(base, ladder), cap);
 }

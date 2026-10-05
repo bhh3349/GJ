@@ -23,7 +23,7 @@ import type { AppConfig } from '../config.js';
 import { sha256Hex } from '../db/crypto.js';
 import { openDatabase, type Db } from '../db/database.js';
 import { createGroup } from '../db/repo/groups.js';
-import { createKey } from '../db/repo/keys.js';
+import { createKey, listKeys } from '../db/repo/keys.js';
 import { upsertModelFromSync, getModel, updateModel } from '../db/repo/models.js';
 import { createUpstream } from '../db/repo/upstreams.js';
 import type { FetchLike } from '../gateway/engine.js';
@@ -77,6 +77,7 @@ function makeConfig(dbPath: string): AppConfig {
     logRetentionDays: 30,
     maxAttempts: 3,
     maxConcurrencyPerKey: 4,
+    cooldownLadderSeconds: [60, 300, 900, 1800],
   };
 }
 
@@ -299,6 +300,26 @@ describe('转发链路', () => {
     assert.equal(res.statusCode, 503);
     assert.equal((res.json() as { error: { code: string } }).error.code, 'NO_AVAILABLE_KEY');
     assert.equal(h.calls.length, 0, '候选为空时一个出站请求都不该发');
+  });
+
+  it('失败 key 的运行态经镜像落进 key_runtime：管理端 ?health=cooling 查得到（ADR-0010 接线）', async () => {
+    // 只让第一把 401：第二把要能成功，否则两把都进冷却，就分不出"镜像写对了谁"
+    const h = await setup((_url, init) =>
+      (init.headers as Record<string, string>).authorization === `Bearer ${h.keyPlain1}`
+        ? jsonResponse({ error: { message: 'bad key' } }, 401)
+        : jsonResponse(COMPLETION),
+    );
+    await chat(h);
+
+    // 这是从 /v1/* 转发链路一路到管理面读路径的端到端：池内存 → mirror → key_runtime → listKeys
+    h.runtime.mirror.flush();
+    const cooling = listKeys(h.db, { health: 'cooling', includeDeleted: false, page: 1, pageSize: 10 });
+    assert.equal(cooling.total, 1, '只有被 401 打掉的那把在冷却；另一把仍是 healthy');
+    assert.equal(cooling.items[0]?.id, h.keyId1);
+    assert.equal(cooling.items[0]?.consecutiveFailures, 1);
+    assert.equal(cooling.items[0]?.lastFailureReason, 'AUTH_INVALID');
+    assert.ok(cooling.items[0]?.cooldownUntil != null, 'cooling 必须带未来时刻，否则管理端读路径不会判成 cooling');
+    assert.equal(listKeys(h.db, { health: 'healthy', includeDeleted: false, page: 1, pageSize: 10 }).total, 1);
   });
 
   it('未实现的端点 → 501（不是 404，前端据此区分"没实现"与"写错路径"）', async () => {

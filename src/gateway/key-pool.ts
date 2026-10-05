@@ -116,6 +116,7 @@ function isUsable(key: KeyConfig, rt: KeyRuntimeState & RuntimeExtras, now: numb
 export function createKeyPool(options: PoolOptions = {}): KeyPoolInternal {
   const now = options.now ?? Date.now;
   const maxCooldownMs = options.maxCooldownMs;
+  const cooldownLadderMs = options.cooldownLadderMs;
   const autoDisableAfter = options.autoDisableAfterConsecutiveFails ?? DEFAULT_AUTO_DISABLE_AFTER;
   const defaultMaxConcurrency = options.defaultMaxConcurrency ?? DEFAULT_MAX_CONCURRENCY;
   const usageSink = options.usageSink;
@@ -187,7 +188,15 @@ export function createKeyPool(options: PoolOptions = {}): KeyPoolInternal {
       rt.consecutiveFails += 1;
       rt.lastFailureAt = t;
       rt.lastFailureReason = reason;
-      rt.cooldownUntil = t + nextCooldownMs({ reason, consecutiveFails: rt.consecutiveFails, retryAfterMs: opts?.retryAfterMs, maxCooldownMs });
+      rt.cooldownUntil =
+        t +
+        nextCooldownMs({
+          reason,
+          consecutiveFails: rt.consecutiveFails,
+          retryAfterMs: opts?.retryAfterMs,
+          maxCooldownMs,
+          ...(cooldownLadderMs === undefined ? {} : { ladderMs: cooldownLadderMs }),
+        });
 
       // v1.1 §四.2：401/403 连续 N 次 → 自动禁用 + 告警（长冷却已在 cooldown.ts 保证）
       if (reason === 'AUTH_INVALID' && !rt.autoDisabled && rt.consecutiveFails >= autoDisableAfter) {

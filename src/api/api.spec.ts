@@ -85,6 +85,7 @@ function makeConfig(dbPath: string): AppConfig {
     logRetentionDays: 30,
     maxAttempts: 3,
     maxConcurrencyPerKey: 4,
+    cooldownLadderSeconds: [60, 300, 900, 1800],
   };
 }
 

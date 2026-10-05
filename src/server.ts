@@ -35,7 +35,8 @@ async function main(): Promise<void> {
   const loginLimiter = new LoginRateLimiter();
   const app = buildApp({ db, config, logger: true, loginLimiter });
 
-  // 网关 runtime 自带内存快照 + 明文缓存，`stop()` 负责最后一次用量落库与清明文
+  // 网关 runtime 自带内存快照 + 明文缓存；`stop()` 负责最后一次用量落库、最后一次
+  // key 运行态镜像（ADR-0010）与清明文 —— 都在 db.close() 之前，否则 flush 会写到已关的连接上
   const gateway = createGatewayRuntime({ db, config, logger: true });
   await mountGatewayRoutes(gateway);
   gateway.start();

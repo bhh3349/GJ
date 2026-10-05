@@ -171,9 +171,13 @@ interface KeyPool {
 | `pnpm test:fault` | 401 / 429 / 超时 / 进程 kill 四类故障注入：断言客户端无感、首字节前切换 < 100ms | §九 2 |
 | `pnpm bench:ttfb` | 同机直连 vs 经网关，输出 TTFB 增量 P50/P99 | §九 3 |
 | `pnpm test` | 全量回归（第 9 条验收） | §九 9 |
-| 红线断言 | 扫描日志与 spool 文件，断言**不含 key 明文**（机器检查，非口头承诺） | §九 8 |
+| `pnpm check:secrets` | 扫描日志与 spool 文件，断言**不含 key 明文**（机器检查，非口头承诺） | §九 8 |
 
-**DoD**：`pnpm lint` / `pnpm typecheck` / `pnpm test` 全绿 + 可复现证据（命令与真实输出）+ 契约改动已回写 `docs/api-contract.md`。性能类验收必须报**同机直连基准对比**，不接受只有绝对值。
+> 上表 `test:gateway` / `test:fault` / `bench:ttfb` 三行是 **M0 冻结的语义名**，脚本尚未落地（M5 前补），**当前不可跑**；不得在门禁/CI/交付证据里当已存在的命令引用。
+
+**DoD**：门禁**四闸**全绿 —— `pnpm typecheck` / `pnpm test` / `pnpm build` / `pnpm check:secrets`（CI 另跑 `pnpm check:sqlite` 作原生绑定判据）+ 可复现证据（命令与真实输出）+ 契约改动已回写 `docs/api-contract.md`。性能类验收必须报**同机直连基准对比**，不接受只有绝对值。
+
+> `pnpm lint` 已于 2026-10-06 删除（仓库无 eslint 配置，脚本实际不可跑，属幽灵门禁），不再计入任何 DoD。
 
 ---
 

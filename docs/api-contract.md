@@ -7,6 +7,8 @@
 > **补遗 v1.0.1（2026-10-06，PM 已追认）**：§4 新增 `GET /api/groups/:id/keys`，并给 `reset` 的响应补上 `id`。动机与影响见 ADR-0008。
 >
 > **补遗 v1.0.2（2026-10-06）**：① §3 `POST /api/keys/:id/balance/refresh` 的响应补成 `202 {taskId}`（原文只写了用途、没写形状，而实现从第一天起就回 `202 {taskId}`，属于文本与实现的既存分歧，本次抹平）；② §5 新增「`POST /api/models/sync` 的字段映射」小节，把「只落能证明的、其余一律未知」写成明文规则；③ §5 补一句「同步不覆盖人工值」。除此之外 v1.0.1 全部内容不变 —— 无字段改名、无类型变更、无端点删除。动机与影响见 ADR-0009。
+>
+> **补遗 v1.0.3（2026-10-06）**：① §3 写明 `health` 等四个运行态字段的**来源与新鲜度**（网关进程 1s 批量镜像落 `key_runtime`，重启后归零），动机见 ADR-0010；② §6 新增「`costCents` 金额口径」小节 —— 契约此前**暴露**了 `costCents`（§4 Group、§6 usage 点）却从未**定义**它，未知单价该记 0 还是 null 无据可依；③ §10 把「无可用 key」与「候选用尽」两个 Terminating 结果拆开登记（`503 NO_AVAILABLE_KEY` ≠ `502 UPSTREAM_ERROR`，原文一句话把两者混在一起，与实现不符），并登记已在使用但未登记的 `504 UPSTREAM_TIMEOUT`。三处都是**文本对齐实现**，无字段改名、无类型变更、无端点增删。
 
 ---
 
@@ -201,6 +203,10 @@
 | `todayTokens` | int | 自然日（UTC）累计 token |
 
 > `health` 是**网关进程内**的运行时状态。管理端**不能写** `health`，只能写 `enabled`。`enabled=false` ⇒ 后端返回 `health="disabled"`，即使此前在冷却中。
+>
+> **这四个字段的来源与新鲜度（ADR-0010）**：网关进程是 `key_runtime` 表的**唯一写者**，它按约 **1s** 一次的节奏把内存里的运行态批量镜像进去（攒批、去重、只在值真的变了才写，且**不在 `/v1/*` 请求线程上**执行）。因此：管理端读到的运行态**最多滞后 1s**；`?health=cooling` 筛选与健康灯的口径由此表提供，而不是「永远 health」。
+> **重启后归零**：`key_runtime` **不参与冷启动**——网关启动时不恢复冷却与连续失败计数，第一个镜像周期会把全量状态（含归零的那些）写回，管理端在重启后 1s 内看到的就是归零后的真实值。这是**既定降级**，理由与备选方案见 ADR-0010。
+> 注意 `failCount`（累计失败总数）**只在 `/internal/snapshot` 上存在**，不落库、不在本对象里 —— 契约没承诺它。
 
 ### 端点
 
@@ -383,6 +389,19 @@
 ---
 
 ## 6. 统计 `/api/stats/*`
+
+### `costCents` 金额口径（强制，全节通用）
+
+`costCents` 由**网关进程在用量落库时**按上游真实模型名算一次，存进 `usage_logs.cost_cents`；本节所有 `costCents`（`/api/stats/overview` 的 `todayUsage`、`/api/stats/usage` 的 `series[].points`、§4 `Group.todayUsage`）都是对它的 `SUM`。
+
+```
+costCents = round(promptTokens    / 1000 * priceInputPer1k)
+          + round(completionTokens / 1000 * priceOutputPer1k)      // 单位：分，整数
+```
+
+**单价缺失（`models.price_*_per_1k = NULL`）时该项按 `0` 计，不做任何估算、不按同类模型代填。** 于是 `costCents=0` 有两种含义：真的免费/无消耗，或**单价未知**——调用方要区分就必须看模型档案里的价格是否为 `null`，不能把 `0` 当"免费"。
+
+> 与 §0.2「拿不到就是 `null`，不是 0」的关系：那条管的是**余额**（未知余额必须 `null`，因为它是可查询的事实）；而 `costCents` 是**统计聚合**，桶里缺失必须补 0（同 §6「缺失桶补 `0`」）。两者不冲突，但**未知单价计 0 会低报成本**——这是已知缺口，等 M4/M5 决定要不要引入「未知价格触发的估算标记」，届时走契约 + ADR。
 
 ### `GET /api/stats/overview?window=60s`
 仪表盘 4 张卡 + key 健康灯。
@@ -611,6 +630,7 @@
 ## 9. 与网关面的边界
 
 - 管理面**不改**网关运行态：`health`/`cooldownUntil`/`consecutiveFailures` 只读。
+- 反向的一条同样成立：**`key_runtime` 只由网关进程写**，管理面只读（单写者原则）。写入是约 1s 一次的**批量镜像**，不落在 `/v1/*` 请求线程上 —— 见 ADR-0010。
 - 管理面写 key 时递增 `revision`；网关靠共享 SQLite(WAL) + `change_log` + 1s 轮询兜底感知变更。
 - **热路径零同步 DB 写**：`/v1/*` 上的用量日志异步批量落库，不得挡在 TTFB 前面。
 
@@ -625,7 +645,24 @@
 | `GET /internal/snapshot` | 本机观测 |
 
 - 错误体：`{ "error": { "message": "...", "type": "...", "code": "..." } }`。
-- 无可用 key → **`503 NO_AVAILABLE_KEY`**。
+
+**`/v1/*` 错误码登记表**（改动需同步 `src/gateway/errors.ts` 的 `GATEWAY_ERROR_CODES`）
+
+| code | HTTP | `type` | 触发条件 |
+|---|---|---|---|
+| `INVALID_REQUEST` | 400 | `invalid_request_error` | body 不是 JSON 对象、缺 `model`/`messages`/`input` |
+| `INVALID_API_KEY` | 401 | `authentication_error` | 网关 key 缺失/未知/已吊销（**不区分**"不存在"与"已禁用"，避免探测窗口） |
+| `NOT_FOUND` | 404 | `invalid_request_error` | `/v1/*` 下未知路径 |
+| `RATE_LIMITED` | 429 | `rate_limit_error` | 用户组 RPM / TPM 超限 |
+| `QUOTA_EXCEEDED` | 429 | `insufficient_quota` | 用户组日配额（token）超限 |
+| `UNSUPPORTED_ENDPOINT` | 501 | `invalid_request_error` | image / audio / rerank 等未实现端点 |
+| `UPSTREAM_ERROR` | 502 | `api_error` | **候选存在但用尽**：重试上限内每把 key 都失败 |
+| `NO_AVAILABLE_KEY` | 503 | `server_error` | **候选为空**：该模型一把可用 key 都没有 |
+| `UPSTREAM_TIMEOUT` | 504 | `api_error` | 所有尝试都超时（首字节超时，默认 120s） |
+
+> 502 与 503 的分界是**候选集是否为空**，不是"最终有没有成功"：池子里有 key 但全试完仍失败 → `502 UPSTREAM_ERROR`；一把都选不出来 → `503 NO_AVAILABLE_KEY`。两者的排障含义完全不同（前者查上游，后者查池子/档案）。
+> 另有一个不对外承诺的内部结果：客户端中途断开时引擎会构造 `499 UPSTREAM_ERROR`，此时对端已不可达，`499` 不出现在任何真实响应里，**不入本表**。
+
 - 失败枚举（计入 key 失败，仅这五类）：`AUTH_INVALID` / `RATE_LIMITED` / `INSUFFICIENT_BALANCE` / `UPSTREAM_ERROR` / `NETWORK`。400/404/422 与客户端断开**不计**失败。
 
 ---
@@ -642,4 +679,4 @@
 
 ---
 
-*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-v1-frozen.md`。字段改动必须改本契约并新增 ADR。*
+*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。*

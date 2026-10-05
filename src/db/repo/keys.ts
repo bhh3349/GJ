@@ -5,8 +5,9 @@
 // 也不返回明文字段（maskedKey 是唯一出口形态）。
 //
 // health / cooldownUntil / consecutiveFailures 是**网关运行态**（key_runtime 表）：
-// 管理面只读，且**没有任何写它们的函数** —— 这条纪律靠"不提供 API"来保证，
-// 比靠文档约定可靠。
+// 管理面只读，且**本文件不提供任何写它们的函数** —— 这条纪律靠"不提供 API"来保证，
+// 比靠文档约定可靠。全仓唯一写 key_runtime 的地方是 `./key-runtime.ts`，
+// 调用方只有网关进程的运行态镜像（约 1s 一次批量刷写，见 ADR-0010）。
 
 import { ApiError } from '../../api/errors.js';
 import type { KeyCategory, KeyDto, KeyHealth, Page } from '../../api/dto.js';

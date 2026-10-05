@@ -28,7 +28,7 @@ export interface SyncSummary {
   inserted: number;
   updated: number;
   unchanged: number;
-  /** 按名字推断出的 type 条数 —— 不是从上游读来的，管理员应当知道 */
+  /** 本次**建档**时按名字推断出的 type 条数 —— 不是从上游读来的，管理员应当知道 */
   inferredTypeCount: number;
   errors: { upstreamId: string; upstreamName: string; message: string }[];
 }
@@ -182,7 +182,6 @@ export async function syncModels(
       const names = await fetchModelNames(upstream, credential, fetchImpl);
       for (const name of names) {
         const type = inferModelType(name);
-        summary.inferredTypeCount += 1;
         const model: SyncedModel = {
           upstreamId: upstream.id,
           name,
@@ -194,8 +193,12 @@ export async function syncModels(
           price: null,
         };
         const result = upsertModelFromSync(db, model);
-        if (result.action === 'inserted') summary.inserted += 1;
-        else if (result.action === 'updated') summary.updated += 1;
+        if (result.action === 'inserted') {
+          summary.inserted += 1;
+          // 只有**建档**时 type 才来自推断：已存在的行以库中现值为准（ADR-0009 §3），
+          // 所以这个计数回答的是"本次新猜了几条"，不是"本次猜了几分"。
+          summary.inferredTypeCount += 1;
+        } else if (result.action === 'updated') summary.updated += 1;
         else summary.unchanged += 1;
       }
     } catch (err) {

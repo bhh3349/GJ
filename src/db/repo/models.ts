@@ -268,17 +268,34 @@ export function upsertModelFromSync(db: Db, m: SyncedModel): UpsertResult {
     return { action: 'inserted', id };
   }
 
+  // 更新分支：**未知不覆盖已知**（契约 §5 / ADR-0009）。
+  //
+  // 同步只知道三件事：名字、同步时间、以及从名字猜出来的 type。`displayName: null`、
+  // `capabilities: []`、`price: null` 表达的是"上游没说"，**不是"上游说它没有"** ——
+  // 所以它们不构成写入理由。初版这里是无条件覆盖的，后果是管理员 PATCH 补好的价格
+  // 在下一次同步后静默变回 `null`：空值是"已知的未知"，被抹掉是"静默的数据丢失"，
+  // 后者的失效模式差一个量级。
+  //
+  // `enabled` 同理不参与（见函数头）：它是管理员的业务判断，不是同步的缓存。
+  const nextDisplayName = existing.display_name; // 同步从不产生 displayName
+  const nextType = existing.type; // 推断只用于建档，人工 PATCH 优先
+  const nextCaps = m.capabilities.length > 0 ? capsJson : existing.capabilities;
+  const nextContext = m.contextLength ?? existing.context_length;
+  const nextPriceIn = priceIn ?? existing.price_input_per_1k;
+  const nextPriceOut = priceOut ?? existing.price_output_per_1k;
+
   const changed =
-    existing.display_name !== m.displayName ||
-    existing.type !== m.type ||
-    existing.capabilities !== capsJson ||
-    existing.context_length !== m.contextLength ||
-    existing.price_input_per_1k !== priceIn ||
-    existing.price_output_per_1k !== priceOut;
+    existing.display_name !== nextDisplayName ||
+    existing.type !== nextType ||
+    existing.capabilities !== nextCaps ||
+    existing.context_length !== nextContext ||
+    existing.price_input_per_1k !== nextPriceIn ||
+    existing.price_output_per_1k !== nextPriceOut;
 
   if (!changed) {
     // 内容没变也要刷新 lastSyncedAt：它回答的是"上次拉到数据是什么时候"，
     // 不是"上次内容变化是什么时候"。前端用它判断数据新鲜度。
+    // revision 不涨、也不写 change_log —— 否则每同步一次都会给全部模型推一次前端刷新。
     db.prepare('UPDATE models SET last_synced_at = ? WHERE id = ?').run(at, existing.id);
     return { action: 'unchanged', id: existing.id };
   }
@@ -289,7 +306,17 @@ export function upsertModelFromSync(db: Db, m: SyncedModel): UpsertResult {
          price_input_per_1k = ?, price_output_per_1k = ?, last_synced_at = ?,
          revision = revision + 1, updated_at = ?
      WHERE id = ?`,
-  ).run(m.displayName, m.type, capsJson, m.contextLength, priceIn, priceOut, at, at, existing.id);
+  ).run(
+    nextDisplayName,
+    nextType,
+    nextCaps,
+    nextContext,
+    nextPriceIn,
+    nextPriceOut,
+    at,
+    at,
+    existing.id,
+  );
   appendChange(db, 'model', existing.id, 'update', existing.revision + 1);
   return { action: 'updated', id: existing.id };
 }

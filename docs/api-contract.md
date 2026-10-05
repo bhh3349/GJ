@@ -4,7 +4,9 @@
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
-> **补遗 v1.0.1（2026-10-06，待 PM 追认）**：§4 新增 `GET /api/groups/:id/keys`，并给 `reset` 的响应补上 `id`。除此之外 v1.0-frozen 全部内容不变 —— 无字段改名、无类型变更、无端点删除。动机与影响见 ADR-0008。
+> **补遗 v1.0.1（2026-10-06，PM 已追认）**：§4 新增 `GET /api/groups/:id/keys`，并给 `reset` 的响应补上 `id`。动机与影响见 ADR-0008。
+>
+> **补遗 v1.0.2（2026-10-06）**：① §3 `POST /api/keys/:id/balance/refresh` 的响应补成 `202 {taskId}`（原文只写了用途、没写形状，而实现从第一天起就回 `202 {taskId}`，属于文本与实现的既存分歧，本次抹平）；② §5 新增「`POST /api/models/sync` 的字段映射」小节，把「只落能证明的、其余一律未知」写成明文规则；③ §5 补一句「同步不覆盖人工值」。除此之外 v1.0.1 全部内容不变 —— 无字段改名、无类型变更、无端点删除。动机与影响见 ADR-0009。
 
 ---
 
@@ -210,7 +212,7 @@
 | `PATCH` | `/api/keys/:id` | 改 `{label?, enabled?, weight?, category?, tokenPlan?, revision}` |
 | `DELETE` | `/api/keys/:id` | 删 → `204` |
 | **`PUT`** | **`/api/keys/:id/balance`** | **手动录入余额**（见下） |
-| `POST` | `/api/keys/:id/balance/refresh` | 按模板查单个 key 余额 |
+| `POST` | `/api/keys/:id/balance/refresh` | 按模板查单个 key 余额 → `202 {taskId}`（异步，轮询 `GET /api/tasks/:id`） |
 | `POST` | `/api/keys/batch` | `{ids: [], action: "enable"\|"disable"}` → `{updated: 5}` |
 | `POST` | `/api/keys/balance/refresh` | 批量查余额 → `202 {taskId}` |
 
@@ -340,6 +342,28 @@
 | `POST` | `/api/models/sync` | `{upstreamId?}` 省略则全量 → `202 {taskId}` |
 
 `POST /api/models/sync` 是**异步任务**（上游拉取可能慢），不阻塞 HTTP。前端轮询 `GET /api/tasks/:id` 拿真实进度——**不许做假进度条**。
+
+### `POST /api/models/sync` 的字段映射（ADR-0009）
+
+上游 `/v1/models` 只回 `{id, object, created, owned_by}` —— **没有**能力、上下文长度、价格。所以同步只写它确实知道的东西：
+
+| 字段 | 同步写入 | 理由 |
+|---|---|---|
+| `name` | 上游 `id` | 唯一有证据的字段 |
+| `type` | **按名字推断**（规则表见 ADR-0009），命不中为 `chat` | 推断是显式的、可覆盖的：建档之后以库里现值为准，`PATCH /api/models/:id` 改过就不再被同步回退 |
+| `displayName` | `null` | 上游不给；不拿 `name` 顶替 |
+| `capabilities` | `[]` | 空数组 = **未声明**，不是「没有任何能力」 |
+| `contextLength` | `null` | 未知，前端显示 `—` |
+| `price` | `null` | 未知 **≠ 0**。编一个价格会让统计口径从第一秒起就是假的 |
+| `enabled` | 建档写 `1` | 建档即启用；是否真正服务由管理员在档案卡上关 |
+| `lastSyncedAt` | 本次同步时间 | 回答「上次拉到数据是什么时候」；内容没变也会刷新，前端用它判新鲜度 |
+
+两条不变量（改代码前先读这两条）：
+
+1. **永不编造**：上游没给的字段一律留空。任何「合理默认值」都是造假。
+2. **未知不覆盖已知**：同步只在**建档**时写这些字段；对已存在的模型，`null`/`[]` 不是「新值」，不构成覆盖理由。管理员 `PATCH` 补的 `price`/`capabilities`/`contextLength`/`type`/`displayName` 在下一次同步后原样保留 —— 否则「同步一次就抹掉刚录的价格」比不填更坏。
+
+任务 `result` 里带 `inferredTypeCount`：本次**建档**时靠推断定类型的条数。管理员据此知道有多少条 `type` 是猜的、不是从上游读来的。
 
 ### 任务对象 `GET /api/tasks/:id`
 ```json

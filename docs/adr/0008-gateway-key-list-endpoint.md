@@ -1,6 +1,6 @@
 # 8. 网关 key 列表端点：补上 `GET /api/groups/:id/keys`（契约 v1.0.1）
 
-- 状态：待追认（已实现并过门禁，等 PM 按 ADR-0007 的冻结纪律追认）
+- 状态：已接受（PM 于 2026-10-06 追认通过，契约 → v1.0.1）
 - 日期：2026-10-06
 - 决策者：管家 · 管理后端
 - 提出人：画师 · 前端（在 §8 真实接口接入时发现端点不可达）
@@ -83,5 +83,5 @@ DELETE /api/groups/:id/keys/:keyId           吊销
 
 ## 已知缺口（不在本次范围）
 
-- 网关 key 吊销是**硬删**，痕迹只在 `audit_log`。`gateway_keys` 表里其实有 `deleted_at` 列、查询也都带 `deleted_at IS NULL` 过滤 —— 即 schema 是按软删设计的，而吊销路径走了硬删。这是既存的不一致，本次不动它（改成软删会让「吊销过的 key」出现在别处，需要连带定义 `includeDeleted` 语义）。**留待 M4 统计看板前定夺**：要么删掉 `deleted_at` 列，要么吊销改软删并给本端点加 `includeDeleted`。两条路选一条，不要维持现状。
+- **软删 vs 硬删：已裁决（2026-10-06，PM 定案）——保留硬删。** `gateway_keys.deleted_at` 列删除、吊销路径维持物理删除，本端点**不引入** `includeDeleted` 语义。理由：网关 key 是凭据，吊销即应当失效且无需可恢复；吊销痕迹由 `audit_log` 承担；软删只会把「已吊销的 key」重新引入查询面，牵出无补偿价值的过滤分支。列删除 + 查询里 `deleted_at IS NULL` 过滤的清理**记入 M4 的 `src/db` 改造清单**（与 ADR-0009 提到的 `models.manual_fields` 评估同批 schema 变更），到点执行，不再另开 ADR。
 - `label` 列存在但签发路径恒写 `NULL`，所以 DTO 里没回它。要让 gateway key 可命名，是独立的一次改动。

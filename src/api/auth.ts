@@ -190,3 +190,17 @@ export function requireSession(db: Db, token: string | null, ttlHours: number): 
   if (!info) throw new ApiError('SESSION_EXPIRED', '会话已过期，请重新登录');
   return info;
 }
+
+/**
+ * 只读的会话存活判定，**不续期**。
+ *
+ * 给 WS 长连接用：那条连接已经建立，会话失效时不能抛 401（HTTP 响应早发完了），
+ * 只能主动关连接 —— 而每秒都 `touchSession` 会在长时间挂着的仪表盘上
+ * 每秒写一次库，把"滑动续期"变成一条常驻写路径。所以改成只读、低频复查。
+ */
+export function sessionAlive(db: Db, token: string): boolean {
+  const row = db
+    .prepare('SELECT expires_at FROM sessions WHERE token_hash = ?')
+    .get(sha256Hex(token)) as { expires_at: string } | undefined;
+  return row !== undefined && Date.parse(row.expires_at) > Date.now();
+}

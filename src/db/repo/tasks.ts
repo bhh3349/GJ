@@ -59,6 +59,28 @@ export function getTask(db: Db, id: string): TaskDto | null {
   return row ? toDto(row) : null;
 }
 
+/**
+ * 实时通道用：在跑的 + 刚结束的任务。
+ *
+ * 为什么要带上"刚结束的"：契约 §7 的 `task` 帧是在**进度变化时**推的，
+ * 只查 `queued/running` 的话，任务走到终态那一帧永远发不出去 ——
+ * 前端会看到一个永远停在 87% 的进度条，而这正是"假进度"的另一种形态。
+ * 窗口取 1 分钟：足够让在线客户端收到终态，又不至于让新连进来的客户端
+ * 把十分钟前的老任务当新闻重放一遍。
+ */
+export function listLiveTasks(db: Db, finishedWithinSeconds = 60): TaskDto[] {
+  const since = new Date(Date.now() - finishedWithinSeconds * 1000).toISOString();
+  const rows = db
+    .prepare(
+      `SELECT * FROM tasks
+       WHERE status IN ('queued','running')
+          OR (finished_at IS NOT NULL AND finished_at >= ?)
+       ORDER BY started_at, id`,
+    )
+    .all(since) as TaskRow[];
+  return rows.map(toDto);
+}
+
 export function markRunning(db: Db, id: string, total?: number): void {
   if (total === undefined) {
     db.prepare(`UPDATE tasks SET status = 'running' WHERE id = ? AND status = 'queued'`).run(id);

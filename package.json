@@ -21,12 +21,14 @@
     "check:secrets": "tsx src/security/plaintext-scan.ts"
   },
   "dependencies": {
+    "@fastify/websocket": "^11.3.3",
     "better-sqlite3": "^11.5.0",
     "fastify": "^5.1.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
     "@types/node": "^22.9.0",
+    "@types/ws": "^8.18.2",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",
     "vitest": "^2.1.4"

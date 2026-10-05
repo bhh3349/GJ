@@ -10,7 +10,7 @@
 // 调用方只有网关进程的运行态镜像（约 1s 一次批量刷写，见 ADR-0010）。
 
 import { ApiError } from '../../api/errors.js';
-import type { KeyCategory, KeyDto, KeyHealth, Page } from '../../api/dto.js';
+import type { FailureReasonCode, KeyCategory, KeyDto, KeyHealth, Page } from '../../api/dto.js';
 import { nowIso, utcDay } from '../../util/time.js';
 import { decryptSecret, encryptSecret, maskKey } from '../crypto.js';
 import type { Db } from '../database.js';
@@ -199,6 +199,39 @@ export function listKeyHealth(
     upstreamId: r.upstream_id,
     health: deriveHealth(r, ctx.nowMs),
     cooldownUntil: r.rt_cooldown,
+  }));
+}
+
+export interface LiveKeyState {
+  keyId: string;
+  maskedKey: string;
+  upstreamId: string;
+  health: KeyHealth;
+  cooldownUntil: string | null;
+  lastFailureReason: FailureReasonCode | null;
+}
+
+/**
+ * 实时通道用的运行态快照。比 `listKeyHealth` 多一个 `lastFailureReason` ——
+ * 契约 §7 的 `key_health` 帧要它，而 §6 `/api/stats/overview` 的 `keyHealth`
+ * 项形状已经冻结成 5 个字段，不能顺手加一个。
+ * 两处口径既然不同就分成两个函数：加可选参数会让人以为"同一个东西的可选形态"，
+ * 而它们其实是两份各自冻结的契约。
+ */
+export function listLiveKeyStates(db: Db): LiveKeyState[] {
+  // WHERE 必须与 `listKeyHealth` 逐字一致：两者是同一批 key 的两个视角，
+  // 一旦这里漏掉软删过滤，仪表盘的灯就会比列表多出几盏"看不见的 key"。
+  const rows = db
+    .prepare(`${SELECT_BASE} WHERE k.deleted_at IS NULL ORDER BY k.created_at, k.id`)
+    .all() as KeyRow[];
+  const ctx = nowContext();
+  return rows.map((r) => ({
+    keyId: r.id,
+    maskedKey: r.masked_key,
+    upstreamId: r.upstream_id,
+    health: deriveHealth(r, ctx.nowMs),
+    cooldownUntil: r.rt_cooldown,
+    lastFailureReason: r.rt_reason === null ? null : (r.rt_reason as FailureReasonCode),
   }));
 }
 

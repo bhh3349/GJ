@@ -1,15 +1,21 @@
 // Fastify 应用装配：错误收口、鉴权闸门、CSRF、路由注册。
 //
-// 这里有两道「全量」闸门，都不允许有白名单例外（契约 §0.5）：
+// 这里有两道「全量」闸门（契约 §0.5）：
 //   1. `/api/*` 除 `POST /api/auth/login` 外全部要求有效会话；
 //   2. 写方法全部过 CSRF 三层校验。
 // 实现方式是把闸门放在 onRequest 钩子里一次判完，而不是散在每个 handler 里 ——
 // 后者只要有人新加一个路由忘了写守卫，就静默变成公开接口。
 //
+// **唯一的例外是 WS 握手**（`GET /api/stats/live` + `Upgrade: websocket`），
+// 而且它只是"换了个地方判"：会话校验挪到升级成功之后的 handler 里，用 4401 关连接。
+// 原因是协议层面的 —— 升级请求回 HTTP 401 的话，浏览器只看得到连接异常中断（1006），
+// 前端就没法把"会话过期"和"服务不可用"分开处理。见 isLiveHandshake 与 routes/live.ts。
+//
 // 错误体在 setErrorHandler 里统一成 `{code,message,details?}`，
 // 包括 Fastify 自己的 schema 校验错误：它默认的形状不符合契约，
 // 且前端拿不到 `details.field` 就没法把表单那一栏标红。
 
+import fastifyWebsocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import type { AppConfig } from '../config.js';
 import type { Db } from '../db/database.js';
@@ -19,6 +25,7 @@ import { isWriteMethod, sessionCookieValue, verifyCsrf } from './http.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerGroupRoutes } from './routes/groups.js';
 import { registerKeyRoutes } from './routes/keys.js';
+import { createLiveHub, registerLiveRoutes, type LiveHub } from './routes/live.js';
 import { registerMiscRoutes } from './routes/misc.js';
 import { registerModelRoutes } from './routes/models.js';
 import { registerStatsRoutes } from './routes/stats.js';
@@ -27,6 +34,13 @@ import { registerUpstreamRoutes } from './routes/upstreams.js';
 declare module 'fastify' {
   interface FastifyRequest {
     auth: (SessionInfo & { viaMachineToken: boolean }) | null;
+  }
+  interface FastifyInstance {
+    /**
+     * 实时通道的中心节点。挂在实例上而不是藏在闭包里：关停路径要用它（见下面的 preClose），
+     * 测试也要靠它把 1s 的推帧节奏变成确定性的 —— 否则每个用例都得等真实时钟。
+     */
+    liveHub: LiveHub;
   }
 }
 
@@ -39,6 +53,23 @@ export interface ApiContext {
 /** 唯一免鉴权路径（契约 §0.5）。用 method+path 精确匹配，不用前缀。 */
 function isPublic(method: string, path: string): boolean {
   return method === 'POST' && path === '/api/auth/login';
+}
+
+/**
+ * WS 升级请求的识别（`GET /api/stats/live`）。
+ *
+ * 刻意不用插件装饰出来的 `req.ws`：插件在 ready 阶段才加载，它的 onRequest 钩子排在
+ * 本文件的钩子**之后**，此刻 `req.ws` 还停在装饰时的默认值 null，用它判断永远为假。
+ * `Upgrade` 头是原始请求上就有的，且注入式测试（injectWS）也会伪造它。
+ */
+function isLiveHandshake(req: FastifyRequest, path: string): boolean {
+  const upgrade = req.headers.upgrade;
+  return (
+    req.method === 'GET' &&
+    path === '/api/stats/live' &&
+    typeof upgrade === 'string' &&
+    upgrade.toLowerCase() === 'websocket'
+  );
 }
 
 function validationField(error: { validation?: unknown }): string {
@@ -94,6 +125,15 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     // 契约里对 CSRF 的要求是"所有写请求"，从未把 login 排除在外。
     if (isWriteMethod(req.method)) verifyCsrf(req, config.allowedOrigins);
 
+    // 实时通道的 WS 握手是**唯一**的例外 —— 而它不是"免鉴权"。
+    // 升级请求一旦回 HTTP 401，浏览器只会把连接报成异常中断（1006），
+    // 前端就无法把「会话过期，去登录」（4401）与「服务崩了，退避重连」分开，
+    // 而这两件事的用户动作完全相反。所以会话判定被**推迟到升级成功之后**：
+    // handler 拿到连接、判来源、判会话，不通过就用 4401 关掉（见 routes/live.ts）。
+    // 例外条件收得极窄：方法 + 路径 + Upgrade 头三者同时满足。非升级的普通 GET
+    // 落到同一个路径上会走插件给的 404，同样不经过这里。
+    if (isLiveHandshake(req, path)) return;
+
     if (isPublic(req.method, path)) return;
 
     // CI 机器令牌：只认 Bearer，不参与浏览器流程；未配置即为关闭
@@ -137,6 +177,22 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     void reply.code(404).send({ code: 'NOT_FOUND', message: `接口不存在: ${req.method} ${req.url}` });
   });
 
+  // 实时通道。三处顺序/取舍值得记下来：
+  //   1. `preClose` 由我们提供，覆盖插件的默认实现。默认那版用 **1000** 关掉所有连接，
+  //      而契约 §7 里 1000 的语义是"登出 → 前端不重连"：一次部署重启会把所有仪表盘
+  //      永久留在断开态，直到有人手动刷新。换成 1012（服务重启 → 退避重连）才对。
+  //   2. WS 路由必须写在 `register` 回调里（见下面那段）。这不是风格问题 ——
+  //      直接 `registerLiveRoutes(app, ...)` 会让这条路由**静默地变成一个普通 GET**。
+  //   3. 其余路由不这么写，因为它们的注册只依赖已经就绪的钩子，与加载次序无关。
+  const liveHub = createLiveHub(db, app.log);
+  app.decorate('liveHub', liveHub);
+  app.register(fastifyWebsocket, {
+    preClose: (done) => {
+      liveHub.shutdown();
+      done();
+    },
+  });
+
   registerAuthRoutes(app, ctx);
   registerUpstreamRoutes(app, ctx);
   registerKeyRoutes(app, ctx);
@@ -144,6 +200,15 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   registerModelRoutes(app, ctx);
   registerStatsRoutes(app, ctx);
   registerMiscRoutes(app, ctx);
+
+  // 形状必须是这样：`register` 的回调被 avvio 排队，等前面排的 WS 插件**加载完**才执行；
+  // 插件的 onRoute 钩子是在那一刻才装上的，早于它的路由它一个都看不见。
+  // 代价是写得别扭，收益是这条路由真的会被改写成 `websocket:true`：
+  // 少了它，升级请求会落在一个"普通 GET"上（handler 收到的是 request/reply，
+  // 不是 socket），表现是整个握手挂住、客户端一直等到超时。
+  app.register(async (instance) => {
+    registerLiveRoutes(instance, ctx, liveHub);
+  });
 
   return app;
 }

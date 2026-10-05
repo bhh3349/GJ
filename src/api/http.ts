@@ -122,11 +122,33 @@ export function isWriteMethod(method: string): boolean {
   return !SAFE_METHODS.has(method.toUpperCase());
 }
 
-function originHostMatches(origin: string, host: string | undefined): boolean {
+/**
+ * `Origin` 与 `Host` 是否同一站点。
+ *
+ * 导出给实时通道复用（routes/live.ts）：WebSocket 不受同源策略保护，且没有 CSRF
+ * 那三层头可查，Origin 是那条链路上唯一的结构性防线。两处口径必须一致 ——
+ * 不一致就会留下一条绕过路径：写请求被 CSRF 挡住，但 WS 能推数据出去。
+ */
+/** scheme 的默认端口后缀。`URL` 会把它们从 host 里吃掉，裸字符串不会，见下。 */
+const DEFAULT_PORT_SUFFIX: Record<string, string> = { 'http:': ':80', 'https:': ':443' };
+
+export function originHostMatches(origin: string, host: string | undefined): boolean {
   if (host === undefined) return false;
   try {
     const u = new URL(origin);
-    return u.host.toLowerCase() === host.toLowerCase();
+    // `URL` 会把 scheme 的默认端口**规范化掉**（`http://a.com:80` → host `a.com`），
+    // 而 `Host` 头是裸字符串、原样保留。两边不先归一化，同一站点就会被判成跨站：
+    // 浏览器发的是 `Origin: http://a.com`（默认端口不写），
+    // 而反代若用 `$http_host` 透传，我们收到的 `Host` 就是 `a.com:80` → 判不同源。
+    // 后果不是"多拒一个请求"那么轻：所有写请求被 CSRF 挡下（403 CSRF_REJECTED），
+    // WS 升级直接 1008，仪表盘永远连不上 —— 且两边都难定位到是"端口写法"的问题。
+    // 这不会放宽攻击面：比较的仍是同一个主机名，只是容忍默认端口的两种写法。
+    const suffix = DEFAULT_PORT_SUFFIX[u.protocol];
+    let normalizedHost = host.toLowerCase();
+    if (suffix !== undefined && normalizedHost.endsWith(suffix)) {
+      normalizedHost = normalizedHost.slice(0, -suffix.length);
+    }
+    return u.host.toLowerCase() === normalizedHost;
   } catch {
     return false;
   }

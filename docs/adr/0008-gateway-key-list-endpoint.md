@@ -62,7 +62,7 @@ DELETE /api/groups/:id/keys/:keyId           吊销
 
 - **前端（画师）**：用户组页可做单把 key 的重置/吊销；判据从「列表有没有数据」变成「列表里拿到的 id 能不能真的驱动 `reset`」。
 - **后端（管家）**：`GatewayKeyDto` + 仓储 `listGatewayKeys` + 一条路由，无 schema 变更（`gateway_keys` 表结构本就够用）。
-- **网关（路由者）**：**无影响**。`reset` 的事务语义没动；`findGroupByGatewayKeyHash` 仍按 `deleted_at IS NULL` 过滤。
+- **网关（路由者）**：**无影响**。`reset` 的事务语义没动；`findGroupByGatewayKeyHash` 仍按 `deleted_at IS NULL` 过滤。*（M4 更新：该过滤已在删列时一并移除，见文末执行记录 —— 对本条"无影响"的结论不变，鉴权路径的语义仍是"行在即有效"。）*
 - **兼容性**：纯新增端点 + 一个响应字段。既有调用方零破坏。
 
 ## 门禁核验
@@ -84,4 +84,10 @@ DELETE /api/groups/:id/keys/:keyId           吊销
 ## 已知缺口（不在本次范围）
 
 - **软删 vs 硬删：已裁决（2026-10-06，PM 定案）——保留硬删。** `gateway_keys.deleted_at` 列删除、吊销路径维持物理删除，本端点**不引入** `includeDeleted` 语义。理由：网关 key 是凭据，吊销即应当失效且无需可恢复；吊销痕迹由 `audit_log` 承担；软删只会把「已吊销的 key」重新引入查询面，牵出无补偿价值的过滤分支。列删除 + 查询里 `deleted_at IS NULL` 过滤的清理**记入 M4 的 `src/db` 改造清单**（与 ADR-0009 提到的 `models.manual_fields` 评估同批 schema 变更），到点执行，不再另开 ADR。
+
+  **执行记录（2026-10-06，M4 批次，管家）**：已执行，无遗留。
+  - `src/db/schema.ts`：`gateway_keys.deleted_at` 从 DDL 移除，`SCHEMA_VERSION` 1 → 2，新增 `migrate()` 的 v1→v2 搬迁分支（判据是**列在不在**而不是 `user_version`，新库与老库同一句代码覆盖）。
+  - 搬迁顺序有实质含义：**先 `DELETE FROM gateway_keys WHERE deleted_at IS NOT NULL`，再 `DROP COLUMN`**。反过来的话，老库里那些"已软删"的行会在删列瞬间**复活成有效凭据** —— 吊销是硬删，它们本就该消失。
+  - `src/db/repo/groups.ts`：4 处 `deleted_at IS NULL` 过滤（含 `findGroupByGatewayKeyHash`，即网关鉴权主路径）已移除。
+  - `doc` 与代码注释同步更新：schema 里该表已写上"没有 deleted_at / 无 includeDeleted 语义"。
 - `label` 列存在但签发路径恒写 `NULL`，所以 DTO 里没回它。要让 gateway key 可命名，是独立的一次改动。

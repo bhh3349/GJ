@@ -13,7 +13,12 @@
 
 import type { Database as SqliteDatabase } from 'better-sqlite3';
 
-export const SCHEMA_VERSION = 1;
+/**
+ * 版本号只在**有数据/结构搬迁**时递增（纯加表加索引不递增）：
+ *   1 → 2：删除 `gateway_keys.deleted_at`（ADR-0008 定案：网关 key 吊销是硬删）。
+ * 递增后必须在 `migrate()` 里补上对应的搬迁分支，否则老库升不上来。
+ */
+export const SCHEMA_VERSION = 2;
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS admin_users (
@@ -90,13 +95,15 @@ CREATE TABLE IF NOT EXISTS groups (
   updated_at  TEXT NOT NULL
 );
 
+-- 网关 key（客户端的凭据）。**没有 deleted_at**：吊销即物理删除（ADR-0008）。
+-- 软删只会把"已吊销的凭据"重新引入查询面，而网关 key 吊销本就不需要可恢复；
+-- 吊销痕迹由 audit_log 承担。因此本表也没有任何 includeDeleted 语义。
 CREATE TABLE IF NOT EXISTS gateway_keys (
   id         TEXT PRIMARY KEY,
   group_id   TEXT NOT NULL REFERENCES groups(id),
   key_hash   TEXT NOT NULL UNIQUE,            -- sha256，明文永不落盘亦不可再取回
   masked_key TEXT NOT NULL,
   label      TEXT,
-  deleted_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -181,12 +188,34 @@ CREATE TABLE IF NOT EXISTS change_log (
 );
 `;
 
+/** 列是否存在。删列是"只做一次"的搬迁，靠它判幂等 —— 版本号只当记账用。 */
+function hasColumn(db: SqliteDatabase, table: string, column: string): boolean {
+  const rows = db.pragma(`table_info(${table})`) as { name: string }[];
+  return rows.some((r) => r.name === column);
+}
+
 /**
- * 建表 / 迁移。幂等：全部 IF NOT EXISTS，重复调用无副作用。
- * user_version 留给后续带数据搬迁的迁移用；纯加表加索引不需要它。
+ * 建表 / 迁移。幂等：DDL 全是 IF NOT EXISTS，搬迁分支自身也判存在性，
+ * 所以重复调用无副作用、可以安全地在每次开库时跑。
  */
 export function migrate(db: SqliteDatabase): void {
   db.exec(DDL);
+
+  // v1 → v2：gateway_keys.deleted_at 删列（ADR-0008）。
+  // 判据刻意用"列在不在"而不是 `user_version < 2`：DDL 里新库本就没这列，
+  // 而任何一份 v1 老库都一定有 —— 前者跳过、后者搬迁，同一句代码覆盖两种库，
+  // 也就不会因为某个中间状态（user_version 被写过但列没删）而永久漏迁。
+  if (hasColumn(db, 'gateway_keys', 'deleted_at')) {
+    // DROP COLUMN 会重写整表，包在事务里：中途失败不留"删了一半"的库。
+    db.transaction(() => {
+      // 先删干净 deleted_at 非空的行，再删列。顺序不能反：
+      // 万一老库里存在"已软删"的行，删列会把它**复活成一把有效凭据** ——
+      // 吊销是硬删，所以这些行本就该消失，而不是变成活 key。
+      db.exec('DELETE FROM gateway_keys WHERE deleted_at IS NOT NULL');
+      db.exec('ALTER TABLE gateway_keys DROP COLUMN deleted_at');
+    })();
+  }
+
   const current = db.pragma('user_version', { simple: true }) as number;
   if (current < SCHEMA_VERSION) {
     db.pragma(`user_version = ${SCHEMA_VERSION}`);

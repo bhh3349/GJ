@@ -48,12 +48,12 @@ function todayUsage(db: Db, groupId: string): UsageRow {
   return row ?? { requests: 0, tokens: 0, costCents: 0 };
 }
 
-/** 非软删的网关 key 摘要。顺序固定（created_at, id），保证 gatewayKeyMasked 稳定。 */
+/** 该组的网关 key 摘要。顺序固定（created_at, id），保证 gatewayKeyMasked 稳定。 */
 function liveGatewayKeys(db: Db, groupId: string): { id: string; masked_key: string }[] {
   return db
     .prepare(
       `SELECT id, masked_key FROM gateway_keys
-       WHERE group_id = ? AND deleted_at IS NULL
+       WHERE group_id = ?
        ORDER BY created_at, id`,
     )
     .all(groupId) as { id: string; masked_key: string }[];
@@ -80,13 +80,13 @@ export function listGatewayKeys(
 
   const total = (
     db
-      .prepare('SELECT COUNT(*) AS n FROM gateway_keys WHERE group_id = ? AND deleted_at IS NULL')
+      .prepare('SELECT COUNT(*) AS n FROM gateway_keys WHERE group_id = ?')
       .get(groupId) as { n: number }
   ).n;
   const rows = db
     .prepare(
       `SELECT id, masked_key, created_at FROM gateway_keys
-       WHERE group_id = ? AND deleted_at IS NULL
+       WHERE group_id = ?
        ORDER BY created_at, id LIMIT ? OFFSET ?`,
     )
     .all(groupId, query.pageSize, (query.page - 1) * query.pageSize) as {
@@ -274,8 +274,8 @@ export function issueGatewayKey(db: Db, groupId: string): GatewayKeyIssuedDto {
   const id = newId('gatewayKey');
   const at = nowIso();
   db.prepare(
-    `INSERT INTO gateway_keys (id, group_id, key_hash, masked_key, label, deleted_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)`,
+    `INSERT INTO gateway_keys (id, group_id, key_hash, masked_key, label, created_at, updated_at)
+     VALUES (?, ?, ?, ?, NULL, ?, ?)`,
   ).run(id, groupId, sha256Hex(secret), maskKey(secret), at, at);
   appendChange(db, 'gateway_key', id, 'insert', null);
 
@@ -285,7 +285,7 @@ export function issueGatewayKey(db: Db, groupId: string): GatewayKeyIssuedDto {
 /** 重置：旧 key **立即失效**（契约 §4）。实现上是删旧行 + 插新行，同一事务。 */
 export function resetGatewayKey(db: Db, groupId: string, keyId: string): GatewayKeyIssuedDto {
   const row = db
-    .prepare('SELECT id FROM gateway_keys WHERE id = ? AND group_id = ? AND deleted_at IS NULL')
+    .prepare('SELECT id FROM gateway_keys WHERE id = ? AND group_id = ?')
     .get(keyId, groupId);
   if (!row) throw ApiError.notFound('网关 key', keyId);
 
@@ -313,7 +313,7 @@ export function findGroupByGatewayKeyHash(db: Db, hash: string): GroupRow | null
     .prepare(
       `SELECT g.* FROM gateway_keys k
        JOIN groups g ON g.id = k.group_id
-       WHERE k.key_hash = ? AND k.deleted_at IS NULL`,
+       WHERE k.key_hash = ?`,
     )
     .get(hash) as GroupRow | undefined;
   return row ?? null;

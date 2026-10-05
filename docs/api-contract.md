@@ -3,6 +3,8 @@
 > 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
+>
+> **补遗 v1.0.1（2026-10-06，待 PM 追认）**：§4 新增 `GET /api/groups/:id/keys`，并给 `reset` 的响应补上 `id`。除此之外 v1.0-frozen 全部内容不变 —— 无字段改名、无类型变更、无端点删除。动机与影响见 ADR-0008。
 
 ---
 
@@ -273,11 +275,27 @@
 | `GET` | `/api/groups/:id` | 详情（**不含**明文） |
 | `PATCH` | `/api/groups/:id` | `{name?, rpm?, tpm?, dailyQuota?, enabled?, revision}` |
 | `DELETE` | `/api/groups/:id` | → `204` |
+| `GET` | `/api/groups/:id/keys?page=&pageSize=` | 该组网关 key 列表（**不含**明文）→ 分页信封，项见下 |
 | `POST` | `/api/groups/:id/keys` | 再签发一把 → `201 {id, gatewayKey, maskedKey, createdAt}`，**明文仅此一次** |
-| `POST` | `/api/groups/:id/keys/:keyId/reset` | 重置 → `200 {gatewayKey, maskedKey}`，旧 key **立即失效** |
+| `POST` | `/api/groups/:id/keys/:keyId/reset` | 重置 → `200 {id, gatewayKey, maskedKey, createdAt}`，旧 key **立即失效** |
 | `DELETE` | `/api/groups/:id/keys/:keyId` | → `204` |
 
 > **网关 key 明文纪律**：只在创建/重置响应里出现**一次**，之后绝不可再取回。前端创建弹窗关闭即从内存丢弃，**不缓存、不写 localStorage**。库内只存 sha256 摘要。
+
+### 网关 key 列表项（`GET /api/groups/:id/keys`）
+```json
+{
+  "id": "gwk_9a12",
+  "maskedKey": "****9f3c",
+  "createdAt": "2026-10-01T03:00:00.000Z"
+}
+```
+- `id` 就是 `:keyId` 的取值 —— **本端点存在的唯一理由**：`Group` 对象只暴露 `gatewayKeyMasked`，前端拿不到 `keyId`，重置/吊销两个端点无从触达。
+- **不返回** `updatedAt`：网关 key 的改法是「删旧行 + 插新行」（重置即失效），`updated_at` 恒等于 `created_at`，回一个永远相等的字段只会让人以为它可以不同。
+- 排序固定 `createdAt, id`，因此 **`Group.gatewayKeyMasked` 恒等于列表第一项的 `maskedKey`**（组内至少 1 把 key 时）。
+- 明文、`key_hash` 均不出现在本端点，任何情况下都不出现。
+- **吊销是硬删**（行不在即失效），不会出现在本列表；痕迹只留在 `audit_log`。因此本端点没有 `includeDeleted`（契约 §3 上游 key 的软删口径不适用于网关 key）。
+- 未知组 → `404 NOT_FOUND`；`:keyId` 不属于该组时，重置/吊销一律 `404`（不返回 403，不泄漏 key 的存在性）。
 
 ---
 

@@ -93,6 +93,19 @@ export interface GroupDto {
   updatedAt: string;
 }
 
+/**
+ * 契约 §4 网关 key 列表项（`GET /api/groups/:id/keys`）。
+ *
+ * 故意只有三个字段：`id` 是重置/吊销唯一能用的入参，`maskedKey` 给人眼认，
+ * `createdAt` 是列表的排序键。**不回 `updatedAt`** —— 网关 key 的改法是删旧行插新行，
+ * 它恒等于 `createdAt`，回一个永远相等的字段只会让调用方以为它可能不同。
+ */
+export interface GatewayKeyDto {
+  id: string;
+  maskedKey: string;
+  createdAt: string;
+}
+
 /** 契约 §4 建组/签发网关 key 的响应：明文只在这里出现一次 */
 export interface GatewayKeyIssuedDto {
   id: string;

@@ -15,6 +15,7 @@ import {
   deleteGroup,
   getGroup,
   issueGatewayKey,
+  listGatewayKeys,
   listGroups,
   resetGatewayKey,
   updateGroup,
@@ -166,6 +167,23 @@ export function registerGroupRoutes(app: FastifyInstance, ctx: ApiContext): void
       });
       return reply.code(204).send();
     },
+  );
+
+  // 契约 §4：`Group` 只暴露 gatewayKeyMasked，前端拿不到 :keyId，重置/吊销无从触达。
+  // 这个端点就是补那一环 —— 回 id + maskedKey + createdAt，明文与 key_hash 都不在内。
+  app.get<{ Params: { id: string }; Querystring: { page: number; pageSize: number } }>(
+    '/api/groups/:id/keys',
+    {
+      schema: {
+        params: idParam,
+        querystring: { type: 'object', properties: { ...pageProps } },
+      },
+    },
+    (req) =>
+      listGatewayKeys(db, req.params.id, {
+        page: req.query.page,
+        pageSize: req.query.pageSize,
+      }),
   );
 
   app.post<{ Params: { id: string } }>(

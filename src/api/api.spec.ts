@@ -426,4 +426,158 @@ describe('用户组与网关 key（契约 §4，C1）', () => {
     await closeHarness(h);
     expect(containsPlaintext(readRawFiles(h.dbPath), secretValue)).toBe(false);
   });
+
+  /** 建一个组并再签发一把 key，返回两把 key 的 id / 掩码 / 明文。 */
+  async function groupWithTwoKeys(h: Harness, name: string): Promise<{
+    groupId: string;
+    first: { id: string; gatewayKey: string; maskedKey: string };
+    second: { id: string; gatewayKey: string; maskedKey: string };
+    gatewayKeyMasked: string | null;
+  }> {
+    const created = await h.app.inject({
+      method: 'POST',
+      url: '/api/groups',
+      headers: auth(h),
+      payload: { name },
+    });
+    expect(created.statusCode, created.body).toBe(201);
+    const body = created.json() as {
+      id: string;
+      gatewayKeyMasked: string | null;
+      gatewayKey: { id: string; gatewayKey: string; maskedKey: string };
+    };
+    const second = await h.app.inject({
+      method: 'POST',
+      url: `/api/groups/${body.id}/keys`,
+      headers: auth(h),
+    });
+    expect(second.statusCode, second.body).toBe(201);
+    return {
+      groupId: body.id,
+      first: body.gatewayKey,
+      second: second.json() as { id: string; gatewayKey: string; maskedKey: string },
+      gatewayKeyMasked: body.gatewayKeyMasked,
+    };
+  }
+
+  /**
+   * 这条测试守的是"前端到底能不能操作单把网关 key"——契约 v1.0-frozen 只给了
+   * `Group.gatewayKeyMasked`，:keyId 无处可取，重置/吊销两个端点在 UI 上不可达。
+   * 所以判据不是"列表返回了数据"，而是**列表里拿到的 id 真的能驱动 reset**。
+   */
+  it('GET /api/groups/:id/keys 交出可操作的 keyId，且响应里没有任何明文', async () => {
+    const h = await setup();
+    const { groupId, first, second, gatewayKeyMasked } = await groupWithTwoKeys(h, 'probe-list-a');
+
+    const list = await h.app.inject({
+      method: 'GET',
+      url: `/api/groups/${groupId}/keys`,
+      headers: auth(h),
+    });
+    expect(list.statusCode, list.body).toBe(200);
+    const page = list.json() as {
+      items: { id: string; maskedKey: string; createdAt: string }[];
+      total: number;
+      page: number;
+      pageSize: number;
+    };
+    expect(page.total).toBe(2);
+    expect(page.page).toBe(1);
+    // 两把都在，但不假设它们的相对顺序：同一毫秒插入时 created_at 相同，次序由 id 决定
+    expect(page.items.map((k) => k.maskedKey).sort()).toEqual(
+      [first.maskedKey, second.maskedKey].sort(),
+    );
+    // 契约承诺的不变量：列表第一项 == Group.gatewayKeyMasked（两处同序，与 id 随机无关）
+    expect(page.items[0]?.maskedKey).toBe(gatewayKeyMasked);
+
+    // 列表明文与摘要都不出现：连 "gatewayKey" 这个键名本身都不该有
+    expect(list.body).not.toContain(first.gatewayKey);
+    expect(list.body).not.toContain(second.gatewayKey);
+    expect(list.body).not.toContain('"gatewayKey"');
+
+    // 这是本端点存在的唯一理由：拿到的 id 能真的重置掉它
+    const target = page.items.find((k) => k.id !== first.id);
+    if (!target) throw new Error('列表里应有第二把 key');
+    const reset = await h.app.inject({
+      method: 'POST',
+      url: `/api/groups/${groupId}/keys/${target.id}/reset`,
+      headers: auth(h),
+    });
+    expect(reset.statusCode, reset.body).toBe(200);
+    expect((reset.json() as { id: string }).id).not.toBe(target.id);
+
+    const after = await h.app.inject({
+      method: 'GET',
+      url: `/api/groups/${groupId}/keys`,
+      headers: auth(h),
+    });
+    const afterItems = (after.json() as { items: { id: string }[] }).items;
+    expect(afterItems.some((k) => k.id === target.id)).toBe(false);
+    expect(afterItems.length).toBe(2);
+
+    // 跨组越权一律 404（不是 403 —— 不泄漏该 keyId 是否存在）
+    const other = await groupWithTwoKeys(h, 'probe-list-b');
+    const crossReset = await h.app.inject({
+      method: 'POST',
+      url: `/api/groups/${other.groupId}/keys/${first.id}/reset`,
+      headers: auth(h),
+    });
+    expect(crossReset.statusCode).toBe(404);
+    // 越权失败不能有副作用：本组那把 key 还在
+    const still = await h.app.inject({
+      method: 'GET',
+      url: `/api/groups/${groupId}/keys`,
+      headers: auth(h),
+    });
+    expect((still.json() as { items: { id: string }[] }).items.some((k) => k.id === first.id)).toBe(
+      true,
+    );
+
+    // 未知组 → 404，不是空列表（空列表会让前端以为"这个组没 key"）
+    const missing = await h.app.inject({
+      method: 'GET',
+      url: '/api/groups/grp_does_not_exist/keys',
+      headers: auth(h),
+    });
+    expect(missing.statusCode).toBe(404);
+    await closeHarness(h);
+  });
+
+  it('吊销后 key 从列表消失、keyCount 同步，且两把明文都没落盘', async () => {
+    const h = await setup();
+    const { groupId, first, second } = await groupWithTwoKeys(h, 'probe-revoke');
+
+    const del = await h.app.inject({
+      method: 'DELETE',
+      url: `/api/groups/${groupId}/keys/${second.id}`,
+      headers: auth(h),
+    });
+    expect(del.statusCode, del.body).toBe(204);
+
+    const list = await h.app.inject({
+      method: 'GET',
+      url: `/api/groups/${groupId}/keys`,
+      headers: auth(h),
+    });
+    const items = (list.json() as { items: { id: string }[]; total: number }).items;
+    expect(items.map((k) => k.id)).toEqual([first.id]);
+
+    const detail = await h.app.inject({ method: 'GET', url: `/api/groups/${groupId}`, headers: auth(h) });
+    expect((detail.json() as { keyCount: number }).keyCount).toBe(1);
+
+    // 吊销是硬删：那把 keyId 已经不存在，再删一次是 404（重复点不该静默成功）
+    const again = await h.app.inject({
+      method: 'DELETE',
+      url: `/api/groups/${groupId}/keys/${second.id}`,
+      headers: auth(h),
+    });
+    expect(again.statusCode).toBe(404);
+
+    // 两把网关 key 的明文都不得落盘（含被吊销的那把 —— 删行不等于它从没写过）
+    await closeHarness(h);
+    const raw = readRawFiles(h.dbPath);
+    expect(containsPlaintext(raw, first.gatewayKey)).toBe(false);
+    expect(containsPlaintext(raw, second.gatewayKey)).toBe(false);
+    expect(containsPlaintext(Buffer.concat([raw, Buffer.from(second.gatewayKey, 'utf8')]), second.gatewayKey)).toBe(true);
+  });
 });

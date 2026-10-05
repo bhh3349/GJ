@@ -8,7 +8,7 @@
 // 滑动续期、配额计数都在这里读；配额**判定**在网关侧（M3），管理面只报用量。
 
 import { ApiError } from '../../api/errors.js';
-import type { GatewayKeyIssuedDto, GroupDto, Page } from '../../api/dto.js';
+import type { GatewayKeyDto, GatewayKeyIssuedDto, GroupDto, Page } from '../../api/dto.js';
 import { nowIso, utcDay } from '../../util/time.js';
 import { maskKey, sha256Hex } from '../crypto.js';
 import type { Db } from '../database.js';
@@ -57,6 +57,50 @@ function liveGatewayKeys(db: Db, groupId: string): { id: string; masked_key: str
        ORDER BY created_at, id`,
     )
     .all(groupId) as { id: string; masked_key: string }[];
+}
+
+export interface ListGatewayKeysQuery {
+  page: number;
+  pageSize: number;
+}
+
+/**
+ * 网关 key 列表（契约 §4 `GET /api/groups/:id/keys`）。
+ *
+ * 排序必须与 `liveGatewayKeys` **逐字一致**：契约承诺列表第一项的 maskedKey 恒等于
+ * `Group.gatewayKeyMasked`，两处 ORDER BY 一旦分开演化，这条承诺就会在某一版里悄悄失效。
+ * 所以下面那句 SQL 是故意复制而不是抽公共前缀 —— 复制的是会被 diff 看见的东西。
+ */
+export function listGatewayKeys(
+  db: Db,
+  groupId: string,
+  query: ListGatewayKeysQuery,
+): Page<GatewayKeyDto> {
+  if (!getGroupRow(db, groupId)) throw ApiError.notFound('用户组', groupId);
+
+  const total = (
+    db
+      .prepare('SELECT COUNT(*) AS n FROM gateway_keys WHERE group_id = ? AND deleted_at IS NULL')
+      .get(groupId) as { n: number }
+  ).n;
+  const rows = db
+    .prepare(
+      `SELECT id, masked_key, created_at FROM gateway_keys
+       WHERE group_id = ? AND deleted_at IS NULL
+       ORDER BY created_at, id LIMIT ? OFFSET ?`,
+    )
+    .all(groupId, query.pageSize, (query.page - 1) * query.pageSize) as {
+    id: string;
+    masked_key: string;
+    created_at: string;
+  }[];
+
+  return {
+    items: rows.map((r) => ({ id: r.id, maskedKey: r.masked_key, createdAt: r.created_at })),
+    total,
+    page: query.page,
+    pageSize: query.pageSize,
+  };
 }
 
 function toDto(row: GroupRow, keys: { id: string; masked_key: string }[], usage: UsageRow): GroupDto {

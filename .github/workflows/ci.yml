@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Corepack 读 package.json 的 packageManager 精确锁版，与本地同一条路径。
+      - name: Enable pnpm (corepack)
+        run: corepack enable pnpm
+
+      # --frozen-lockfile：lockfile 与 package.json 不一致直接失败，不静默升级依赖。
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # G1：better-sqlite3 原生绑定真能加载 + WAL 可开 + aes-256-gcm 可用。
+      # 单独一步，因为它抓的是「install 退出码 0 但原生模块没构建」这类假绿。
+      - name: G1 gate (native sqlite + crypto)
+        run: pnpm run check:sqlite
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm test

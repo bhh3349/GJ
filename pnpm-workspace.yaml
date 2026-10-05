@@ -1,0 +1,9 @@
+packages:
+  - web
+
+# pnpm 10 默认拦截依赖的 postinstall/构建脚本（供应链防护）。
+# 这里显式放行本项目确实需要构建的包，其余一律保持拦截。
+# 新增条目必须能说清「为什么必须构建」，否则不加。
+onlyBuiltDependencies:
+  - better-sqlite3   # 原生 SQLite 绑定，必须构建/下载预编译产物
+  - esbuild          # 二进制分发，postinstall 落盘可执行文件

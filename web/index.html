@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <title>Gateway Console</title>
+    <style>
+      /* 首屏底色内联，避免深色主题在 CSS 到达前闪白（LCP 目标 < 2s，实测目标 1.2s）。 */
+      html,
+      body {
+        margin: 0;
+        background: #0a0e14;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

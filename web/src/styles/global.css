@@ -1,0 +1,93 @@
+@import 'antd/dist/reset.css';
+
+:root {
+  --bg-base: #0a0e14;
+  --bg-container: #111823;
+  --bg-container-hover: #16202e;
+  --bg-sider: #080b11;
+  --border: #1e2a3a;
+  --border-strong: #2a3a50;
+  --text-primary: #e6edf7;
+  --text-secondary: #93a3ba;
+  --text-tertiary: #5f7089;
+  --primary: #4c8dff;
+  --success: #34d399;
+  --warning: #fbbf24;
+  --error: #f87171;
+  --radius-md: 10px;
+  --motion-base: 200ms;
+  --motion-easing: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* 顶栏之下的内容区做一层极淡的光晕，避免大片纯色死板 */
+#root::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background:
+    radial-gradient(900px 420px at 12% -8%, rgba(76, 141, 255, 0.1), transparent 62%),
+    radial-gradient(700px 380px at 92% 4%, rgba(56, 189, 248, 0.07), transparent 60%);
+}
+
+/* 滚动条统一深色，避免浏览器默认亮条 */
+* {
+  scrollbar-color: var(--border-strong) transparent;
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border: 3px solid transparent;
+  background-clip: content-box;
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #3b4f6b;
+  background-clip: content-box;
+}
+
+:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}

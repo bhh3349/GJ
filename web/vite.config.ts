@@ -30,12 +30,17 @@ export default defineConfig(({ mode }) => {
     build: {
       target: 'es2022',
       sourcemap: true,
-      // 路由级分包在 routes 层用 React.lazy 实现；这里把体积大头单独拆开，压住首屏。
+      // 分包口径（改这里之前先看 index.html 的 modulepreload 有没有变多）：
+      // - 只拆「确定整包都在首屏静态闭包里」的 react 系，图的是长期缓存（改业务代码不动这 65 kB）。
+      // - 刻意不给 antd / @ant-design/icons / echarts 配 manualChunks。manualChunks 的分组是无条件的：
+      //   只要该组被入口静态引用，整组都会变成入口的 modulepreload，于是 Table/Form/DatePicker
+      //   这些只有懒加载路由才用到的组件被强行拖进首屏——实测这么分组首屏 gzip 从 246.81 涨到 412.29 kB。
+      //   不分组时 Rollup 按真实可达性拆：antd 里只被 /keys、/logs 用的 Table 等自动落进懒 chunk。
+      // - echarts 同理，它天然只落在 /stats 那条路由的 chunk 里，别去"优化"它。
       rollupOptions: {
         output: {
           manualChunks: {
             react: ['react', 'react-dom', 'react-router-dom'],
-            antd: ['antd', '@ant-design/icons'],
           },
         },
       },

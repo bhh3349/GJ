@@ -9,6 +9,10 @@ import { loadMasterKeyFromEnv } from './db/crypto.js';
 export interface AppConfig {
   masterKey: Buffer;
   dbPath: string;
+  /** 网关面（OpenAI 兼容，对外服务） */
+  portGateway: number;
+  hostGateway: string;
+  /** 管理面（REST + WS，默认只监听回环） */
   portAdmin: number;
   hostAdmin: string;
   sessionTtlHours: number;
@@ -19,6 +23,10 @@ export interface AppConfig {
   /** CI 机器令牌；为空表示关闭（契约 §0.5） */
   adminToken: string | null;
   logRetentionDays: number;
+  /** 单次调用的最大尝试次数（含首次）；默认 3（冻结常量） */
+  maxAttempts: number;
+  /** 每把上游 key 的并发上限；默认 4（冻结常量） */
+  maxConcurrencyPerKey: number;
 }
 
 function intFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
@@ -27,6 +35,19 @@ function intFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: number): num
   const n = Number(raw);
   if (!Number.isFinite(n)) throw new Error(`${name} 必须是数字，实际为 ${JSON.stringify(raw)}`);
   return Math.floor(n);
+}
+
+/**
+ * 正整数项（尝试次数、并发上限这类）。
+ *
+ * 为什么单独一个函数而不是复用 intFromEnv：`MAX_CONCURRENCY_PER_KEY=0` 不会被任何地方拦住，
+ * 它会让每把 key 的并发闸门恒为"已满"，症状是「池子里有 6 把健康 key，却一把也选不出来」——
+ * 一个纯粹由配置打错造成的全站 503，且不会报错。这类值必须是正数，否则启动就失败。
+ */
+function positiveIntFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const n = intFromEnv(env, name, fallback);
+  if (n < 1) throw new Error(`${name} 必须 >= 1，实际为 ${JSON.stringify(env[name])}`);
+  return n;
 }
 
 function boolFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
@@ -47,6 +68,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     // 缺 MASTER_KEY 或长度不对会在这里抛 CryptoConfigError，进程起不来 —— 这是有意的
     masterKey: loadMasterKeyFromEnv(env),
     dbPath: env['DB_PATH'] ?? './data/gateway.db',
+    // 网关面默认对外（0.0.0.0）：它是给客户端用的；管理面默认只听回环（见下），别搞反。
+    portGateway: intFromEnv(env, 'PORT_GATEWAY', 4000),
+    hostGateway: env['HOST_GATEWAY'] ?? '0.0.0.0',
     portAdmin: intFromEnv(env, 'PORT_ADMIN', 4001),
     hostAdmin: env['HOST_ADMIN'] ?? '127.0.0.1',
     sessionTtlHours: intFromEnv(env, 'SESSION_TTL_HOURS', 24),
@@ -55,5 +79,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     allowedOrigins: origins,
     adminToken: adminToken === '' ? null : adminToken,
     logRetentionDays: intFromEnv(env, 'LOG_RETENTION_DAYS', 30),
+    maxAttempts: positiveIntFromEnv(env, 'MAX_ATTEMPTS', 3),
+    maxConcurrencyPerKey: positiveIntFromEnv(env, 'MAX_CONCURRENCY_PER_KEY', 4),
   };
 }

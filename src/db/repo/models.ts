@@ -321,15 +321,46 @@ export function upsertModelFromSync(db: Db, m: SyncedModel): UpsertResult {
   return { action: 'updated', id: existing.id };
 }
 
-/** 供 /v1/models 与「已启用集合」对齐用（验收 4）。 */
-export function listEnabledModelNames(db: Db): string[] {
+/** 网关选路 + `/v1/models` 需要的已启用档案行（比 DTO 轻，避免每请求算可用 key）。 */
+export interface EnabledGatewayModel {
+  id: string;
+  /** 客户端可见名，也是 /v1/models 的 id */
+  name: string;
+  upstreamId: string;
+  /** 归属上游名，直接作为 /v1/models 的 owned_by */
+  upstreamName: string;
+  createdAt: string;
+  priceInputPer1k: number | null;
+  priceOutputPer1k: number | null;
+}
+
+/**
+ * 「已启用」集合的唯一判据（验收 4）：`models.enabled = 1` **且** 其上游 `enabled = 1`。
+ * 上游一停用，它名下的模型立刻不可路由、也不再出现在 /v1/models 里 —— 两处必须同一句 SQL。
+ *
+ * M3 适配层用它同时干三件事：/v1/models 列表、选路的「谁登记了谁才可能被选到」、
+ * 以及用量落库时的价格换算。三件事共用一份行，少一次查询也少一处口径漂移。
+ */
+export function listEnabledGatewayModels(db: Db): EnabledGatewayModel[] {
   const rows = db
     .prepare(
-      `SELECT m.name FROM models m
+      `SELECT m.id              AS id,
+              m.name            AS name,
+              m.upstream_id     AS upstreamId,
+              u.name            AS upstreamName,
+              m.created_at      AS createdAt,
+              m.price_input_per_1k  AS priceInputPer1k,
+              m.price_output_per_1k AS priceOutputPer1k
+       FROM models m
        JOIN upstreams u ON u.id = m.upstream_id
        WHERE m.enabled = 1 AND u.enabled = 1
-       ORDER BY m.name`,
+       ORDER BY m.name, m.id`,
     )
-    .all() as { name: string }[];
-  return rows.map((r) => r.name);
+    .all() as EnabledGatewayModel[];
+  return rows;
+}
+
+/** 供 /v1/models 与「已启用集合」对齐用（验收 4）。 */
+export function listEnabledModelNames(db: Db): string[] {
+  return listEnabledGatewayModels(db).map((m) => m.name);
 }

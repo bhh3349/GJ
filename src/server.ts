@@ -1,13 +1,19 @@
-// 进程入口：读配置 → 开库 → 建管理员 → 起管理面 HTTP 服务 → 挂维护定时器。
+// 进程入口：读配置 → 开库 → 建管理员 → 起**两个**监听（网关面 / 管理面）→ 挂维护定时器。
 //
 // 启动顺序是有讲究的，不能调换：
 //   1. loadConfig 先跑。MASTER_KEY 缺失或长度不对会在这一步抛错，进程直接起不来 ——
 //      这是有意的（契约要求），绝不允许"降级成不加密"把服务拉起来。
 //   2. openDatabase 建表/迁移，再 bootstrapAdmin 造首个管理员。
-//   3. 最后才 listen。反过来的话，存在一个窗口期：端口已对外，鉴权数据还没准备好。
+//   3. 建网关 runtime（这一步会同步建快照并解密 key），最后才 listen。
+//      反过来的话，存在一个窗口期：端口已对外，key 池还是空的 —— 那个窗口里进来的请求
+//      会拿到 503 NO_AVAILABLE_KEY，看起来像"池子坏了"。
+//
+// 两个监听、一份库：
+//   - 网关面（config.hostGateway:portGateway）跑 `/v1/*`，对外；
+//   - 管理面（config.hostAdmin:portAdmin）跑 `/api/*` + 前端，默认只回环。
+//   两个 Fastify 实例共用一个 `Db` 句柄：本项目是单写者模型，一个句柄才谈得上单写者。
 //
 // 维护定时器（清过期会话 / 裁日志 / 清限速表）在**同一个进程**里跑：
-// 本项目是单写者模型（同一份 SQLite 文件被网关与管理面共享），
 // 再起一个 cron 进程去写库，就同时有两个写者了。
 
 import { buildApp } from './api/app.js';
@@ -15,10 +21,11 @@ import { LoginRateLimiter, bootstrapAdmin, purgeExpiredSessions } from './api/au
 import { loadConfig } from './config.js';
 import { openDatabase } from './db/database.js';
 import { pruneLogs } from './db/repo/logs.js';
+import { createGatewayRuntime, mountGatewayRoutes } from './wiring/index.js';
 
 const HOUR_MS = 3_600_000;
 
-function main(): void {
+async function main(): Promise<void> {
   const config = loadConfig();
   const db = openDatabase({ path: config.dbPath });
 
@@ -27,6 +34,11 @@ function main(): void {
 
   const loginLimiter = new LoginRateLimiter();
   const app = buildApp({ db, config, logger: true, loginLimiter });
+
+  // 网关 runtime 自带内存快照 + 明文缓存，`stop()` 负责最后一次用量落库与清明文
+  const gateway = createGatewayRuntime({ db, config, logger: true });
+  await mountGatewayRoutes(gateway);
+  gateway.start();
 
   // 维护任务一律 try/catch 吞掉异常：清垃圾失败不该把整台服务带走，
   // 下一次 tick 还会再来一遍。
@@ -56,31 +68,48 @@ function main(): void {
     }, 5 * 60_000),
   ];
 
+  let closing = false;
   const shutdown = (signal: string): void => {
+    if (closing) return; // 连按两次 Ctrl-C 不该跑两遍关停流程
+    closing = true;
     app.log.info({ signal }, '收到退出信号，正在关闭');
     for (const t of timers) clearInterval(t);
-    void app.close().then(
-      () => {
-        db.close();
-        process.exit(0);
-      },
-      (err: unknown) => {
-        app.log.error({ err }, '关闭失败');
-        process.exit(1);
-      },
-    );
+    // 顺序：先停网关（把队列里最后一批用量落库、清掉内存里的 key 明文），
+    // 再关两个监听，最后才关库 —— 库先关的话，那次收尾 flush 会写到一个已关闭的连接上。
+    void gateway
+      .stop()
+      .then(() => Promise.all([app.close(), gateway.app.close()]))
+      .then(
+        () => {
+          db.close();
+          process.exit(0);
+        },
+        (err: unknown) => {
+          app.log.error({ err }, '关闭失败');
+          process.exit(1);
+        },
+      );
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-  app.listen({ host: config.hostAdmin, port: config.portAdmin }).then(
-    (address) => app.log.info({ address, dbPath: config.dbPath }, '管理面已启动'),
-    (err: unknown) => {
-      app.log.error({ err }, '监听失败');
-      db.close();
-      process.exit(1);
-    },
-  );
+  const onListenError = (err: unknown): void => {
+    app.log.error({ err }, '监听失败');
+    db.close();
+    process.exit(1);
+  };
+
+  // 两个监听都起来才算启动完成：先起网关面（客户端在等），再起管理面
+  gateway.app
+    .listen({ host: config.hostGateway, port: config.portGateway })
+    .then((address) => gateway.app.log.info({ address }, '网关面已启动 (/v1/*)'))
+    .then(() =>
+      app.listen({ host: config.hostAdmin, port: config.portAdmin }).then(
+        (address) => app.log.info({ address, dbPath: config.dbPath }, '管理面已启动'),
+        onListenError,
+      ),
+    )
+    .catch(onListenError);
 }
 
-main();
+void main();

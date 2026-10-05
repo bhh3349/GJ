@@ -73,6 +73,8 @@ function makeConfig(dbPath: string): AppConfig {
   return {
     masterKey: Buffer.from('2a'.repeat(32), 'hex'),
     dbPath,
+    portGateway: 0,
+    hostGateway: '127.0.0.1',
     portAdmin: 0,
     hostAdmin: '127.0.0.1',
     sessionTtlHours: 24,
@@ -81,6 +83,8 @@ function makeConfig(dbPath: string): AppConfig {
     allowedOrigins: [],
     adminToken: null,
     logRetentionDays: 30,
+    maxAttempts: 3,
+    maxConcurrencyPerKey: 4,
   };
 }
 

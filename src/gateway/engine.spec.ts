@@ -10,7 +10,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { describe, it } from 'vitest';
+import { describe, it, vi } from 'vitest';
 
 import { createGatewayEngine } from './engine.js';
 import type { FetchLike, ForwardResult } from './engine.js';
@@ -488,45 +488,58 @@ describe('流式透传', () => {
     assert.equal(runtimeOf(h.pool, 'k1').inflight, 0);
   });
 
-  it('长流不会被首字节超时掐断：拿到响应头即撤计时器（真实时钟）', async () => {
-    const sse = controlledSse();
-    let killed = false; // 上游被 abort 掉之后就别再往里推数据了，让断言说人话
-    const h = makeHarness({
-      keys: [keyConfig('k1')],
-      upstreamTimeoutMs: 20, // 首字节超时 20ms，而这条流要活 80ms
-      // 手搓的 Response 不会自己理会 signal，得复刻真实 undici 的语义：
-      // signal 一 abort，body 立即以 AbortError 终结。不接这一步这条用例就是空转。
-      steps: [
-        (_url, init) => {
-          init.signal?.addEventListener(
-            'abort',
-            () => {
-              killed = true;
-              sse.fail(new Error('aborted'));
-            },
-            { once: true },
-          );
-          return sse.response;
-        },
-      ],
-    });
+  it('长流不会被首字节超时掐断：拿到响应头即撤计时器（假定时器，零真实竞态）', async () => {
+    // 这条用例以前睡**真实** 80ms 去对撞引擎里**真实**的 20ms 首字节计时器：
+    // 只要事件循环被卡住超过 20ms（CI 上很常见），计时器就抢在 `disarmTimeout()` 之前烧掉，
+    // 用例随机变红 —— 竞态在测试侧，不在被测代码侧。
+    //
+    // 改法：时间只由本用例推（假定时器 + 拍屏障）。下面推进 80ms 假时钟那一行就是判据本身：
+    // 撤过计时器 ⇒ 这 80ms 里一个回调都不会跑；没撤（反向对照）⇒ abort 当场触发 `killed`，立刻变红。
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const sse = controlledSse();
+      let killed = false; // 上游被 abort 掉之后就别再往里推数据了，让断言说人话
+      const h = makeHarness({
+        keys: [keyConfig('k1')],
+        upstreamTimeoutMs: 20, // 首字节超时 20ms，而这条流要活 80ms
+        // 手搓的 Response 不会自己理会 signal，得复刻真实 undici 的语义：
+        // signal 一 abort，body 立即以 AbortError 终结。不接这一步这条用例就是空转。
+        steps: [
+          (_url, init) => {
+            init.signal?.addEventListener(
+              'abort',
+              () => {
+                killed = true;
+                sse.fail(new Error('aborted'));
+              },
+              { once: true },
+            );
+            return sse.response;
+          },
+        ],
+      });
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o', true), stream: true });
-    assert.equal(result.kind, 'stream');
-    if (result.kind !== 'stream') return;
+      const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o', true), stream: true });
+      assert.equal(result.kind, 'stream');
+      if (result.kind !== 'stream') return;
 
-    await new Promise((r) => setTimeout(r, 80));
-    if (!killed) {
+      // 拍屏障：把假时钟推过首字节超时 4 倍。撤了计时器这里就是真空档；没撤就是当场打红。
+      await vi.advanceTimersByTimeAsync(80);
+      assert.equal(killed, false, '拿到响应头后必须撤掉 TTFB 计时器：长流不能被它掐断，无辜的 key 也不该吃 NETWORK');
+
       sse.push('data: {"choices":[{"delta":{"content":"慢"}}]}\n\n');
       sse.push('data: [DONE]\n\n');
       sse.close();
-    }
 
-    const text = await drain(result.body);
-    assert.ok(text.includes('慢'), `长流必须完整透传，不能被 TTFB 超时掐断；实收 ${JSON.stringify(text)}`);
-    assert.equal(runtimeOf(h.pool, 'k1').lastFailureReason, null, '无辜的 key 不该吃 NETWORK 冷却');
-    assert.equal(runtimeOf(h.pool, 'k1').inflight, 0);
-    assert.equal(h.logs[0]?.statusCode, 200);
+      const text = await drain(result.body);
+      assert.ok(text.includes('慢'), `长流必须完整透传，不能被 TTFB 超时掐断；实收 ${JSON.stringify(text)}`);
+      assert.equal(runtimeOf(h.pool, 'k1').lastFailureReason, null, '无辜的 key 不该吃 NETWORK 冷却');
+      assert.equal(runtimeOf(h.pool, 'k1').inflight, 0);
+      assert.equal(h.logs[0]?.statusCode, 200);
+    } finally {
+      // 本文件其余用例（含那两处刻意的 5ms/20ms 上游超时模拟）依赖真实时钟，必须还原
+      vi.useRealTimers();
+    }
   });
 
   it('客户端主动断开：不计 key 失败、不进冷却、并发位归还', async () => {

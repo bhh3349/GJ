@@ -33,3 +33,9 @@ jobs:
 
       - name: Test
         run: pnpm test
+
+      # 验收第 9 条后半段：key 明文永不落盘。
+      # 扫全仓（不只 src/gateway），规则与 src/security/plaintext-scan.spec.ts 同源，
+      # 不会出现「测试绿但 CI 判据不同」的两套标准。
+      - name: Secret scan (key 明文永不落盘)
+        run: pnpm run check:secrets

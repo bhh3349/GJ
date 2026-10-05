@@ -1,0 +1,18 @@
+{
+  // 生产构建专用：从 tsconfig.json 派生，只做一件事 —— 把测试代码排除出 dist。
+  //
+  // 为什么必须单独一份：`include` 是 `src/**/*.ts`，`tsc -p tsconfig.json` 会把
+  // `src/**/*.spec.ts` 一起编译进 dist/gateway/key-pool.spec.js，测试代码就上了生产产物。
+  // typecheck 仍走 tsconfig.json（要覆盖测试文件的类型），两条路径职责不同，不要合并。
+  //
+  // 注意：TS 的 `exclude` 是「子配置整体覆盖父配置」，不是合并，
+  // 所以父配置里原有的 node_modules/dist/web 必须在这里重述一遍。
+  "extends": "./tsconfig.json",
+  "exclude": [
+    "node_modules",
+    "dist",
+    "web",
+    "src/**/*.spec.ts",
+    "src/**/*.test.ts"
+  ]
+}

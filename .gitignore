@@ -40,3 +40,6 @@ Thumbs.db
 
 # tool scratch
 .ekko-tmp/
+
+# git worktrees（一人一分支并行时用，不进版本库）
+.worktrees/

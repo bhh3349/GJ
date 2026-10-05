@@ -9,7 +9,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
     "start": "node dist/server.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
@@ -17,7 +17,8 @@
     "lint": "eslint .",
     "web:dev": "pnpm --filter web dev",
     "web:build": "pnpm --filter web build",
-    "check:sqlite": "node scripts/g1-sqlite-check.mjs"
+    "check:sqlite": "node scripts/g1-sqlite-check.mjs",
+    "check:secrets": "tsx src/security/plaintext-scan.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.5.0",

@@ -1,6 +1,6 @@
-# API 契约 v1.0（首版待冻结）
+# API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**待 PM 核验冻结**
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 
@@ -178,7 +178,8 @@
   "todayTokens": 84213,
   "revision": 2,
   "createdAt": "2026-10-01T03:00:00.000Z",
-  "updatedAt": "2026-10-06T09:12:00.000Z"
+  "updatedAt": "2026-10-06T09:12:00.000Z",
+  "deletedAt": null
 }
 ```
 
@@ -201,9 +202,9 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/api/keys?upstreamId=&category=&enabled=&health=&q=&page=&pageSize=` | 列表（默认 `maskedKey`） |
+| `GET` | `/api/keys?upstreamId=&category=&enabled=&health=&q=&page=&pageSize=&includeDeleted=` | 列表（默认 `maskedKey`，默认不含已软删） |
 | `POST` | `/api/keys` | 建，body `{upstreamId, key, category, label?, weight?, balance?, tokenPlan?}` → `201` |
-| `GET` | `/api/keys/:id` | 详情 |
+| `GET` | `/api/keys/:id` | 详情；已软删的 key 返回 404 `NOT_FOUND`（`?includeDeleted=true` 显式可查） |
 | `PATCH` | `/api/keys/:id` | 改 `{label?, enabled?, weight?, category?, tokenPlan?, revision}` |
 | `DELETE` | `/api/keys/:id` | 删 → `204` |
 | **`PUT`** | **`/api/keys/:id/balance`** | **手动录入余额**（见下） |
@@ -401,6 +402,7 @@
 1. 合计**只统计 `category="balance"` 的 key**。token-plan 类不进金额。
 2. 全局合计 = 各上游合计之和。
 3. 任一层只要有未知项，`balanceUnknownKeyCount` 必须 > 0，前端必须单独呈现。**未知不得补 0 计入合计。**
+4. 已软删（`deletedAt` 非空）的 key **不进**任何合计与未知计数，历史日志外键保留。
 
 ### `GET /api/stats/usage`
 覆盖画师 §三.5，**后端返回序列化好的时间轴，前端不二次聚合**。
@@ -435,7 +437,7 @@
 - `isEstimatedTokenCount`：`is_estimated=1` 的调用条数。前端图表需可标注"含估算"。
 
 ### `GET /api/logs` — 调用记录
-`?from=&to=&groupId=&model=&status=&upstreamId=&keyId=&page=&pageSize=`
+`?from=&to=&groupId=&model=&status=&upstreamId=&keyId=&page=&pageSize=&includeDeleted=`（默认不查已软删资源；`includeDeleted=true` 时按 id 过滤仍可命中已软删的 upstream/key/group）
 
 ```json
 {
@@ -586,16 +588,16 @@
 
 ---
 
-## 11. 本版未定项（需 PM 拍板后才冻结）
+## 11. C1–C5 裁决（已冻结，详见 ADR-0007）
 
-| # | 问题 | 我的倾向 |
+| # | 问题 | PM 裁决 |
 |---|---|---|
-| C1 | `POST /api/groups` 是否**必须**自动签发第一个网关 key？若允许建空组，"发 key"就要两步 | 一步到位（自动签发），建组即可用 |
-| C2 | `GET /api/stats/usage` 的 `bucket` 是否允许后端在跨度大时**自动降级**（如 7d 请求 `1m`）？ | 允许，但响应必须回显实际 `bucket`，前端按回显渲染 |
-| C3 | 日志查询是否需要**导出**端点，还是前端拿 `/api/logs` 自行拼 CSV？ | 前端自行导出（画师已按此表述），后端不加端点 |
-| C4 | `DELETE /api/upstreams/:id` 的 `force=true` 是级联软删 key 还是硬删？ | **软删**（`enabled=false` + `deletedAt`），保留历史日志外键 |
-| C5 | `PUT /api/keys/:id/balance` 是否需要"不可覆盖模板查得值"的保护？ | 不保护，手动录入**总是**优先并改 `balanceSource=manual` |
+| C1 | 建组自动签发第一把网关 key | **通过**：自动签发，明文仅在创建响应出现一次（同网关 key 明文纪律） |
+| C2 | usage bucket 自动降级 | **通过**：允许降级，响应必须回显实际 `bucket`，前端按回显渲染 |
+| C3 | 日志导出端点 | **通过**：不加端点，前端自行导出 |
+| C4 | 删上游 force=true 的 key 处置 | **通过**：级联软删（`enabled=false` + `deletedAt`），保留历史日志外键 |
+| C5 | 手动余额覆盖模板值 | **通过**：不保护，手动录入总是优先并置 `balanceSource=manual` |
 
 ---
 
-*冻结后本文件版本号升至 v1.0-frozen 并记入 `docs/adr/`。*
+*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-v1-frozen.md`。字段改动必须改本契约并新增 ADR。*

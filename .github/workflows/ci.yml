@@ -34,6 +34,20 @@ jobs:
       - name: Test
         run: pnpm test
 
+      # 四闸之 build。typecheck 是 `--noEmit`（只查类型），build 才会真的 emit ——
+      # 它单独抓的是 tsconfig.build.json 的 rootDir/outDir 漂移，以及只在 emit 阶段
+      # 才暴露的错误。本地四闸口径里有这一步，CI 缺它等于少一闸。
+      - name: Build
+        run: pnpm run build
+
+      # 待办 6：优雅停机。单列成一步，是为了红了能直接看出"是停机这条挂了"，
+      # 而不是淹没在某个测试文件里（这些用例 `pnpm test` 里也会跑，这里要的是**能指名道姓**）。
+      # 顺序判据（src/wiring/shutdown.spec.ts）全平台可跑；
+      # 真 SIGTERM 进程用例（src/server.spec.ts）只在 POSIX 上有效 ——
+      # win32 没有 POSIX 信号语义，测不出优雅停机，这正是它必须落到 Linux CI 上的原因。
+      - name: Shutdown gate (优雅停机顺序 + 真 SIGTERM)
+        run: pnpm run check:shutdown
+
       # 验收第 9 条后半段：key 明文永不落盘。
       # 扫全仓（不只 src/gateway），规则与 src/security/plaintext-scan.spec.ts 同源，
       # 不会出现「测试绿但 CI 判据不同」的两套标准。

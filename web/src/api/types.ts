@@ -262,7 +262,10 @@ export interface UpstreamKey {
   revision: number;
   createdAt: Iso8601;
   updatedAt: Iso8601;
-  /** 非空 = 已软删（C4 级联软删）。 */
+  /**
+   * 非空 = 已软删。来源只有 `DELETE /api/keys/:id` 这一条 —— 上游删除（ADR-0016）走的是
+   * **物理删除整棵子树**，不留软删行（v1.2.2 起）。
+   */
   deletedAt: Iso8601 | null;
 }
 

@@ -70,7 +70,11 @@ export const upstreamsApi = {
   create: (body: UpstreamCreateRequest) => api.post<Upstream>('/upstreams', body),
   /** 必须带 `revision`；不符 → 409 REVISION_MISMATCH。 */
   update: (id: string, body: UpstreamPatchRequest) => api.patch<Upstream>(`/upstreams/${id}`, body),
-  /** 有 key 且 `force !== true` → 409 UPSTREAM_HAS_KEYS，details.keyCount 给数量。 */
+  /**
+   * 删上游。有 key **或模型档案**且 `force !== true` → `409 UPSTREAM_HAS_KEYS`，
+   * `details: {keyCount, modelCount}`（v1.2.2）。
+   * `force=true` 按依赖序**物理删除整棵子树**（ADR-0016），不可撤销 —— 不是软删。
+   */
   remove: (id: string, force = false) =>
     api.del<void>(`/upstreams/${id}`, { query: { force: force ? true : undefined } }),
   /** 按模板查该上游全部 key 余额（异步）。 */

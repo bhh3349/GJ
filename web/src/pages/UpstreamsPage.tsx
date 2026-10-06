@@ -5,8 +5,11 @@
  * - 余额是「防造假」主战场：`totalBalance=null` 表示该上游所有 balance 类 key 都未知，
  *   **不是 0**；`balanceUnknownKeyCount` 必须单独呈现，让管理员看得见「合计是不完整的」。
  * - `token-plan` 类 key 不进金额合计（ADR-0003 规则 1），只在旁边单列数量。
- * - 删除有 key 的上游：后端 409 `UPSTREAM_HAS_KEYS`（`details.keyCount`），
- *   这里拿它做二次确认再发 `force=true`，不做「静默级联删」。
+ * - 删上游：上游下有 key **或模型档案**时，后端 409 `UPSTREAM_HAS_KEYS`，
+ *   `details: {keyCount, modelCount}` 两个计数都给（契约 v1.2.2）。这里拿它做二次确认再发 `force=true`。
+ *   `force` 不是软删 —— ADR-0016：单事务按依赖序**物理删除整棵子树**
+ *   （`key_runtime → upstream_keys → models → upstreams`）。所以文案必须说出
+ *   「模型档案连同手改的开关 / 价格一起没」，且 `modelCount` 拿不到时**不写模型数**（不把「不知道」写成 0）。
  * - 写请求一律带 `revision`；409 `REVISION_MISMATCH` 时提示并拉最新，避免对着旧版本反复提交。
  */
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
@@ -41,13 +44,55 @@ import { formatCount, formatIso, formatRelative } from '@/utils/format';
 
 const { Text } = Typography;
 
-/** `409 UPSTREAM_HAS_KEYS` 的 `details: {keyCount: 6}`，拿不到就回 null。 */
-function detailKeyCount(details: unknown): number | null {
-  if (details !== null && typeof details === 'object' && 'keyCount' in details) {
-    const value = (details as { keyCount?: unknown }).keyCount;
-    if (typeof value === 'number' && Number.isFinite(value)) return value;
+interface SubtreeCounts {
+  /** 未软删的 key 数（与 §2 `Upstream.keyCount` 同源）。后端没给时退回列表行自身的计数。 */
+  keyCount: number;
+  /** 模型档案数。后端未返回（早于 v1.2.2）时是 `null`，**不补 0**。 */
+  modelCount: number | null;
+}
+
+/**
+ * 解析 `409 UPSTREAM_HAS_KEYS` 的 `details: {keyCount, modelCount}`（契约 v1.2.2）。
+ *
+ * 两个计数都得读：`keyCount` 可能是 0 而 `modelCount > 0`（上游只同步了模型、没建 key 是常态），
+ * 只看 key 数会让管理员读成「没什么可删的」，而实际连模型档案会一起删。
+ */
+function detailCounts(details: unknown, row: Upstream): SubtreeCounts {
+  const pick = (key: 'keyCount' | 'modelCount'): number | null => {
+    if (details === null || typeof details !== 'object' || !(key in details)) return null;
+    const value = (details as Record<string, unknown>)[key];
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  };
+  return { keyCount: pick('keyCount') ?? row.keyCount, modelCount: pick('modelCount') };
+}
+
+/** 二次确认正文：先给「删掉什么」的数量，再给「丢掉什么」的不可逆代价。 */
+function DeleteUpstreamBody({ name, counts }: { name: string; counts: SubtreeCounts }) {
+  const parts: string[] = [];
+  if (counts.keyCount > 0) parts.push(`Key ${counts.keyCount} 个`);
+  if (counts.modelCount !== null && counts.modelCount > 0) {
+    parts.push(`模型档案 ${counts.modelCount} 个`);
   }
-  return null;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
+      <Text>
+        将物理删除「{name}」整棵子树
+        {parts.length > 0 ? `：${parts.join(' · ')}` : ''}。
+      </Text>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        计数只含未软删的 key；此前软删、仍挂在库上的 key 行也会一并消失 —— 行级外键不解除，留着就删不掉上游。
+      </Text>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        模型档案随上游一起消失，
+        <Text style={{ color: tokens.color.warning }}>你在档案卡上手改的开关 / 价格会一并丢失</Text>
+        ，且不可撤销。
+      </Text>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        历史调用日志不受影响：日志行自带 key 掩码与模型名，本次删除由审计日志留痕。
+      </Text>
+    </div>
+  );
 }
 
 export default function UpstreamsPage() {
@@ -122,11 +167,12 @@ export default function UpstreamsPage() {
       })
       .catch((error: unknown) => {
         if (!force && isApiError(error) && error.code === 'UPSTREAM_HAS_KEYS') {
-          const count = detailKeyCount(error.details);
+          const counts = detailCounts(error.details, row);
           modal.confirm({
-            title: `「${row.name}」下还有 key，确定强制删除？`,
-            content: `该上游有 ${count ?? row.keyCount} 个 key，会被级联软删（enabled=false + deletedAt，C4）；历史调用日志的外键保留，仍可查询。`,
-            okText: '强制删除',
+            title: `「${row.name}」下还有从属资源，确定一并删除？`,
+            width: 480,
+            content: <DeleteUpstreamBody name={row.name} counts={counts} />,
+            okText: '连同从属资源删除',
             okButtonProps: { danger: true },
             cancelText: '取消',
             onOk: () => {

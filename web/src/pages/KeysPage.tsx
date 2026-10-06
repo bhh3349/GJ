@@ -484,7 +484,7 @@ export default function KeysPage() {
             setPage(1);
           }}
         />
-        <Tooltip title="默认不显示已软删的 key；打开后可查历史（C4 级联软删保留日志外键）">
+        <Tooltip title="默认不显示已软删的 key；打开后可查历史（软删行仍保留，日志外键不断）">
           <Segmented
             size="small"
             value={filters.includeDeleted ? 'with' : 'without'}

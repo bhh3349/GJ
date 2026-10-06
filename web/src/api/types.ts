@@ -675,3 +675,92 @@ export const WS_CLOSE = {
   /** 正常关闭（登出）→ 不重连 */
   NORMAL: 1000,
 } as const;
+
+// ── §12 运维观测（只读） ──────────────────────────────────────────────────
+
+/** §12.1 错误事件分型，9 值枚举。**唯一判据**，不由 HTTP 状态现推。 */
+export const OBSERVABILITY_CATEGORIES = [
+  'CLIENT_REQUEST',
+  'AUTH_FAILED',
+  'RATE_LIMITED',
+  'QUOTA_EXCEEDED',
+  'NO_AVAILABLE_KEY',
+  'UPSTREAM_ERROR',
+  'UPSTREAM_TIMEOUT',
+  'CLIENT_ABORTED',
+  'INTERNAL',
+] as const;
+
+export type ObservabilityCategory = (typeof OBSERVABILITY_CATEGORIES)[number];
+
+/** §12.2 健康窗口。与 §6 `StatsWindow` 不同：观测面**没有** `15m`。 */
+export type ObservabilityWindow = '60s' | '5m' | '1h';
+
+export type ObservabilitySeverity = 'warn' | 'error';
+
+// ── §13 内置 AI 助手聊天 `POST /api/assistant/chat`（v1.2.0） ─────────────
+
+export type AssistantRole = 'system' | 'user' | 'assistant';
+
+/** 一轮对话里的一条消息。多轮上下文由**客户端**原样回传（服务端无状态、不落库）。 */
+export interface AssistantMessage {
+  role: AssistantRole;
+  content: string;
+}
+
+/**
+ * §13.1 结构化取数参数 —— 逐字段复用 §12.3 白名单，**不造第二套口径**。
+ * 省略 = 纯闲聊、不注入日志。
+ */
+export interface AssistantLogContext {
+  window?: ObservabilityWindow;
+  /** 带时区 ISO8601；与 `to` 跨度 > 24h 时服务端收窄并回 `truncated`（**不报 400**）。 */
+  from?: Iso8601;
+  to?: Iso8601;
+  /** 逗号分隔多值（最多 9）。 */
+  category?: string;
+  severity?: ObservabilitySeverity;
+  upstreamId?: string;
+  keyId?: string;
+  model?: string;
+  requestId?: string;
+}
+
+export interface AssistantChatRequest {
+  /** 至少 1 条；空/缺失 → 400 INVALID_PARAM。 */
+  messages: AssistantMessage[];
+  logContext?: AssistantLogContext;
+}
+
+/** §13.2 citation：服务端派生的注入事件引用（不是从模型输出解析 id）。 */
+export interface AssistantCitation {
+  id: string;
+  ts: Iso8601;
+  /** 事件可能没有码值（如 499 客户端断开）→ `null`。 */
+  gatewayCode: string | null;
+  category: string;
+  severity: ObservabilitySeverity;
+  /** 未过鉴权的请求恒为 `null`（§12.1 产出边界）。 */
+  model: string | null;
+  /** 已脱敏 `message` 再截 120 字符 —— 可直接渲染的最小可读标签。 */
+  summary: string;
+}
+
+/**
+ * §13.2 SSE 帧（**恰好一个终止帧**）。
+ * `seq` 单请求内从 1 起单调递增；「重试」= 新请求 = 从 1 重来。
+ */
+export type AssistantFrame =
+  | { kind: 'delta'; seq: number; text: string }
+  | { kind: 'done'; seq: number; truncated: boolean; citations: AssistantCitation[] }
+  | {
+      kind: 'error';
+      seq: number;
+      /** §10 网关码值，零新增枚举。 */
+      code: string;
+      message: string;
+      /** §10 表里该码值的 HTTP 状态，**不是**本次 SSE 响应状态（流已开恒 200）。 */
+      status: number;
+      /** 仅 429 两类带；其它为 `null`。 */
+      retryAfterSec: number | null;
+    };

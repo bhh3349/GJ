@@ -79,6 +79,17 @@ function isWriteMethod(method: string): boolean {
   return method !== 'GET' && method !== 'HEAD';
 }
 
+/**
+ * 401 会话失效（UNAUTHORIZED / SESSION_EXPIRED）统一在此派发。
+ * 管理面**任何**传输层都必须走它 —— 包括不走 `apiFetch` 的 SSE（`assistant.ts`），
+ * 否则 401 只会变成气泡里的一行错，用户不会被踢回登录页。
+ */
+export function notifyIfSessionExpired(status: number, code: string | null): void {
+  if (status === 401 && (code === 'UNAUTHORIZED' || code === 'SESSION_EXPIRED')) {
+    window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT, { detail: code }));
+  }
+}
+
 export async function apiFetch<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const method = options.method ?? 'GET';
   const headers: Record<string, string> = { Accept: 'application/json' };
@@ -132,9 +143,7 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
         ? (parsed as ApiErrorBody)
         : { code: `HTTP_${response.status}`, message: response.statusText || '请求失败' };
 
-    if (response.status === 401 && (body.code === 'UNAUTHORIZED' || body.code === 'SESSION_EXPIRED')) {
-      window.dispatchEvent(new CustomEvent(SESSION_EXPIRED_EVENT, { detail: body.code }));
-    }
+    notifyIfSessionExpired(response.status, body.code);
 
     throw new ApiError(response.status, body);
   }

@@ -29,6 +29,8 @@ export const router = createBrowserRouter([
       { path: 'models', element: lazyPage(() => import('@/pages/ModelsPage')) },
       { path: 'stats', element: lazyPage(() => import('@/pages/StatsPage')) },
       { path: 'logs', element: lazyPage(() => import('@/pages/LogsPage')) },
+      // 契约 §13：助手页独立分包，不进 Dashboard 首屏、不加载 ECharts。
+      { path: 'assistant', element: lazyPage(() => import('@/pages/assistant/AssistantPage')) },
       { path: '*', element: <NotFoundPage /> },
     ],
   },

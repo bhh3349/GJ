@@ -76,6 +76,18 @@ body {
   background-clip: content-box;
 }
 
+/* §13 助手流式光标。末态停在 opacity:1 —— prefers-reduced-motion 下动画被压成单帧时
+   会停在实心光标，而不是「闪到看不见」。 */
+@keyframes assistant-caret {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.15;
+  }
+}
+
 :focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 2px;

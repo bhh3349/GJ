@@ -202,11 +202,18 @@ export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOpt
       return null;
     }
     if (!group.enabled) {
-      // **刻意不产事件**：`GROUP_DISABLED` 既不在 §10 的 `GATEWAY_ERROR_CODES` 里，
-      // 也不在 §12.1 的分型表里（表里 403 一行都没有）。照现状上报的话，实现侧只能
-      // 把这条调用方侧的错误归成 `INTERNAL`/error —— 往主诊断库里写一条**已知错误**的
-      // 分型，比留下一个被登记在案的缺口更糟。这是留给契约方的决定，见回报。
-      void reply.code(403).send(openAIError('GROUP_DISABLED', 'user group is disabled', 'authentication_error'));
+      // 契约 v1.1.2（ADR-0013 落地补遗）已把 `GROUP_DISABLED` 登记进 §10 并归入 `AUTH_FAILED`，
+      // 故这里**产事件**（此前因「码值未登记、只能被实现侧归成 INTERNAL」而刻意不产）。
+      // 403 是**已过鉴权**的拒绝：key 有效、只是组被禁用 —— 照 §12.1 产出边界②的推论，
+      // 应读 body 填 `model` / `stream`（那条收窄针对的是"未过鉴权不读 body"的匿名写入路径）。
+      const message = 'user group is disabled';
+      reportRejection(
+        request,
+        reply,
+        { status: 403, gatewayCode: GATEWAY_ERROR_CODES.GROUP_DISABLED, message },
+        authedFacts(request),
+      );
+      void reply.code(403).send(openAIError(GATEWAY_ERROR_CODES.GROUP_DISABLED, message, 'authentication_error'));
       return null;
     }
     return group;

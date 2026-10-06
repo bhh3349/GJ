@@ -5,7 +5,7 @@
  * 「分型对不对」不在这里测 —— `category` / `severity` 由实现侧（`src/wiring/error-event-sink.ts`）
  * 从事实派生，网关根本不认识这两个概念（端口契约就是这么冻的）。这里只验网关报出来的事实：
  *   - 该产的产了：失败终态各一条，不多不少（成功路径零事件）
- *   - 不该产的不产：上游 4xx 透传、`GROUP_DISABLED`、非 `/v1/*` 的兜底 404
+ *   - 不该产的不产：上游 4xx 透传、Fastify 自产的 413/415、非 `/v1/*` 的兜底 404
  *   - 同一个 429 的两种码值如实分开：`RATE_LIMITED` 与 `QUOTA_EXCEEDED` 不许被状态码糊成一个
  *   - 三个"不可互相反推"的字段各就各位：`gatewayCode`（§10 码）/ `failureReason`（换 key 枚举）/ `status`
  *   - 关联键：入站校验 → 响应头回写 → 透传上游 → 进事件，四处同值（ADR-0014）
@@ -358,13 +358,29 @@ describe('被拒的请求（路由层产）', () => {
     assert.equal(entry.message, 'missing bearer gateway key');
   });
 
-  it('用户组被禁用 → 403，**不产事件**（该分型尚未登记进契约，见回报）', async () => {
+  it('用户组被禁用 → 403 GROUP_DISABLED，**产事件**且带 clientModel（403 已过鉴权）', async () => {
     const h = await setup({ group: { enabled: false } });
-    const res = await post(h, '/v1/chat/completions', chatPayload());
+    const res = await post(h, '/v1/chat/completions', chatPayload({ stream: true }));
 
     assert.equal(res.statusCode, 403);
     assert.equal((res.json() as { error: { code: string } }).error.code, 'GROUP_DISABLED');
-    assert.equal(h.entries.length, 0, '§10 无此码、§12.1 无对应分型：往主诊断库里写一条已知错误的分型比留下缺口更糟');
+    // 契约 v1.1.2 已把此码登记进 §10 并归入 `AUTH_FAILED`（ADR-0013 落地补遗）→ 开始产事件。
+    const entry = only(h);
+    assert.equal(entry.status, 403);
+    assert.equal(entry.gatewayCode, 'GROUP_DISABLED');
+    assert.equal(
+      entry.clientModel,
+      'gpt-4o',
+      '403 在鉴权之后：key 有效、只是组被禁用 —— 「未过鉴权才不读 body」的收窄不该连带 403 一起变成 null',
+    );
+    assert.equal(entry.stream, true, '同上：body 可读，stream 必须如实填');
+    assert.equal(entry.failureReason, null, '没碰过任何上游：没有"换 key 枚举"可言');
+    assert.equal(entry.keyId, '', '组级拒绝不指向某把 key');
+    assert.equal(entry.upstreamId, '');
+    assert.equal(entry.upstreamStatus, null);
+    assert.equal(entry.attempts, 0);
+    assert.equal(entry.candidates, null, '没走到选路，与 503 的 candidates=0 不是一回事');
+    assert.equal(entry.message, 'user group is disabled');
   });
 
   it('同一个 429 的两种码值如实分开：RPM 限流 vs 日配额用尽', async () => {

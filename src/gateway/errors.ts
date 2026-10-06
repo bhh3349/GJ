@@ -4,7 +4,7 @@
  *
  * 纪律：`/v1/*` 只出 OpenAI 形状 `{error:{message,type,code}}`，绝不出现 `{code,message}`。
  * 码值来源分两类：
- *   - 项目冻结码：NO_AVAILABLE_KEY / UNSUPPORTED_ENDPOINT（契约 §10 明文写死）
+ *   - 项目冻结码：NO_AVAILABLE_KEY / UNSUPPORTED_ENDPOINT / GROUP_DISABLED（契约 §10 明文写死）
  *   - OpenAI 规范码：invalid_api_key / rate_limit_exceeded / insufficient_quota / ...
  * 新增码值前先在群里对一次，避免调用方按码分支时踩空。
  */
@@ -33,6 +33,7 @@ export interface OpenAIErrorBody {
 export const GATEWAY_ERROR_CODES = {
   INVALID_REQUEST: 'INVALID_REQUEST',
   INVALID_API_KEY: 'INVALID_API_KEY',
+  GROUP_DISABLED: 'GROUP_DISABLED',
   NO_AVAILABLE_KEY: 'NO_AVAILABLE_KEY',
   UNSUPPORTED_ENDPOINT: 'UNSUPPORTED_ENDPOINT',
   RATE_LIMITED: 'RATE_LIMITED',

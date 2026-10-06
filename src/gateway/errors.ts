@@ -102,6 +102,23 @@ export const poolSaturatedError = (candidateCount: number): GatewayError =>
   );
 
 /**
+ * 出口级（IP 级）限流（契约 §16.7）：冷却期内**不换 key**，径直回给客户端。
+ *
+ * 码值复用既有 `RATE_LIMITED` —— §16.7 明文「不新增错误码、不新增 HTTP 状态」：
+ * 出口被限流与「池饱和」在调用方那侧**同形**（都是"退避后可重试"），这个同形是对的。
+ * 只有 `message` 与 `Retry-After` 与饱和路径不同，供值班分辨。
+ */
+export const egressRateLimitedError = (retryAfterSec: number): GatewayError =>
+  new GatewayError(
+    429,
+    GATEWAY_ERROR_CODES.RATE_LIMITED,
+    `upstream egress rate limited, retry after ${retryAfterSec}s`,
+    'rate_limit_error',
+    undefined,
+    retryAfterSec,
+  );
+
+/**
  * 0 次真实尝试且非纯饱和：密文缺失/解析不到等配置侧异常。
  * 复用 `NO_AVAILABLE_KEY`(503) 不新增码值 —— 对客户端而言「池里没有能派发的 key」与「一把都选不出来」
  * 是同一种处置（别重试到这个组上）；归因差别在 message 里给值班看。见 ADR-0011。

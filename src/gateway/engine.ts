@@ -14,8 +14,11 @@
 
 import { REQUEST_ID_HEADER } from '../util/request-id.js';
 import type { KeyPoolInternal } from './key-pool.js';
-import { classifyUpstreamStatus, parseRetryAfter } from './classify.js';
-import { GatewayError, GATEWAY_ERROR_CODES, noAvailableKeyError, openAIError, poolMisconfiguredError, poolSaturatedError, upstreamError } from './errors.js';
+import { classifyUpstreamStatus, neverEgressLimited, parseRetryAfter } from './classify.js';
+import type { EgressLimitDetector } from './classify.js';
+import { createEgressCooldown, egressHostOf, retryAfterSecOf } from './egress.js';
+import type { EgressCooldown } from './egress.js';
+import { GatewayError, GATEWAY_ERROR_CODES, POOL_SATURATED_RETRY_AFTER_SEC, egressRateLimitedError, noAvailableKeyError, openAIError, poolMisconfiguredError, poolSaturatedError, upstreamError } from './errors.js';
 import type {
   ErrorEventEntry,
   ErrorEventSink,
@@ -54,6 +57,16 @@ export interface EngineOptions {
   crossUpstreamRetry?: boolean;
   /** 上游首字节超时（ms），默认 120s。只作用于「拿到响应头之前」，不掐长流 */
   upstreamTimeoutMs?: number;
+  /**
+   * 出口级（IP 级）冷却表（契约 §16.7）。**必须跨请求共享** —— 出口被限流是全体请求
+   * 共同的事实，每个请求各建一份等于没建。缺省内部建一个空表，既有调用方零改动。
+   */
+  egress?: EgressCooldown;
+  /**
+   * 出口级 429 的识别器（ADR-0020 决策 4）。缺省 `neverEgressLimited`：
+   * 通道已接好但**不触发**，行为与改动前逐字节相同 —— 识别规则落地前不加戏。
+   */
+  egressLimitDetector?: EgressLimitDetector;
   /** 逐次尝试的观测钩子（指标/日志用，抛异常会被吞掉） */
   onAttempt?: (event: AttemptEvent) => void;
   /**
@@ -143,6 +156,9 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
   const maxAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
   const crossUpstreamRetry = options.crossUpstreamRetry ?? true;
   const upstreamTimeoutMs = options.upstreamTimeoutMs ?? DEFAULT_UPSTREAM_TIMEOUT_MS;
+  // 出口级状态（§16.7）：未注入时自建一份，保证单测与既有调用方零改动。
+  const egress = options.egress ?? createEgressCooldown(options.now === undefined ? {} : { now: options.now });
+  const egressLimitDetector = options.egressLimitDetector ?? neverEgressLimited;
 
   function emit(event: AttemptEvent): void {
     try {
@@ -295,6 +311,12 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
     let skippedSaturated = 0; // beginAttempt=false：并发槽位全满 → 429 RATE_LIMITED
     let skippedUnresolvable = 0; // secrets.resolve()===null：配置侧异常 → 503
     let attemptableCandidates = 0; // 进入循环、未被 crossUpstreamRetry/maxAttempts 剪掉的候选数
+    // 出口级冷却（§16.7）：冷却期内的候选**不换 key**，全被跳完则径直回 429。
+    // 与 key 级冷却的分野：key 级「换一把就好」，出口级「换一把必然再撞」。
+    let skippedEgress = 0;
+    let egressRetryAfterMs = 0; // 上述跳过里最长的剩余冷却 → 回给客户端的 Retry-After
+    // 本请求内、同一出口上已吃到 429 的**不同** key；自证据识别器据此判出口级（classify.ts）
+    const egressKeys429 = new Set<string>();
 
     for (const candidate of candidates) {
       if (attempts >= maxAttempts) break;
@@ -313,6 +335,20 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
       if (target === null) {
         // 密文缺失 / key 已被删：配置侧问题，不计 key 失败
         skippedUnresolvable += 1;
+        pool.endAttempt(candidate.keyId);
+        emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'skipped' });
+        continue;
+      }
+
+      // 出口级冷却（§16.7）：该候选所在的出口正在冷却 → 本轮**不试它**。
+      // 放在 `attempts += 1` **之前**是有意的：`attempts` 数的是"真敲过上游"的次数
+      // （收尾分型靠 `attempts === 0` 判"一个上游都没碰到"，ADR-0011），而出口级跳过
+      // 一个请求都没发出，记进去会把终态推去 502 而不是 §16.7 要求的 429。
+      // 这不等于整池短路：**别的出口**的候选仍可顶上（出口级 ≠ 上游级 ≠ 池级）。
+      const egressHost = egressHostOf(target.baseUrl);
+      if (egressHost !== null && egress.isCooling(egressHost)) {
+        skippedEgress += 1;
+        egressRetryAfterMs = Math.max(egressRetryAfterMs, egress.remainingMs(egressHost));
         pool.endAttempt(candidate.keyId);
         emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'skipped' });
         continue;
@@ -396,15 +432,56 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
           };
         }
 
-        pool.reportFailure(candidate.keyId, reason, {
-          retryAfterMs: parseRetryAfter(response.headers.get('retry-after'), now()),
-        });
+        const retryAfterMs = parseRetryAfter(response.headers.get('retry-after'), now());
+
+        // 出口级 429（§16.7）。识别规则见 classify.ts —— 默认识别器恒 false，本段不触发。
+        if (reason === 'RATE_LIMITED' && egressHost !== null) {
+          egressKeys429.add(candidate.keyId);
+          const isEgressLevel = egressLimitDetector({
+            status: response.status,
+            body: raw,
+            headers: response.headers,
+            egressHost,
+            distinctKeysFailed429: egressKeys429.size,
+          });
+          if (isEgressLevel) {
+            // 归因上移（ADR-0020 决策 2/3）：**不调 reportFailure(keyId)** —— 谁没错，不给谁记过。
+            // 冷却落在出口上，且**不换 key**：同出口轮换必然再撞，这里是放大器不是容错。
+            const until = egress.cool(egressHost, retryAfterMs);
+            emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'failure', reason, status: response.status, ttfbMs });
+            logAttempt(req, {
+              keyId: candidate.keyId,
+              upstreamId: candidate.upstreamId,
+              statusCode: response.status,
+              usage: null,
+              ttfbMs,
+              attempts,
+              failureReason: reason,
+              started,
+            });
+            const error = egressRateLimitedError(retryAfterSecOf(until - now()));
+            reportGatewayError(req, started, error, {
+              failureReason: reason,
+              attempts,
+              candidates: candidates.length,
+              upstreamStatus: response.status,
+            });
+            return { kind: 'error', error, attempts };
+          }
+        }
+
+        pool.reportFailure(candidate.keyId, reason, { retryAfterMs });
         lastReason = reason;
         lastStatus = response.status;
         lastTimedOut = false;
         emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'failure', reason, status: response.status, ttfbMs });
         continue;
       }
+
+      // 出口真的答了 → 清该出口的连续计数、退出升档。
+      // **只清计数、不清冷却窗口**：并发的在途请求成功不该提前解开整出口的冷却
+      // （§16.7 冷却的意义就是让这段时间内别再打这个 IP）。
+      if (egressHost !== null) egress.noteSuccess(egressHost);
 
       if (req.stream) {
         if (response.body === null) {
@@ -474,10 +551,15 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
     //   - attempts === 0 且有候选：全是「跳过」—— 分饱和与配置异常两型，都不许报 502
     //   - 真实失败发生在中途、后续候选被剪掉：lastReason 已带住，走 502/504
     if (attempts === 0 && attemptableCandidates > 0) {
-      if (skippedSaturated > 0 && skippedUnresolvable === 0) {
-        // 池饱和：所有候选并发槽位全满。上游没有任何故障，让客户端带 Retry-After 短退避。
+      // 「上游没故障、退避后可重试」的两型：出口级冷却（§16.7）与池饱和（ADR-0011）。
+      // 两型都用 429 + `Retry-After`，与 §16.7「不新增错误码、不新增 HTTP 状态」一致。
+      // 出口级优先报：它的退避窗口更粗（分钟级），对客户端更接近事实。
+      // skippedEgress === 0 时本条件与改动前逐字等价（既有口径零漂移）。
+      const retryableSkips = skippedEgress + skippedSaturated;
+      if (retryableSkips > 0 && skippedUnresolvable === 0) {
         logAttempt(req, { keyId: '', upstreamId: '', statusCode: 429, usage: null, ttfbMs: now() - started, attempts, failureReason: null, started });
-        const error = poolSaturatedError(attemptableCandidates);
+        const error =
+          skippedEgress > 0 ? egressRateLimitedError(retryAfterSecOf(egressRetryAfterMs)) : poolSaturatedError(attemptableCandidates);
         reportGatewayError(req, started, error, { attempts, candidates: candidates.length });
         return { kind: 'error', error, attempts };
       }

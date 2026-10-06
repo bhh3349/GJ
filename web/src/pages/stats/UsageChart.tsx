@@ -34,22 +34,10 @@ export const METRIC_LABEL: Record<UsageMetric, string> = {
   errors: '错误数',
 };
 
-/** 深色底上的序列配色：主色打头，其余按可辨识度排。 */
-const PALETTE = [
-  tokens.color.primary,
-  tokens.color.success,
-  tokens.color.warning,
-  tokens.color.info,
-  '#A78BFA',
-  '#F472B6',
-  '#22D3EE',
-  '#FB923C',
-  '#4ADE80',
-  '#818CF8',
-];
-
+/** 序列配色取自 token 单一事实源，本文件不出现任何色值字面量。 */
 function colorAt(index: number): string {
-  return PALETTE[index % PALETTE.length] ?? tokens.color.primary;
+  const palette = tokens.chart.series;
+  return palette[index % palette.length] ?? tokens.color.primary;
 }
 
 /** 轴刻度粒度由后端回显的 bucket 决定，不由「用户以为选了什么」决定。 */

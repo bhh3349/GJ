@@ -7,6 +7,7 @@
   --bg-sider: #080b11;
   --border: #1e2a3a;
   --border-strong: #2a3a50;
+  --border-hover: #3b4f6b;
   --text-primary: #e6edf7;
   --text-secondary: #93a3ba;
   --text-tertiary: #5f7089;
@@ -72,7 +73,7 @@ body {
 }
 
 *::-webkit-scrollbar-thumb:hover {
-  background: #3b4f6b;
+  background: var(--border-hover);
   background-clip: content-box;
 }
 

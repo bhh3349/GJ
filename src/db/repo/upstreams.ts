@@ -237,30 +237,68 @@ export function updateUpstream(db: Db, id: string, patch: UpdateUpstreamInput): 
 }
 
 /**
- * 删除上游。
- * C4 裁决：force=true 时级联**软删**其下 key（enabled=0 + deletedAt），保留历史日志外键。
- * 硬删 key 会让 usage_logs.key_id 变成悬空外键，历史记录从此对不上账。
+ * 该上游下的**全部** key id，含已软删的。
+ *
+ * 必须含软删：`upstream_keys.upstream_id REFERENCES upstreams(id)` 是**行级**约束，
+ * 软删（`deleted_at` 置值）并不解除它 —— 只要还有一行 key 指着上游，上游行就删不掉。
+ */
+function listUpstreamKeyIds(db: Db, upstreamId: string): string[] {
+  return (
+    db.prepare('SELECT id FROM upstream_keys WHERE upstream_id = ?').all(upstreamId) as { id: string }[]
+  ).map((r) => r.id);
+}
+
+/** 该上游下的模型档案 id。 */
+function listUpstreamModelIds(db: Db, upstreamId: string): string[] {
+  return (
+    db.prepare('SELECT id FROM models WHERE upstream_id = ?').all(upstreamId) as { id: string }[]
+  ).map((r) => r.id);
+}
+
+/**
+ * 删除上游：**整棵子树物理删除**（ADR-0016，修订 C4 的 key 处置）。
+ *
+ * 为什么不能像 C4 原文那样"软删 key + 硬删上游行"：`upstream_keys.upstream_id`
+ * 与 `models.upstream_id` 都是 `REFERENCES upstreams(id)` 且 `foreign_keys=ON`，
+ * **软删不解除行级外键** —— 上游下只要还有一行 key（哪怕已软删）或一行模型，
+ * `DELETE FROM upstreams` 就直接 `SQLITE_CONSTRAINT_FOREIGNKEY`（画师实测到的 500）。
+ *
+ * 所以这里按依赖序硬删：`key_runtime`（指向 key）→ `upstream_keys` → `models` → `upstreams`，
+ * 单事务内完成，并为每个实体发一条 change_log（网关快照按 entity 增量重建）。
+ * 顺序不是风格问题：先删运行态镜像，否则删 key 那一步必违约。
+ *
+ * 历史可读性不依赖这些行：`usage_logs` 把 `key_masked` / `model` 名字**存在日志行自己身上**
+ * （表里 `key_id` / `upstream_id` 本就没有外键声明），删行不会让历史"对不上账"；
+ * 删除动作由 `audit_log` 留痕（与 ADR-0008 对网关 key 的处理同构）。代价是
+ * **管理员在档案卡上手改的开关 / 价格会随档案一起消失**，所以 `force!=true` 时
+ * key 与模型一起拦，`details` 两个计数都给，前端二次确认必须把数量说清。
  */
 export function deleteUpstream(db: Db, id: string, force: boolean): void {
   const row = getUpstreamRow(db, id);
   if (!row) throw ApiError.notFound('上游', id);
 
   const counts = countsByUpstream(db).get(id) ?? { keyCount: 0, enabledKeyCount: 0 };
-  if (counts.keyCount > 0 && !force) {
-    throw new ApiError('UPSTREAM_HAS_KEYS', '该上游下仍有 key，删除会一并停用它们', {
+  const modelIds = listUpstreamModelIds(db, id);
+
+  if ((counts.keyCount > 0 || modelIds.length > 0) && !force) {
+    throw new ApiError('UPSTREAM_HAS_KEYS', '该上游下仍有从属资源：继续删除会一并删除其 key 与模型档案', {
       keyCount: counts.keyCount,
+      modelCount: modelIds.length,
     });
   }
 
-  const at = nowIso();
   db.transaction(() => {
-    if (counts.keyCount > 0) {
+    const keyIds = listUpstreamKeyIds(db, id);
+    if (keyIds.length > 0) {
       db.prepare(
-        `UPDATE upstream_keys
-         SET enabled = 0, deleted_at = ?, revision = revision + 1, updated_at = ?
-         WHERE upstream_id = ? AND deleted_at IS NULL`,
-      ).run(at, at, id);
-      appendChange(db, 'key', id, 'update', null);
+        'DELETE FROM key_runtime WHERE key_id IN (SELECT id FROM upstream_keys WHERE upstream_id = ?)',
+      ).run(id);
+      db.prepare('DELETE FROM upstream_keys WHERE upstream_id = ?').run(id);
+      for (const keyId of keyIds) appendChange(db, 'key', keyId, 'delete', null);
+    }
+    if (modelIds.length > 0) {
+      db.prepare('DELETE FROM models WHERE upstream_id = ?').run(id);
+      for (const modelId of modelIds) appendChange(db, 'model', modelId, 'delete', null);
     }
     db.prepare('DELETE FROM upstreams WHERE id = ?').run(id);
     appendChange(db, 'upstream', id, 'delete', null);

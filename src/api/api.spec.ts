@@ -17,6 +17,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../config.js';
 import { openDatabase, type Db } from '../db/database.js';
 import { sha256Hex } from '../db/crypto.js';
+import { upsertKeyRuntimeStates } from '../db/repo/key-runtime.js';
+import { upsertModelFromSync } from '../db/repo/models.js';
 import { buildApp } from './app.js';
 import { bootstrapAdmin } from './auth.js';
 
@@ -809,6 +811,133 @@ describe('余额自测（契约 §2 · M6-A）：同步、诊断语义、绝不�
     expect(body.source).toBe('preset');
     expect(body.presetId).toBe('openai');
     expect(body.parsed.balance).toBe(4000); // (50 − 10) 美元 × 100
+    await closeHarness(h);
+  });
+});
+
+/**
+ * 删上游的从属资源处置（契约 §2 / ADR-0016，修订 §11 C4）。
+ *
+ * 之前只判 key：上游下**有模型档案**时 `DELETE` 会硬删 upstream 行，而
+ * `models.upstream_id REFERENCES upstreams(id)` 挡住它 → `500 INTERNAL /
+ * SQLITE_CONSTRAINT_FOREIGNKEY`。前端"上游管理"页的删除按钮在这条路上是死的。
+ * 用例钉住三件事：①模型也进 409 守卫且拦下零副作用；②根因（软删 key 不解除行级
+ * 外键，C4 原文在此 schema 下不可实现）；③`force=true` 按依赖序删整棵子树 + 广播发出。
+ */
+describe('删上游：从属资源处置（契约 §2 / ADR-0016）', () => {
+  async function seedModel(h: Harness, upstreamId: string, name = 'probe-m1'): Promise<string> {
+    const { id } = upsertModelFromSync(h.db, {
+      upstreamId,
+      name,
+      displayName: null,
+      type: 'chat',
+      capabilities: ['stream'],
+      contextLength: 128000,
+      price: { inputPer1k: 10, outputPer1k: 30 },
+    });
+    return id;
+  }
+
+  function count(h: Harness, sql: string, ...params: unknown[]): number {
+    return (h.db.prepare(sql).get(...params) as { n: number }).n;
+  }
+
+  it('只有模型、一把 key 都没有时，force!=true 也必须 409（模型同样是从属资源）', async () => {
+    const h = await setup();
+    const upstreamId = await createUpstream(h);
+    await seedModel(h, upstreamId);
+
+    const res = await h.app.inject({
+      method: 'DELETE',
+      url: `/api/upstreams/${upstreamId}`,
+      headers: auth(h),
+    });
+    expect(res.statusCode, res.body).toBe(409);
+    const body = res.json() as { code: string; details?: { keyCount?: number; modelCount?: number } };
+    expect(body.code).toBe('UPSTREAM_HAS_KEYS');
+    expect(body.details?.keyCount).toBe(0);
+    expect(body.details?.modelCount).toBe(1);
+
+    // 拦下就必须零副作用：上游与模型都还在
+    expect(count(h, 'SELECT COUNT(*) AS n FROM upstreams WHERE id = ?', upstreamId)).toBe(1);
+    expect(count(h, 'SELECT COUNT(*) AS n FROM models WHERE upstream_id = ?', upstreamId)).toBe(1);
+    await closeHarness(h);
+  });
+
+  it('根因：key 软删**不解除** upstream_keys→upstreams 外键，上游行照样删不掉（C4 原文不可实现）', async () => {
+    const h = await setup();
+    const upstreamId = await createUpstream(h);
+    await createKey(h, upstreamId, { key: probeSecret() });
+
+    // 把 key 按 C4 的写法软删掉
+    h.db
+      .prepare("UPDATE upstream_keys SET enabled = 0, deleted_at = '2026-10-07T00:00:00.000Z' WHERE upstream_id = ?")
+      .run(upstreamId);
+
+    // 软删之后外键引用还在，父行依然删不掉 —— 这就是 500 的来源，不是"模型才算"
+    expect(() => h.db.prepare('DELETE FROM upstreams WHERE id = ?').run(upstreamId)).toThrow(/FOREIGN KEY/i);
+    await closeHarness(h);
+  });
+
+  it('force=true 级联：上游/模型/key/key_runtime 整棵子树消失，三条广播都发出', async () => {
+    const h = await setup();
+    const upstreamId = await createUpstream(h);
+    const key = await createKey(h, upstreamId, { key: probeSecret() });
+    const modelId = await seedModel(h, upstreamId);
+    upsertKeyRuntimeStates(h.db, [
+      { keyId: key.id, consecutiveFails: 2, cooldownUntilMs: null, lastFailureReason: null, lastFailureAtMs: null },
+    ]);
+
+    const res = await h.app.inject({
+      method: 'DELETE',
+      url: `/api/upstreams/${upstreamId}?force=true`,
+      headers: auth(h),
+    });
+    // 修复前这里就是 500 INTERNAL / SQLITE_CONSTRAINT_FOREIGNKEY
+    expect(res.statusCode, res.body).toBe(204);
+
+    expect(count(h, 'SELECT COUNT(*) AS n FROM upstreams WHERE id = ?', upstreamId)).toBe(0);
+    expect(count(h, 'SELECT COUNT(*) AS n FROM models WHERE upstream_id = ?', upstreamId)).toBe(0);
+    expect(count(h, 'SELECT COUNT(*) AS n FROM upstream_keys WHERE upstream_id = ?', upstreamId)).toBe(0);
+    // 运行态镜像跟着走，否则会留下指向已删 key 的孤儿行（ADR-0010 的已知缺口不再扩大）
+    expect(count(h, 'SELECT COUNT(*) AS n FROM key_runtime WHERE key_id = ?', key.id)).toBe(0);
+
+    // 广播：网关快照按 entity 增量重建，漏发 model 那条会让已删模型继续被路由
+    const changes = h.db
+      .prepare('SELECT entity, entity_id AS entityId, op FROM change_log')
+      .all() as { entity: string; entityId: string; op: string }[];
+    expect(changes).toContainEqual({ entity: 'model', entityId: modelId, op: 'delete' });
+    expect(changes).toContainEqual({ entity: 'key', entityId: key.id, op: 'delete' });
+    expect(changes).toContainEqual({ entity: 'upstream', entityId: upstreamId, op: 'delete' });
+
+    // 端点侧看：上游 404、模型列表里不再有它
+    const gone = await h.app.inject({ method: 'GET', url: `/api/upstreams/${upstreamId}`, headers: auth(h) });
+    expect(gone.statusCode).toBe(404);
+    const models = await h.app.inject({ method: 'GET', url: '/api/models', headers: auth(h) });
+    expect(models.statusCode, models.body).toBe(200);
+    expect((models.json() as { items: { id: string }[] }).items.some((m) => m.id === modelId)).toBe(false);
+    await closeHarness(h);
+  });
+
+  it('只带 key 的路径：force=false 仍 409（modelCount 0），force=true 204', async () => {
+    const h = await setup();
+    const upstreamId = await createUpstream(h);
+    await createKey(h, upstreamId, { key: probeSecret() });
+
+    const guarded = await h.app.inject({
+      method: 'DELETE',
+      url: `/api/upstreams/${upstreamId}`,
+      headers: auth(h),
+    });
+    expect(guarded.statusCode).toBe(409);
+    expect((guarded.json() as { details?: { modelCount?: number } }).details?.modelCount).toBe(0);
+
+    const forced = await h.app.inject({
+      method: 'DELETE',
+      url: `/api/upstreams/${upstreamId}?force=true`,
+      headers: auth(h),
+    });
+    expect(forced.statusCode, forced.body).toBe(204);
     await closeHarness(h);
   });
 });

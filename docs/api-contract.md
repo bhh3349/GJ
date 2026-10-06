@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.2.1**
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.2.2**
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -27,6 +27,8 @@
 > **v1.2.0（2026-10-06，M6-B 第二阶段）**：新增 **§13 内置 AI 助手聊天** —— ① `POST /api/assistant/chat`（SSE 流）端点；② SSE 帧契约（`delta` / `done` / `error` + 单调递增 `seq` + `done` 内联 `citations`，终止帧 `error.code` 复用 §10 码值）；③ 三重上限（`messages` 条数 24 / 单条 token 8000 / 总 token 16000 / 日志注入 50 条 × ≤24h，超限回 `done.truncated:true` 不静默截）；④ 鉴权走登录会话（§0.5），**不复用 `READONLY_TOKEN`**（§12.4 作用域之外自动 `403 FORBIDDEN`）；⑤ `GET /api/observability/health` 新增只读字段 `assistant`（助手独立计量：**计入 key 健康、不计入业务流量口径**）；⑥ SSE 失败终止帧 `error` 复用 **§10 码值**（`code` / `status` / 429 带 `retryAfterSec`）零新增枚举，`seq` 从 1 起、单请求内单调、重试重置；`truncated` 挂在 `done` 上（非独立帧）；`citations` 元素带可展示标签 `model` + `summary`；⑦ 助手与业务**同池同语义占上游并发槽位**、撞满即 429 `RATE_LIMITED`，断流走**同一条 signal 入口** abort 上游（引擎零新增分支）。**无字段改名、无字段删除、无类型变更、`ERROR_CODES` 零新增、§10 网关错误码表零新增、`SCHEMA_VERSION` 不变、零新表零迁移**（对话不落库、服务端无状态）。动机与影响见 ADR-0015。
 
 > **v1.2.1（2026-10-07，M6-B 第二阶段收口）**：§13.4 把「槽位撞满」由一句简写（"撞满即 429 `RATE_LIMITED`"）改成**二分口径**：**全候选满并发**（`getAvailableKeys` 的 `isUsable` 已把满并发 key 过滤掉、候选集为空）是稳定出口 → **`503 NO_AVAILABLE_KEY`**；**429 `RATE_LIMITED`（"网关池饱和"）只出现在「选路返回 → `beginAttempt` 占位」的竞态窗口**，是偶发出口。给前端留一条硬要求：`429` 与 `503` 两条都要能落"稍后重试"分支。**§10 码表零新增、`ERROR_CODES` 零新增、无字段改名/删除/类型变更、帧契约与 `seq` 语义零变更** —— 本条是把 v1.2.0 的简写**订正为与实现一致**（§10 的「候选非空、0 次真实尝试、全候选并发已满」本来就是准的那一条），属文本对齐，不涉及两端代码改动。
+
+> **v1.2.2（2026-10-07，M6-B 第二阶段收口）**：修正 `DELETE /api/upstreams/:id` 的**从属资源处置**（§2 / §11 C4）。原文（C4 裁决）要求 `force=true` 时「级联**软删** key + 硬删上游行」，但 `upstream_keys.upstream_id` 与 `models.upstream_id` 都是 `REFERENCES upstreams(id)` 且连接开了 `foreign_keys=ON` —— **软删不解除行级外键**，上游下只要还有一行 key（哪怕 `deletedAt` 已置）或一行模型档案，`DELETE FROM upstreams` 就被 SQLite 拒掉：实测 `500 INTERNAL`（`SQLITE_CONSTRAINT_FOREIGNKEY`，前端「上游管理」页的删除按钮在这条路上是死的）。本版改为：① `force!=true` 时**key 与模型一起**拦，`409 UPSTREAM_HAS_KEYS`，`details: {keyCount, modelCount}` —— **`modelCount` 是纯新增只读字段**，老客户端只读 `keyCount` 照常工作；② `force=true` 时按依赖序**物理删除整棵子树**（`key_runtime` → `upstream_keys` → `models` → `upstreams`，单事务），响应仍是 `204`。**`ERROR_CODES` 零新增、端点零增删、无字段改名 / 删除 / 类型变更、Upstream 对象零变化、`SCHEMA_VERSION` 不变、零迁移**。动机与影响见 ADR-0016（**修订 §11 C4 的 key 处置**）。
 
 ---
 
@@ -73,7 +75,7 @@
 | `NOT_FOUND` | 404 | 资源不存在 | 提示 + 返回列表 |
 | `CONFLICT` | 409 | 唯一约束冲突（重名等） | 表单标红 |
 | `REVISION_MISMATCH` | 409 | 乐观锁版本不符（并发编辑） | 提示"已被他人修改"，拉最新 |
-| `UPSTREAM_HAS_KEYS` | 409 | 删上游但其下仍有 key | 弹二次确认，带 `force=true` 重发 |
+| `UPSTREAM_HAS_KEYS` | 409 | 删上游但其下仍有从属资源（key / 模型档案），`details: {keyCount, modelCount}` | 弹二次确认，带 `force=true` 重发 |
 | `UNPROCESSABLE` | 422 | 语义合法但业务拒绝 | 展示 message |
 | `TOO_MANY_ATTEMPTS` | 429 | 登录限速（5 次/分钟） | 倒计时禁用按钮 |
 | `INTERNAL` | 500 | 服务端异常 | 提示 + 可重试 |
@@ -174,11 +176,28 @@
 | `POST` | `/api/upstreams` | 建，body `{name, baseUrl, enabled?, balanceQuery?}` → `201` |
 | `GET` | `/api/upstreams/:id` | 详情 |
 | `PATCH` | `/api/upstreams/:id` | 改，body 任意子集 + `revision` |
-| `DELETE` | `/api/upstreams/:id?force=false` | 删。有 key 且 `force!=true` → `409 UPSTREAM_HAS_KEYS`，`details: {keyCount: 6}` |
+| `DELETE` | `/api/upstreams/:id?force=false` | 删。有 key **或模型档案**且 `force!=true` → `409 UPSTREAM_HAS_KEYS`，`details: {keyCount: 6, modelCount: 3}`；`force=true` 按依赖序删整棵子树 → `204`（见下） |
 | `POST` | `/api/upstreams/:id/balance/refresh` | 按模板查该上游全部 key 余额 → `202 {taskId}` |
 | `POST` | `/api/upstreams/:id/balance-template/test` | **自测**：用草稿模板真实打一次查询 → `200 BalanceTestResult`（见下） |
 
 `baseUrl` 校验：必须 `http(s)://`，无尾斜杠（根路径除外）。不合法 → `400 INVALID_PARAM`。
+
+#### 删除的从属资源处置（ADR-0016，修订 §11 C4）
+
+`upstream_keys.upstream_id` 与 `models.upstream_id` 都是 `REFERENCES upstreams(id)`，且连接开了
+`foreign_keys=ON` —— **软删不解除行级外键**：上游下只要还有一行 key（哪怕 `deletedAt` 已置）或一行模型，
+`DELETE FROM upstreams` 就会被 SQLite 直接拒掉。所以「软删 key + 硬删上游行」这条口径在本 schema 下
+**不可实现**，本版按下面两条执行：
+
+| `force` | 行为 |
+|---|---|
+| `!= true` | 上游下有**任一**从属资源（key 或模型档案）→ `409 UPSTREAM_HAS_KEYS`，`details: {keyCount, modelCount}`（两个计数都给，二次确认要把数量说清）。拦下时**零副作用**。 |
+| `true` | 单事务按依赖序物理删除：`key_runtime`（运行态镜像，指向 key）→ `upstream_keys` → `models` → `upstreams`。`204`。 |
+
+- **计数口径**：`keyCount` 只数**未软删**的 key（与 §2 Upstream 对象的 `keyCount` 同源），`modelCount` 数该上游全部模型档案。因此 `keyCount=0, modelCount=0` 时上游下的历史软删 key 行会随上游一起消失（它们已经不可达）。
+- **历史可读性不靠这些行**：`usage_logs` 把 `keyMasked` / `model` 名字**存在日志行自己身上**（表里 `key_id` / `upstream_id` 本就没有外键声明），删行不会让历史对不上账；删除动作由 `audit_log` 留痕。
+- **代价**：`force=true` 会一并丢掉**管理员在档案卡上手改的开关 / 价格**（模型档案随上游消失）——这正是 `force!=true` 必须报两个计数的原因。
+- 前端：`409 UPSTREAM_HAS_KEYS` 分支照旧（弹二次确认 → 带 `force=true` 重发），**只是文案要能表达"模型 M 个也会一起删"**。
 
 ### 余额查询解析顺序与失败引导
 
@@ -817,7 +836,7 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
 | C1 | 建组自动签发第一把网关 key | **通过**：自动签发，明文仅在创建响应出现一次（同网关 key 明文纪律） |
 | C2 | usage bucket 自动降级 | **通过**：允许降级，响应必须回显实际 `bucket`，前端按回显渲染 |
 | C3 | 日志导出端点 | **通过**：不加端点，前端自行导出 |
-| C4 | 删上游 force=true 的 key 处置 | **通过**：级联软删（`enabled=false` + `deletedAt`），保留历史日志外键 |
+| C4 | 删上游 force=true 的 key 处置 | **通过**：级联软删（`enabled=false` + `deletedAt`），保留历史日志外键。**v1.2.2 修订**：该口径与 `upstream_keys → upstreams` 的行级外键冲突（软删不解除引用），改按 ADR-0016 物理删除整棵子树 |
 | C5 | 手动余额覆盖模板值 | **通过**：不保护，手动录入总是优先并置 `balanceSource=manual` |
 
 ---

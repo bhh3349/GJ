@@ -72,7 +72,9 @@ function addUpstream(db: Db, name = 'up-a', baseUrl = 'https://a.example.com'): 
 
 /* ------------------------------ 用例 ------------------------------ */
 
-/** 直接种一列 model_limits（§15.2 写路径尚未落地，测试必须绕开 createKey 自己写库） */
+/** 直接种一列 model_limits。§15.2 写路径（`createKey` 收 `models`）已在 `dev/api` 落地
+ * （`e76a2d6` + 随后的 `models` 入参），但本分支未合入 —— 网关车道不收上游 CSV 写方，
+ * 测试在此分支仍需绕开 createKey 自己写库。merge 后可改走 `createKey({ models })`。 */
 function seedModelLimits(db: Db, keyId: string, csv: string | null): void {
   db.prepare('UPDATE upstream_keys SET model_limits = ? WHERE id = ?').run(csv, keyId);
 }

@@ -25,6 +25,10 @@
 
 import { listEnabledGatewayModels } from '../db/repo/models.js';
 import { changesSince } from '../db/repo/change-log.js';
+// 编解码口径的唯一来源（`serializeModelLimits` / `parseModelLimits`）。
+// 本网关读面与管理面读方（`KeyDto.models`）、写方（`createKey`）**共用这一份实现** ——
+// 见 `src/db/model-limits.ts` 头注。本地不得再存一份解析。
+import { parseModelLimits } from '../db/model-limits.js';
 import type { Db } from '../db/database.js';
 import type { ModelCatalog, ModelDescriptor } from '../gateway/ports.js';
 import type { KeyCategory, KeyConfig, PoolSnapshot, UpstreamConfig } from '../gateway/types.js';
@@ -66,17 +70,10 @@ ORDER BY created_at, id
 `;
 
 /**
- * `model_limits` CSV（上游原样落盘，§15.7）→ `KeyConfig.models`。
- * `null` / `''` / 纯空白 → `null`（= 不限，与 `[]` 同义 —— 契约 §3，不制造三态）。
- * 该列**没有 CHECK 约束**，"不落 `''`"只是写路径纪律（管家口径），所以这层归一化是
- * **承重的**，不是冗余：库里真出现 `''` 时，读侧必须自己挡住，而不是假设它不存在。
+ * `model_limits` CSV → `KeyConfig.models`：实现与口径都在 `src/db/model-limits.ts`
+ * （§16.3 禁止同语义两处实现 —— 页面上白名单看得见、网关上不生效，正是那份漂移）。
  * `*` 原样透出 —— 通配语义归 `matchesModel()`（冻结件），这里不解释。
  */
-function parseModelLimits(csv: string | null): readonly string[] | null {
-  if (csv === null) return null;
-  const items = csv.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
-  return items.length === 0 ? null : items;
-}
 
 const MAX_CHANGES_SQL = 'SELECT COALESCE(MAX(seq), 0) AS seq FROM change_log';
 

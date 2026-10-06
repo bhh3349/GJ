@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.4.6**
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.4.7**
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -47,6 +47,8 @@
 > **v1.4.5（2026-10-07，落地面收口 —— 路由者两问的答复）**：① §15.7 补一条**落库规则**：`unlimited = 1` ⇒ `balance_cents` **必须落 `NULL`** —— 上游对无限额度 key 回的是 `{unlimited_quota: true, remain_quota: -331119}`，那个负数是**无意义占位**、不是"欠费"；落进去就成了一把"已欠费"的 key，而网关可用性过滤是 `balance_cents <= 0 → 排除`，于是它被**静默排除出选路**：不报错、不告警、不进冷却，客户端只看到「没有可用 key」。同时写明**网关不消费 `unlimited`**（`KeyConfig` 无此字段），落 `NULL` 则走既有的「未知 ≠ 0、仍可用」分支，路由者「零改动」成立。② §16.3 该行按 ① 改写；并把「白名单还差一行」的**量词改准** —— 是 **4 处 + 1 个 spec**（`KEYS_SQL` 选列 / `KeyRow` 加列 / 解析函数 / `store.ts` 取值），不是一行。③ **同批落地**：`src/db/schema.ts` 落 §15.7 三列（`upstreams.supplier`、`upstream_keys.unlimited`、`upstream_keys.model_limits`）的 `hasColumn()` 守卫 `ALTER`，并补 `src/db/schema.spec.ts` 的老库升版判据（新库自带 / 老库真被 ALTER / 重复 migrate 不抛 `duplicate column name`）。④ 补记 v1.4.3 漏写的变更块（正文未改）。**无字段改名、无字段删除、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2。**
 
 > **v1.4.6（2026-10-07，白名单口径裁定 —— 路由者 §16.3 三条的答复）**：路由者就 §16.3「key 映射 1:1」报回三条不一致，逐条读码 + 读契约核实，结论是**一条是本契约早已登记的缺口、两条不成立**，无一条是方向性缺陷：① **(a) 成立，但非新发现** —— `src/wiring/store.ts` 至今硬编码 `models: null`、`KEYS_SQL` 不选 `model_limits`，与 §16.3 已写的「还差 4 处 + 1 个 spec」逐字对上，是**待落的既有账**；② **(b) 不成立 —— 本契约从未把 `[]` 定义为「全禁」**（本段是首次引入该词，仅用于记录该误读；裁定落笔前全篇无此表述）：§3 / §5 / §15.2 / §16.5 四处一致写「`[]` 与 `null` 同义 = 不限」，且 §3 明写这是**刻意对齐冻结件 `matchesModel()`**（"本契约不制造一个实现不了的三态"）；实现（`key-pool.ts` `length === 0 → true`）与契约**同向**，非反向；③ **(c) 随之不成立** —— `keyModels()` 空 → 继承 upstream，正是 §5 写明的既有口径，且继承 upstream 后再 `matchesModel` 等价于不限（upstream 清单即全集）；④ **新增一条真正的悬空项**（这条提问的价值所在）：上游 `model_limits_enabled=true` + **空 CSV** 在 TierFlow 侧究竟意为「全禁」还是「不限」—— 我们现一律归一化为 `NULL`(=不限)，若上游实为「全禁」，这就是一条**静默放流**；已并入 §15.2 的 §16.1 待实测块，实测前维持 `NULL`。⑤ 裁定：**§16.3 白名单本期做**（§16.5 行 3 早已写「不等实测，S2 直接落」）—— 4 处 + 1 spec 立即可落，前置 DDL（`upstream_keys.model_limits`）已落。**无字段改名、无字段删除、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2。**
+>
+> **v1.4.7（2026-10-07，落地面可达性收口 —— 路由者 §16.3 两问的答复）**：① **`unlimited` 那行本版无新增** —— 路由者报回的病灶（`KeyConfig` 无该字段、`isUsable` 对 `balance_cents <= 0` 判否 → **静默排除出选路**）与 v1.4.5 已写的 §15.7 落库规则**逐字同向**；三处落点（§15.7 规则 / §16.3 该行 / `src/db/schema.ts` 列注释）v1.4.5 均已齐，故**本版不改这一行**。② **§16.3 补一条拓扑中立纪律**：那批 DDL 的 **canonical 落点只有一处**，就是 `src/db/schema.ts` 里 §15.7 的 `hasColumn()` 守卫 `ALTER`（v1.4.5）；**任何车道要消费 `model_limits` 而基线早于这批 `ALTER` 时，按路径取件把它搬到自己的基线上，不得派生第二份 `schema.ts`** —— 两份同名文件各自演化比"等一次取件"贵得多，且它的崩法（`no such column`）只在开库时才露面。③ **§16.5 两处文本订正**：残留的「网关侧还差一行」改回与 §16.3 一致的 **4 处 + 1 个 spec**（v1.4.5 订正了 §16.3，§16.5 漏改，同一事实两处不一致）；「另两项不需要等任何人」限定为**契约层**成立、**落地层第三项仍须先有一次 DDL**（前置 v1.4.5 已满足，取件归车道）。**无字段改名、无字段删除、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2。**
 
 ---
 
@@ -1904,6 +1906,10 @@ createdAt, updatedAt`。
 > **前置在这张契约的落地面上**：`model_limits` 列本身由 §15.7 那批 `ALTER` 提供（v1.4.5 已落
 > `src/db/schema.ts`）—— 列不存在时 `prepare` 直接抛 `no such column`，是**数据面崩**
 > 而不是静默降级，所以读侧必须等这次 DDL。
+> **可达性（v1.4.7）**：这批 `ALTER` 的 **canonical 落点只有一处** —— `src/db/schema.ts` 里那批
+> `hasColumn()` 守卫语句。**车道基线早于它时，按路径取件把这批 `ALTER` 搬到自己的基线上，
+> 不派生第二份 `schema.ts`**；两份同名文件各自演化，比"等一次取件"贵得多，
+> 且它的崩法（`no such column`）只在开库那一刻露面。
 > 这是**取值改动，不是签名改动** —— `KeyConfig` / `KeyPool` 契约不变，路由者"签名零改动"的说法依然成立。
 
 > **v1.4.6 裁定（路由者报回的「`[]` 语义反向」）**：经核实**不存在**。本契约四处
@@ -1935,12 +1941,14 @@ createdAt, updatedAt`。
 | **数据面路径与协议**（`/v1/*` 还是自有协议） | §16.1 + §16.1.1 | ⏳ **未实测**，按 §16.1.1 登记为悬空件。**S1 先占位、实测后钉进 §16 实现约束**；占位期间不产生实现义务 |
 | **`model_limits` CSV → 可用模型清单** | §3 Key 对象 `models` + §15.2 `keys` 入参 + §15.7 加列 | ✅ **v1.4.2 已落**（这是本版补的缺口：原先只在 §16.3 提了一句"映射到 `KeyConfig.models`"，**没有任何一列承载它**，网关读不到值） |
 
-> 三项里第二项是**唯一**需要外部输入的；另两项不需要等任何人。特别是第三项**不依赖** P0 ——
-> 白名单是管理面事实，与数据面协议无关，所以它不该被挂在"等实测"后面陪着一起等。
+> 三项里第二项是**唯一**需要外部输入的；另两项**在契约层**不需要等任何人（**落地层**第三项仍须先有
+> 一次 DDL —— 该前置 v1.4.5 已满足，但车道基线能否取到它归车道，见 §16.3 末注）。特别是第三项
+> **不依赖** P0 —— 白名单是管理面事实，与数据面协议无关，所以它不该被挂在"等实测"后面陪着一起等。
 >
-> **第三项的本车道上限**：契约侧（列 + DTO + 入参 + §5 过滤口径）已落；**网关侧还差一行**
-> —— `src/wiring/store.ts` 的 `models: null` 改为读该列（§16.3 末注）。**签名零改动**，
-> 但**取值**确实要动，路由者原话"`KeyConfig` / `KeyPool` 签名不动"**依然成立**，只是不等于"零改动"。
+> **第三项的本车道上限**：契约侧（列 + DTO + 入参 + §5 过滤口径）已落；**网关侧还差 4 处 + 1 个 spec**
+> —— `KEYS_SQL` 选列 / `KeyRow` 加列 / 解析函数 / `src/wiring/store.ts` 取值（§16.3 末注）。
+> **签名零改动**，但**取值**确实要动，路由者原话"`KeyConfig` / `KeyPool` 签名不动"**依然成立**，
+> 只是不等于"零改动"。
 
 > 三项在 S1 期间的**占位值**见 §16.6。
 
@@ -2042,4 +2050,4 @@ createdAt, updatedAt`。
 
 ---
 
-*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`；v1.2.1（§13.4「槽位撞满」二分口径：全候选满并发 `503 NO_AVAILABLE_KEY` / 竞态窗口 `429 RATE_LIMITED`，零新增枚举、零代码改动）为文本对齐；v1.2.2（§2 `DELETE /api/upstreams/:id` 从属资源处置：`force!=true` 拦 key 与模型并报 `{keyCount, modelCount}`、`force=true` 按依赖序物理删整棵子树，修订 §11 C4）见 `docs/adr/0016-delete-upstream-subtree.md`；v1.3.0（§14 余额同步：自动同步节奏与退避、NULL 口径、快照与 `asOf`、方向级漂移提示；同批撤销「单价 × 用量的本地扣减账本」方案）见 `docs/adr/0017-balance-sync-source-of-truth.md`；v1.4.0（§15 供应商账号面 + §16 TierFlow 数据面约束：账号作独立资源、批量新建 key 为唯一入池通路、账号级余额第四口径、套餐不建成 key、`upstream_keys.unlimited`、凭据会话一次性离线导入、`…Cents` 金额口径；`ERROR_CODES` 首次新增 1 个 `ACCOUNT_HAS_KEYS`）见 `docs/adr/0018-supplier-account-batch.md`；v1.4.1（§15.1 非破坏新增 `credentialSource`；§15.9 补凭据双路径定位、自动重登的触发与账号级互斥；§15.3 收口 `action` 枚举的生产者）见 `docs/adr/0018-supplier-account-batch.md` 决策 10；v1.4.2（§3 `KeyDto` 非破坏新增 `models` 模型白名单 + §5 `availableKeyIds` 补白名单条件 + §15.2 `keys` 入参可选 `models` + §15.7 加列 `upstream_keys.model_limits` + §16.1.1 悬空件登记 + §16.5 S1 字段对账）见 `docs/adr/0019-key-model-whitelist.md`；v1.4.3（§16.1.1 **执行主体改锚**：凭据由持有者运行时注入、可明示指定执行会话代跑，路由者只出探针与结论；新增 **§16.6 S4 验收锚定**含执行链三步与三项 S1 占位值表 —— 其中"数据面路径与协议"**明确不落 DTO**；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增**）见 `docs/adr/0018-supplier-account-batch.md` 决策 11；v1.4.4（§16.7 **出口级（IP 级）限流**：定性为第三层限流、取证"轮换放大"回路、归因纪律"IP 级 429 不计 key 健康 + 冷却上移到出口 + 冷却期内不换 key"、处置三档 Tier 1/1.5/2、识别规则按悬空件登记、§15.5 那条依据降级；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 对外行为零变更**）见 `docs/adr/0020-egress-ip-rate-limit.md`；v1.4.3 变更块为**补记**（冻版时正文与版本号已改、变更块漏写，仅补记录、无内容变更）；v1.4.5（§15.7 补 `unlimited=1 ⇒ balance_cents` 落 `NULL` 的**落库规则** + §16.3 该行改写与"白名单还差几处"的量词订正 + 同批落地 `src/db/schema.ts` 三列守卫 `ALTER` 与老库升版 spec + 补记 v1.4.3 变更块；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`SCHEMA_VERSION` 仍为 2**）为落地面收口；v1.4.6（§16.3 白名单口径**裁定**：路由者报回三条中 (a) 确认为既有登记的「4 处 + 1 spec」缺口、(b)(c) 按**非缺陷**关闭 —— 契约四处一致 `[]` ≡ `null` ≡ 不限、与冻结件 `matchesModel()` 同向；§15.2 待实测块**新增**一条「上游 `model_limits_enabled=true` + 空 CSV = 全禁还是不限」，实测前归一化仍为 `NULL`；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2**）。以上各版同属本契约的同一冻结面。（**版本索引订正 2026-10-07，不升版**：本索引此前在 v1.2.1 之后漏记 v1.2.2 / v1.3.0 两条，本次补齐 —— 仅索引行，无内容变更。）*
+*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`；v1.2.1（§13.4「槽位撞满」二分口径：全候选满并发 `503 NO_AVAILABLE_KEY` / 竞态窗口 `429 RATE_LIMITED`，零新增枚举、零代码改动）为文本对齐；v1.2.2（§2 `DELETE /api/upstreams/:id` 从属资源处置：`force!=true` 拦 key 与模型并报 `{keyCount, modelCount}`、`force=true` 按依赖序物理删整棵子树，修订 §11 C4）见 `docs/adr/0016-delete-upstream-subtree.md`；v1.3.0（§14 余额同步：自动同步节奏与退避、NULL 口径、快照与 `asOf`、方向级漂移提示；同批撤销「单价 × 用量的本地扣减账本」方案）见 `docs/adr/0017-balance-sync-source-of-truth.md`；v1.4.0（§15 供应商账号面 + §16 TierFlow 数据面约束：账号作独立资源、批量新建 key 为唯一入池通路、账号级余额第四口径、套餐不建成 key、`upstream_keys.unlimited`、凭据会话一次性离线导入、`…Cents` 金额口径；`ERROR_CODES` 首次新增 1 个 `ACCOUNT_HAS_KEYS`）见 `docs/adr/0018-supplier-account-batch.md`；v1.4.1（§15.1 非破坏新增 `credentialSource`；§15.9 补凭据双路径定位、自动重登的触发与账号级互斥；§15.3 收口 `action` 枚举的生产者）见 `docs/adr/0018-supplier-account-batch.md` 决策 10；v1.4.2（§3 `KeyDto` 非破坏新增 `models` 模型白名单 + §5 `availableKeyIds` 补白名单条件 + §15.2 `keys` 入参可选 `models` + §15.7 加列 `upstream_keys.model_limits` + §16.1.1 悬空件登记 + §16.5 S1 字段对账）见 `docs/adr/0019-key-model-whitelist.md`；v1.4.3（§16.1.1 **执行主体改锚**：凭据由持有者运行时注入、可明示指定执行会话代跑，路由者只出探针与结论；新增 **§16.6 S4 验收锚定**含执行链三步与三项 S1 占位值表 —— 其中"数据面路径与协议"**明确不落 DTO**；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增**）见 `docs/adr/0018-supplier-account-batch.md` 决策 11；v1.4.4（§16.7 **出口级（IP 级）限流**：定性为第三层限流、取证"轮换放大"回路、归因纪律"IP 级 429 不计 key 健康 + 冷却上移到出口 + 冷却期内不换 key"、处置三档 Tier 1/1.5/2、识别规则按悬空件登记、§15.5 那条依据降级；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 对外行为零变更**）见 `docs/adr/0020-egress-ip-rate-limit.md`；v1.4.3 变更块为**补记**（冻版时正文与版本号已改、变更块漏写，仅补记录、无内容变更）；v1.4.5（§15.7 补 `unlimited=1 ⇒ balance_cents` 落 `NULL` 的**落库规则** + §16.3 该行改写与"白名单还差几处"的量词订正 + 同批落地 `src/db/schema.ts` 三列守卫 `ALTER` 与老库升版 spec + 补记 v1.4.3 变更块；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`SCHEMA_VERSION` 仍为 2**）为落地面收口；v1.4.6（§16.3 白名单口径**裁定**：路由者报回三条中 (a) 确认为既有登记的「4 处 + 1 spec」缺口、(b)(c) 按**非缺陷**关闭 —— 契约四处一致 `[]` ≡ `null` ≡ 不限、与冻结件 `matchesModel()` 同向；§15.2 待实测块**新增**一条「上游 `model_limits_enabled=true` + 空 CSV = 全禁还是不限」，实测前归一化仍为 `NULL`；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2**）；v1.4.7（§16.3 补**拓扑中立取件纪律** —— canonical 落点唯一、车道基线早于该批 `ALTER` 时按路径取件、不派生第二份 `schema.ts`；§16.5 两处文本订正：残留「网关侧还差一行」→ **4 处 + 1 个 spec**、「另两项不需要等任何人」限定为**契约层**；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2**）。以上各版同属本契约的同一冻结面。（**版本索引订正 2026-10-07，不升版**：本索引此前在 v1.2.1 之后漏记 v1.2.2 / v1.3.0 两条，本次补齐 —— 仅索引行，无内容变更。）*

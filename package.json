@@ -21,7 +21,8 @@
     "check:shutdown": "vitest run src/wiring/shutdown.spec.ts && vitest run src/server.spec.ts",
     "test:gateway": "vitest run src/gateway",
     "test:fault": "vitest run src/gateway/fault.spec.ts",
-    "bench:ttfb": "tsx scripts/bench-ttfb.ts"
+    "bench:ttfb": "tsx scripts/bench-ttfb.ts",
+    "bench:assistant-ttfb": "tsx scripts/bench-assistant-ttfb.ts"
   },
   "dependencies": {
     "@fastify/websocket": "^11.3.3",

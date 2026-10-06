@@ -152,6 +152,20 @@ export interface ErrorEventEntry {
 
 `category` / `severity` **不由网关传**，由 sink 侧按 §12.1 的映射表从 `gatewayCode` + `status` 派生——映射只有一个实现处，网关侧不需要理解分型，也就不会与契约漂移。
 
+## 落地补遗（2026-10-06，路由者网关侧接线后）
+
+路由者按 §7 冻结签名落地网关侧产出时，带出三个契约缺口与两个已实现口径，管家裁决如下，随契约 v1.1.2 一并登记（§10 新增一码、§12.1 扩一行 + 四条产出边界）：
+
+1. **`GROUP_DISABLED`(403) 登记并开始产事件**。网关在 `routes.ts` 已用字面量 `openAIError('GROUP_DISABLED', …)` 回 403（key 有效、组被禁用），但它既不在 §10 码表、也不在 `GATEWAY_ERROR_CODES` 常量里——「既有实现、文档补记」，故登记进 §10（`type=authentication_error`），§12.1 把 `AUTH_FAILED` 从「仅 401」扩为「401/403」。**不新增 `category` 值**：组禁用与「key 缺失/未知/已吊销」同属鉴权被拒、同为 `warn`，粗细之差由 `gatewayCode` 承载（§12.1「三层口径」本就把 `category` 当粗分组）。
+2. **上游 4xx 透传不产事件**（确认）：网关成功代理、上游回正常客户端错误，既非「被拒」也非「失败」，与 §10「400/404/422 不计失败」同口径。
+3. **Fastify 自产 413/415 等非 400 的 4xx 不产事件**（确认）：不在 §10 码表；`setErrorHandler` 只对 `400`（`INVALID_REQUEST`）与 `≥500`（`gatewayCode=null`→`INTERNAL`）上报。要进诊断库需先登记码 + 扩 `CLIENT_REQUEST` 行，属另一次契约变更，本批不做。
+4. **冻结口径一：被拒事件仅 `/v1/*`**。扫描器打非 `/v1/*` 的 404 不产事件——队列满丢最旧，噪声挤真故障（`reportRejection` 里 `endpoint.startsWith('/v1/')` 守卫，已实现）。
+5. **冻结口径二：未过鉴权 `model` 恒 `null`**。不读 body，匿名请求不得往事件表写任意字段（`authedFacts` 只在鉴权通过后调，已实现）。推论：403 `GROUP_DISABLED` 已过鉴权，应读 body 填 `model`/`stream`。
+
+**契约版本 v1.1.1 → v1.1.2**（补遗，非新命名空间、非新鉴权主体）。`ERROR_CODES` 零新增、`category` 枚举 9 值不变。
+
+**路由者随本补遗收口的网关侧两处**：① `GATEWAY_ERROR_CODES` 常量补 `GROUP_DISABLED`，`routes.ts` 改引常量（现用字面量，与 §10「改动需同步 errors.ts」纪律不符）；② 403 组禁用分支 `reportRejection(…, authedFacts(request))` 产一条 `gatewayCode=GROUP_DISABLED` 事件。
+
 ## 门禁核验
 
 四闸在 2026-10-06 按序跑完，全绿（`main` 上、本 ADR 与其实现同一批）：

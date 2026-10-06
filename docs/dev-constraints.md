@@ -182,6 +182,9 @@ interface KeyPool {
 > - `pnpm test:gateway` = `vitest run src/gateway`，**已落地可跑**（含 `rotation.spec.ts` 的 §九.1 轮询出量分布判据，ADR-0011）；
 > - `pnpm test:fault` = `vitest run src/gateway/fault.spec.ts`，**已落地**（四类故障注入：401/429/超时/进程 kill + 人为禁用 + 首字节前切换 P99<100ms）；
 > - `pnpm bench:ttfb` = `tsx scripts/bench-ttfb.ts`，**已落地**（同机直连 vs 经网关，配对采样 delta 分布 P50/P99，判据 ΔP50≤1ms / ΔP99≤5ms）。
+>   **2026-10-06 升级（M6-B 接口阶段）：单次采样 → 多轮取中位数 + 抖动带。** 默认 5 轮 × 100 对，**逐轮各自算 ΔP50/ΔP99**，`exit` 码只比较**逐轮分位的中位数**（对单轮离群免疫）；跨轮 min~max / P25~P75 作为**抖动带打印但⛔不参与 exit 码**。阈值本身**不变**（仍是 §8 冻结的 ΔP50≤1ms / ΔP99≤5ms），改的只是「被比较的对象」。
+>   动机：M6-A 收口实测 ΔP50 为 0.819ms / 0.960ms，余量仅 0.04ms —— 单次采样下一次性调度抖动就能把闸翻红，且翻红后无法自证是噪声还是回归。升级后实测同一台机同一棵树：某轮 ΔP50=1.096ms、另一轮 ΔP99=9.213ms（**旧口径下这两轮任一次都会误判 FAIL**），而中位数 ΔP50=0.845ms / ΔP99=2.447ms → PASS，离群轮由抖动带如实显示。
+>   阈值**硬编码、不接受环境变量**（闸不许被调绿）；只有时长相关参数可调：`BENCH_BATCHES`（默认 5，**≥3**，低于 3 直接报错拒绝退化成单次采样）、`BENCH_SAMPLES_PER_BATCH`（默认 100，≥20）、`BENCH_UPSTREAM_DELAY_MS`（默认 20）。配对序刻意保持「直连→网关」不变，与 M6-A 基线同口径可比。
 
 **DoD**：门禁**四闸**全绿 —— `pnpm typecheck` / `pnpm test` / `pnpm build` / `pnpm check:secrets`（CI 另跑 `pnpm check:sqlite` 作原生绑定判据、`pnpm check:shutdown` 作优雅停机证据步；这两条是**单列证据步，不属于四闸**，四闸永远只有上面四个名字）+ 可复现证据（命令与真实输出）+ 契约改动已回写 `docs/api-contract.md`。性能类验收必须报**同机直连基准对比**，不接受只有绝对值。
 

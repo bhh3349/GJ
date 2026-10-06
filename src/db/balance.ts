@@ -192,17 +192,29 @@ export function computeGlobalBalance(db: Db): GlobalBalance {
   // 币种单独查一次：混币时 currency 返回 null，让前端能看出"这个合计跨了币种"，
   // 而不是把一个无意义的数字当成真的总额。
   //
-  // 口径**仍只看 key**：账号面目前没有币种列（上游给的是 quota + quota_per_unit 比例），
-  // 所以 TierFlow 这类"钱全在账号上"的上游这里会得到 null。这是**诚实的未知**，
-  // 不是为了好看补一个 'CNY' —— 补了就是替上游下结论。
-  const currencyRows = db
+  // **两个来源都要查，且判据与金额那一格逐字一致 —— 钱算一次，币种也只跟着算一次。**
+  //   · 归属给账号的 key 不贡献金额（规则 1），那它的币种也不该进来：一把"账号已代表其
+  //     余额"的 key 若把币种混进来，能把一个本来单币种的上游凭空判成"混币"。
+  //   · 反过来，钱**全在账号上**的 TierFlow 上游必须从 `supplier_accounts` 取币种（该列
+  //     存在，账号驱动器写它）。只查 key 的话，账号行里明明躺着 'CNY'，合计却报 null ——
+  //     那不是"诚实的未知"，是漏查了一张表；而它偏偏发生在钱最多的那条上游上。
+  const keyCurrencyRows = db
     .prepare(
-      `SELECT DISTINCT balance_currency AS c FROM upstream_keys
-       WHERE deleted_at IS NULL AND category = 'balance'
-         AND balance_cents IS NOT NULL AND balance_currency IS NOT NULL`,
+      `SELECT DISTINCT k.balance_currency AS c FROM upstream_keys k
+       WHERE k.deleted_at IS NULL AND k.category = 'balance'
+         AND k.balance_cents IS NOT NULL AND k.balance_currency IS NOT NULL
+         AND ${UNOWNED_KEY}`,
     )
     .all() as { c: string }[];
-  for (const r of currencyRows) currencies.add(r.c);
+  for (const r of keyCurrencyRows) currencies.add(r.c);
+
+  const accountCurrencyRows = db
+    .prepare(
+      `SELECT DISTINCT balance_currency AS c FROM supplier_accounts
+       WHERE balance_cents IS NOT NULL AND balance_currency IS NOT NULL`,
+    )
+    .all() as { c: string }[];
+  for (const r of accountCurrencyRows) currencies.add(r.c);
 
   const byUpstream: UpstreamBalance[] = aggRows.map((a) => {
     const acc = accountAggByUpstream.get(a.upstreamId);

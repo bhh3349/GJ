@@ -257,6 +257,43 @@ describe('口径 5：全局 = 各上游之和（结构上不可能漂移）', ()
   });
 });
 
+describe('币种口径：钱算一次，币种也只跟着算一次', () => {
+  it('钱全在账号上的上游拿得到币种（账号行里就有，不该报 null）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'tf', baseUrl: 'https://tierflow.cn', supplier: 'tierflow' });
+    seedAccount(db, up.id, 5000);
+
+    // 这是钱最多的那条上游：只查 key 的话这里回 null —— 不是"诚实的未知"，是漏查一张表
+    expect(computeGlobalBalance(db).currency).toBe('CNY');
+  });
+
+  it('全部未知时币种仍是 null（未知 ≠ 补一个 CNY 让界面好看）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'g', baseUrl: 'https://g.example.com' });
+    seedKey(db, up.id, null);
+
+    expect(computeGlobalBalance(db).currency).toBeNull();
+  });
+
+  it('归属出去的 key 不把币种混进来（它本来就不贡献金额）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'tf', baseUrl: 'https://tierflow.cn', supplier: 'tierflow' });
+    const account = seedAccount(db, up.id, 5000); // CNY
+    const owned = seedKey(db, up.id, 5000);
+    // 把这把 key 的币种改成 USD：它的金额已被账号那一格代表（规则 1），
+    // 币种若还进来，就会把一个单币种的上游凭空判成"混币"（currency 变 null）。
+    db.prepare('UPDATE upstream_keys SET balance_currency = ? WHERE id = ?').run('USD', owned);
+    bindKey(db, account, owned);
+
+    expect(computeGlobalBalance(db).currency).toBe('CNY');
+
+    // 未归属的 key 是真贡献方，它的币种就必须进来 —— 两边口径必须对称
+    const free = seedKey(db, up.id, 300);
+    db.prepare('UPDATE upstream_keys SET balance_currency = ? WHERE id = ?').run('USD', free);
+    expect(computeGlobalBalance(db).currency).toBeNull();
+  });
+});
+
 describe('已软删的 key 不进任何格子', () => {
   it('软删后 key 从计数、合计、keys[] 三处同时消失', () => {
     const db = setup();

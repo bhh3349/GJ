@@ -897,8 +897,13 @@ describe('判据 9 / 10 —— 热路径零回退与零新增枚举', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('§10 零新增枚举 / 零迁移：两张码表长度不变，SCHEMA_VERSION 仍为 2，漂移码不在码表里', () => {
-    expect(ERROR_CODES).toHaveLength(15);
+  it('§10 零新增枚举 / 零迁移：本版两张码表长度不变，SCHEMA_VERSION 仍为 2，漂移码不在码表里', () => {
+    // **本断言是**本版（v1.3.0 余额同步）**的**快照：它要钉的是"加余额同步没有新增任何枚举"。
+    // v1.4.0 给 §15 账号面加了 `ACCOUNT_HAS_KEYS`（契约明写"`ERROR_CODES` 首次新增 1 个"），
+    // 故这里的绝对值随之 15 → 16 —— **加的是别人那一版的，不是本版的**。
+    // 改动这里时请一并确认：新增的那个码有契约与 ADR 背书，不是因为顺手。
+    expect(ERROR_CODES).toHaveLength(16);
+    expect(ERROR_CODES).toContain('ACCOUNT_HAS_KEYS');
     expect(Object.keys(GATEWAY_ERROR_CODES)).toHaveLength(10);
     expect(SCHEMA_VERSION).toBe(2);
 

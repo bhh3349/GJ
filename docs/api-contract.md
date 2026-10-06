@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.6.0**
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.6.1**
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -67,6 +67,14 @@
 > ② **§15.2 `DELETE` 的「解绑（`account_id` 置 `NULL`）」指的列不存在** —— `upstream_keys.account_id` 在任何 DDL 里都没有，`ALTER` 批里也没有。归属关系**本来就**由 `supplier_account_keys.pooled_key_id` 这条台账表达（`keys/sync` 写它、§15.1 `keyCount` 从它数出来、第四口径的 `Σ无账号归属 key` 也按它算）。**刻意不给 `upstream_keys` 补这一列**：那等于给同一个事实造**第二个事实源**，两者迟早漂成不一致，而漂的那一刻没有任何东西会报错。**同批写死一个陷阱**：`ACCOUNT_HAS_KEYS` 的 `keyCount` **必须 JOIN `upstream_keys` 回来数、不能数台账行** —— 加台账行没有外键，`deleteUpstream`（ADR-0016）物理删 key 时**不动**台账，那批行会变成悬空引用；照台账行数的话，删过一次上游的账号将**永远删不掉**（弹窗警告"连带 N 把 key 解绑"，而那 N 把早已不存在）。§15.1 的 `countsFor()` 已是这个口径。
 > ③ **§14 快照点不是"零改动"，§6 `keys[]` / `keysBalance` 的集合同一性此前没成文，`currency` 则漏查了一张表** —— 两处补成文：**§6 规则 7**（`keys[]` 与 `keysBalance` 取**同一集合**、只列**无账号归属**的 key、每条带 `unlimited`；**未知 key 仍在列表里**，否则未知从"可见的空白"变成"不存在"）；**§6 规则 8**（`currency` 的取值集合跟着**贡献方**走，判据与金额那一格**逐字对齐**）。规则 8 落在一个真缺口上：`supplier_accounts.balance_currency` **是存在的**，而老口径只查 `upstream_keys` ⇒ 钱**全在账号上**的 TierFlow 上游恒回 `currency: null` —— 账号行里明明躺着 `'CNY'`。那不是"诚实的未知"，是漏查一张表，**而且偏偏发生在钱最多的那条上游上**；反过来，归属出去的 key 若把币种混进来，一把"账号已代表其余额"的 key 能把单币种上游**凭空判成混币**。
 > **同批补全示例**：§6 `overview` / `balance` 两个响应的 `byUpstream[]` 补齐五个 v1.4.0 已登记但示例里漏写的字段；**并修一处真错** —— `§6` 的 `keys[]` 条目示例把 `balanceUnknownKeyCount` 写进了 key 条目（该字段从来不属于 per-key 条目，同位置应为 `unlimited`）。**无字段改名、无字段删除、无端点增删、`ERROR_CODES` 零新增**（`ACCOUNT_HAS_KEYS` 在 v1.4.0 已登记，其代码侧落地随 §15.2 `DELETE` 端点实现提交）、**`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更**；**`SCHEMA_VERSION` 仍为 2**，但**必须真发 `ALTER`**（`balance_snapshots.unlimited_key_count` 是给 v1.3.0 就建好的老表加列）。唯一 DDL 新增就是这一列。
+
+> **v1.6.1（2026-10-07，S2「账号面 Tier A」落地 —— 三条本地端点实现收口）**：S2 除已落的 §15.1/§15.6 聚合外，本期再落**三条不打上游管理接口**的端点（`GET /subscriptions`、`GET /export`、`DELETE /:id`，代码落于 `dev/api`）。冻结稿对这些路径**给了端点名与用途、没给形状与机械细节**，本版把实现时被强制决定的那些逐条写死 —— 全部是**补白**，无一处推翻既有口径：
+> ① **§15.2 新增「扁平套餐列表的响应形状与排序」** —— 此前表里只有一行路径，没说它是 `Page<…>`、也没说每行带不带归属。写死：`Page<SupplierSubscriptionRowDto>`，每行 = §15.1 的 `SupplierSubscriptionDto` **加三个归属字段**（`accountId` / `accountIdentifier`（**掩码**）/ `upstreamId`），排序 `end_at ASC` + **`NULL` 排最后** + `sub_no` / `id` 兜底全序。**归属字段是这个端点存在的理由**：跨账号的扁平列表里，一个没有主语的 `subNo` 对不了账。
+> ② **§15.2 `export` 补「机械形状」** —— 列序**首位补 `upstreamId`**（§15.2 原文的列清单没有它，而不带 `upstreamId` 过滤时，导出的表里没有任何一列能说明"这行是哪个上游的账号"，对账时分不出归属）；并写死 `Content-Type: text/csv; charset=utf-8`、`Content-Disposition` 文件名 `supplier-accounts-YYYYMMDD.csv`（UTC 日期）、**UTF-8 BOM**（无 BOM 时 Windows Excel 按 GBK 解，打开即乱码，会被当成数据损坏去查后端）、CRLF 行尾、RFC 4180 引号规则、以及**公式注入防护**（见 §15.2）。**导出不分页**：对账表分页导出**就是错的**（拿到的"账号总数"取决于点第几页）。
+> ③ **审计动作名补登两个 + 一条例外成文** —— §15.7 原登记四个批量端点，本版补 `supplier.export` 与 `supplier.account.delete`（`detail` 一律**只放计数 / 标志**，不放 identifier 列表）。**`export` 是 GET 却写审计，这是刻意的**：§6 的"登录 / 登出 / 所有写操作"是**下限不是上限**，而批量导出是账号面上唯一一次"把全部账号清单一次性带出后端"的动作 —— 不留痕的话，"谁在什么时候导过名单"事后完全不可查，而这是最该可查的那一件事。
+> ④ **§15.2 `DELETE` 补响应码与审计**：成功 `204`（无响应体）、被拦 `409 ACCOUNT_HAS_KEYS`（**拦下时零副作用、不写成功审计** —— 审计里有一条 `ok` 会让人以为删成了）；成功时 `detail` 为 `force`（非 `force` 删除为 `null`）。
+> **同批成文一条依赖**：`export` 的 `subscriptionEndAt` = 该账号所有套餐 **`end_at` 的最大值**（取最晚 = "被接续覆盖到什么时候"，取中间值会让已续过的账号看起来快到期），全为 `NULL` 时空单元格（**不是 `0`**）；其实现依赖 `end_at` 已是 ISO8601 UTC（§15.1），**归一化责任在写入侧**（导入路径），读侧不猜上游格式。
+> **无字段改名、无字段删除、无端点增删、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2、**零 DDL 改动**（`ACCOUNT_HAS_KEYS` 与其 409 映射随本批落地）。**
 
 ---
 
@@ -1648,19 +1656,64 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 > 就丢了"这个失败模式。前端这一步只看到 `202 {taskId}` → 轮询 → 逐行 `keyMasked`，
 > 拿到的是**回执**（`keyMasked` + `tokenNo` + "凭据已托付网关，无需留存"），不是凭据本身。
 
+#### `GET /api/supplier-accounts/subscriptions?upstreamId=&page=&pageSize=`（v1.6.1 补形状）
+
+**跨账号**的扁平套餐列表 —— 与 §15.1 详情里那个嵌套 `subscriptions[]` 是**同一份数据的两个切面**：
+那条回答"这个账号有哪些套餐"，这条回答"这堆账号的套餐排在一起、接下来谁到期"。
+
+响应：§0.3 分页信封，`items[]` = `SupplierSubscriptionRowDto` = §15.1 的 `SupplierSubscriptionDto`
+**加上三个归属字段**：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `accountId` | string | 套餐属于哪个账号 |
+| `accountIdentifier` | string | **掩码**手机号 / 邮箱。与 §15.1 同一条纪律：**真值不出后端** |
+| `upstreamId` | string | 该账号所在上游 |
+
+- 归属字段是**这个端点存在的理由**：扁平列表里一个没有主语的 `subNo` 对不了账，
+  而"这是哪个号的"正是打开这一页要问的第一句话。字段形状**复用** `SupplierSubscriptionDto`，
+  不另造一套（否则两处会漂）。
+- **排序 `end_at ASC`，`NULL` 排最后**，末位 `sub_no` / `id` 兜底成全序。
+  - 不按惯用的 `updated_at DESC`：本端点的用途就是看"接下来谁到期"，按更新时间排会把
+    一个下月到期、昨天刚刷新过的套餐顶到最前面。
+  - 不处理 `NULLS` 的话 SQLite 把 `NULL` 当最小值，会把"没有到期时间"的全部排到**最前**，
+    把真正快到期的挤出首页。判定键是 `(end_at IS NULL), end_at, sub_no, id`。
+
 #### `GET /api/supplier-accounts/export`
 
 CSV，一行一账号，列为：
-`identifier(掩码), uid, status, statusMessage, balanceCents, balanceUpdatedAt,
+`upstreamId, identifier(掩码), uid, status, statusMessage, balanceCents, balanceUpdatedAt,
 keyCount, unlimitedKeyCount, maskedKeyCount, subscriptionCount, subscriptionEndAt,
 createdAt, updatedAt`。
 
+- **`upstreamId` 列是 v1.6.1 补的**（v1.4.0 的列清单里没有它）：不带 `upstreamId` 查询参数时
+  导出的是全部账号，而表里若没有归属列，读的人分不出每一行是哪个上游的账号 —— 对账表的基本要求。
 - **不含密码、不含会话、不含任何 key 明文或掩码** —— 密码与会话不是"数据"，是凭据（ADR-0006）。
 - 因此**这份 CSV 不能用来重建账号**（重建需要密码）。它是**对账 / 审计表**，不是备份。
   备份口径是**库文件级备份**（密文形态）。
 - **重建输入只认人工维护的「手机号+密码」清单**（§15.2 `import` 的 `text` 一栏粘贴，
   不落盘、不落 `localStorage`、不回填表单）。这条与上一条必须同时写进导出按钮的说明里，
   否则"导出 → 换台机器导入 → 27 个号全登不上"会是一个很难查的坑。
+
+**机械形状（v1.6.1 补 —— 冻结稿只给了"CSV"两个字，实现时这七条都是被强制的）：**
+
+| 项 | 取值 | 为什么必须写死 |
+|---|---|---|
+| `Content-Type` | `text/csv; charset=utf-8` | 少了 `charset` 有些客户端按 Latin-1 解 |
+| `Content-Disposition` | `attachment; filename="supplier-accounts-YYYYMMDD.csv"`（**UTC** 日期） | 文件名由服务端给，前端不必自己拼（拼了就两份实现）；用 UTC 是因为服务器时区不该改变文件名 —— 否则同一动作在不同时区的机器上产出两个名字，归档时会被当成两份表 |
+| BOM | **有**（`EF BB BF`） | 无 BOM 时 Windows Excel 按本地代码页（简中 = GBK）解，打开即乱码；而"导出打开是乱码"会被当成数据损坏去查一遍后端 |
+| 行尾 | **CRLF**（RFC 4180） | Excel 对 LF 也能读，但 CRLF 是两个客户端都无歧义的那个 |
+| 引号 | 含 `,` `"` 换行，或**首尾有空格**时加引号，内部 `"` 翻倍 | 首尾空格不加引号会被 Excel 吃掉，肉眼看起来是"我们导出的值变了" |
+| **公式注入** | 文本单元格以 `=` `+` `-` `@` **或制表符 / 回车**开头时，**前缀一个单引号** | 表里的 `identifier` / `uid` / `statusMessage` 全是**供应商侧**的外部文本，Excel 会把它们当**公式执行**（`=HYPERLINK(...)` 一类足以在打开对账表的人机器上拉外链或触发 DDE）—— 导出这个**纯读动作**因此是一条代码执行路径。单引号是各家都认的"这是文本"标记。**数值单元格一律不前缀**：`-100` 是负数不是公式，前缀会把整数变文本，于是这份表在 Excel 里求不了和、排不了序 —— 防注入防掉了本表的用途 |
+| 分页 | **不分页**（无 `page` / `pageSize`） | 对账表分页导出**就是错的**：拿到的"账号总数"取决于导出时点了第几页。账号面是人工导入的规模（个位数到几十），一次全量是安全的 |
+
+- `subscriptionCount` = 套餐条数；`subscriptionEndAt` = 该账号所有套餐 **`end_at` 的最大值**
+  （取最晚 = "被接续覆盖到什么时候"；取中间值会让一个已续过期的账号看起来快到期）。
+  全为 `NULL`（上游没给到期时间）时空单元格 —— **不是 `0`、不是 `-`**。
+  该列依赖 `end_at` 已是 ISO8601 UTC（§15.1），**归一化责任在写入侧**（导入路径）：
+  上游格式不一时在**读侧**猜格式，只会把"数据没归一化"这个真问题盖成"偶尔排序不对"。
+- **审计**：每次导出写一条 `audit_log`（`action = "supplier.export"`，`detail = "rows=N"`）。
+  **`export` 是 GET 却写审计，这是刻意的** —— 见 §15.7。
 
 #### `POST /api/supplier-accounts/keys/sync`
 
@@ -1685,6 +1738,14 @@ createdAt, updatedAt`。
 |---|---|
 | `!= true` | 该账号名下有**已入池的 key** → `409 ACCOUNT_HAS_KEYS`，`details: { keyCount: 1 }`。拦下时零副作用 |
 | `true` | 删账号行与套餐行；**池内 key 保留但解绑** —— 它们可能正在被网关使用，删账号不等于停服务 |
+
+- **响应码（v1.6.1 补）**：成功 `204`（无响应体），被拦 `409`，账号不存在 `404`（删两次的第二次也是 `404`，
+  不静默当成功）。
+- **审计（v1.6.1 补）**：成功时写一条 `audit_log`（`action = "supplier.account.delete"`，
+  `detail = "force"` 或 `null`）。**被拦下（409）时不写成功审计** —— 审计里留一条 `ok` 会让人以为删成了。
+- **不写 `change_log`**：网关快照只消费 `upstream_keys` / `upstreams` / `models`，而本操作
+  **一行 key 都没动**（解绑不改 key 行的任何一列），故网关侧**没有任何变化可推**。
+  发一条它不认识的 entity 只会让快照消费方多一个要忽略的分支。
 
 **「解绑」的机制是什么（v1.6.0 订正）**：解绑 = **删掉 `supplier_account_keys` 台账行**，不是把某一列置 `NULL`。v1.4.0 的 ADR-0018 决策 2 把它写成"`/upstream_keys.account_id` 置 `NULL`"，但**`upstream_keys.account_id` 这个列在任何 DDL 里都不存在**，v1.4.x 的 `ALTER` 批里也没有它 —— 归属关系**本来就**由 `supplier_account_keys.pooled_key_id` 这条台账表达（§15.2 `keys/sync` 写它、§15.1 `keyCount` 从它数出来）。
 
@@ -1822,6 +1883,10 @@ createdAt, updatedAt`。
 | §6 `GET /api/stats/balance` | 形状不变 | 零变更 |
 | §14 自动同步 / 漂移 / 退避 / 单飞 | **零改动**（账号合计天然落进 `total_balance_cents`，派生值也从同一个聚合来） | 零变更 |
 | §14.3 快照**点** | `knownKeyCount` 的推导式改一处 + 加一格 `unlimitedKeyCount`（列 `balance_snapshots.unlimited_key_count`） | **非零改动**（v1.6.0 订正；v1.4.0 原写"零改动"是不成立的，理由见下） |
+| §15.2 `GET /subscriptions` 响应 | 补形状：`Page<SupplierSubscriptionRowDto>`（= §15.1 `SupplierSubscriptionDto` + `accountId` / `accountIdentifier`(掩码) / `upstreamId`），排序 `end_at ASC` + `NULL` 最后 | **非破坏新增**（v1.6.1 补白：冻结稿此前只给了端点名） |
+| §15.2 `export` CSV 列 | 补首位一列 `upstreamId` | **非破坏新增**（v1.6.1；不带 `upstreamId` 过滤时，原列清单里没有任何一列能说明归属） |
+| §15.2 `export` 机械形状 | 补 `Content-Type` / `Content-Disposition` / BOM / CRLF / RFC 4180 引号 / **公式注入防护** / 不分页 | **补白**（v1.6.1；实现时被强制的七条，此前未成文） |
+| §15.2 `DELETE /:id` 响应与审计 | 补 `204` / 被拦不写成功审计 / `action = supplier.account.delete` | **补白**（v1.6.1） |
 | `/v1/*` | **零变更**（数据面另见 §16） | 零变更 |
 
 **`unlimited` 这一列为什么必须有**（不是"顺手加的"）：
@@ -1885,6 +1950,14 @@ createdAt, updatedAt`。
 - 审计：四个批量端点各写一条 `audit_log`（`action` = `supplier.import` / `supplier.refresh` /
   `supplier.keys.create` / `supplier.keys.sync`），`detail` **只放计数**，不放 identifier 列表、
   不放任何凭据。
+  - **v1.6.1 补登两个动作**：`supplier.export`（`detail = "rows=N"`）与
+    `supplier.account.delete`（`detail = "force"` / `null`）。两者的判定与 `detail` 口径同上一段。
+  - **`export` 是 GET 却写审计，这是刻意的**：§6 的"登录 / 登出 / 所有写操作"是**下限不是上限**，
+    而批量导出是账号面上唯一一次"把全部账号清单一次性带出后端"的动作 —— 不留痕的话，
+    "谁在什么时候导过名单"事后完全不可查，而这是最该可查的那一件事。
+    这条只改"审计覆盖面"，**不改鉴权面**：`export` 仍是普通管理会话（§0.5），
+    **不使用** `READONLY_TOKEN`，与本节其余端点同。
+  - 被拦下的写（如 `409 ACCOUNT_HAS_KEYS`）**不写成功审计**：留一条 `ok` 会让人以为删成了。
 
 ### 15.8 本期裁定速查（原画师六问 + 两处跨车道冲突的裁决）
 
@@ -2351,4 +2424,4 @@ createdAt, updatedAt`。
 
 ---
 
-*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`；v1.2.1（§13.4「槽位撞满」二分口径：全候选满并发 `503 NO_AVAILABLE_KEY` / 竞态窗口 `429 RATE_LIMITED`，零新增枚举、零代码改动）为文本对齐；v1.2.2（§2 `DELETE /api/upstreams/:id` 从属资源处置：`force!=true` 拦 key 与模型并报 `{keyCount, modelCount}`、`force=true` 按依赖序物理删整棵子树，修订 §11 C4）见 `docs/adr/0016-delete-upstream-subtree.md`；v1.3.0（§14 余额同步：自动同步节奏与退避、NULL 口径、快照与 `asOf`、方向级漂移提示；同批撤销「单价 × 用量的本地扣减账本」方案）见 `docs/adr/0017-balance-sync-source-of-truth.md`；v1.4.0（§15 供应商账号面 + §16 TierFlow 数据面约束：账号作独立资源、批量新建 key 为唯一入池通路、账号级余额第四口径、套餐不建成 key、`upstream_keys.unlimited`、凭据会话一次性离线导入、`…Cents` 金额口径；`ERROR_CODES` 首次新增 1 个 `ACCOUNT_HAS_KEYS`）见 `docs/adr/0018-supplier-account-batch.md`；v1.4.1（§15.1 非破坏新增 `credentialSource`；§15.9 补凭据双路径定位、自动重登的触发与账号级互斥；§15.3 收口 `action` 枚举的生产者）见 `docs/adr/0018-supplier-account-batch.md` 决策 10；v1.4.2（§3 `KeyDto` 非破坏新增 `models` 模型白名单 + §5 `availableKeyIds` 补白名单条件 + §15.2 `keys` 入参可选 `models` + §15.7 加列 `upstream_keys.model_limits` + §16.1.1 悬空件登记 + §16.5 S1 字段对账）见 `docs/adr/0019-key-model-whitelist.md`；v1.4.3（§16.1.1 **执行主体改锚**：凭据由持有者运行时注入、可明示指定执行会话代跑，路由者只出探针与结论；新增 **§16.6 S4 验收锚定**含执行链三步与三项 S1 占位值表 —— 其中"数据面路径与协议"**明确不落 DTO**；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增**）见 `docs/adr/0018-supplier-account-batch.md` 决策 11；v1.4.4（§16.7 **出口级（IP 级）限流**：定性为第三层限流、取证"轮换放大"回路、归因纪律"IP 级 429 不计 key 健康 + 冷却上移到出口 + 冷却期内不换 key"、处置三档 Tier 1/1.5/2、识别规则按悬空件登记、§15.5 那条依据降级；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 对外行为零变更**）见 `docs/adr/0020-egress-ip-rate-limit.md`；v1.4.3 变更块为**补记**（冻版时正文与版本号已改、变更块漏写，仅补记录、无内容变更）；v1.4.5（§15.7 补 `unlimited=1 ⇒ balance_cents` 落 `NULL` 的**落库规则** + §16.3 该行改写与"白名单还差几处"的量词订正 + 同批落地 `src/db/schema.ts` 三列守卫 `ALTER` 与老库升版 spec + 补记 v1.4.3 变更块；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`SCHEMA_VERSION` 仍为 2**）为落地面收口；v1.4.6（§16.3 白名单口径**裁定**：路由者报回三条中 (a) 确认为既有登记的「4 处 + 1 spec」缺口、(b)(c) 按**非缺陷**关闭 —— 契约四处一致 `[]` ≡ `null` ≡ 不限、与冻结件 `matchesModel()` 同向；§15.2 待实测块**新增**一条「上游 `model_limits_enabled=true` + 空 CSV = 全禁还是不限」，实测前归一化仍为 `NULL`；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2**）；v1.4.7（§16.3 补**拓扑中立取件纪律** —— canonical 落点唯一、车道基线早于该批 `ALTER` 时按路径取件、不派生第二份 `schema.ts`；§16.5 两处文本订正：残留「网关侧还差一行」→ **4 处 + 1 个 spec**、「另两项不需要等任何人」限定为**契约层**；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2**）；v1.4.8（§16.7 两处悬空件**裁定** —— 识别规则**本期不启用**、登记世界 (c)（同一出口第 2 把不同 key 亦 429，代价：确认前第一把仍被记过）并写明「默认关闭期间 Tier 1 是**缝**不是**修**、自伤回路尚未掐断」；出口冷却 **= `max(Retry-After, 60s)`** 地板成文（此前只写"尊重"没写地板，是契约漏写）；**新增 §7 帧 `egress_cooldown`**（`egressId` 不透明字符串、`cooldownUntil` ISO8601、解除推 `null`）并同日写进 ADR-0020 决策 7；§15.5 依据降级落到**表内那一行本身**（此前只在本节写、表内仍是旧依据）、§15.9 / §16.4 两处 0.6s 引用补出口级指引；Tier 1.5「**同一出口共用一条速率**」口径定死、数值占位；Tier 2 订正旧文"若做"（DDL 已落）并写死**账号级绑定非 key 级** / **每出口账号数上限 6 占位** / **`egress_id` 不进任何 DTO**；**无字段改名、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2** —— 唯一的对外形状新增是那条 §7 帧）；v1.4.9（**§7 `egress_cooldown` 帧的「本期状态」裁定** —— 形状已冻结、**本期不发射**（识别器默认关闭 ⇒ 冷却不置起；发帧实现未落 ⇒ `live.ts` 零 egress 代码），故**本期出口级冷却对管理面不可观测**：前端**不得接线**、**不得把"未收到该帧"当作"出口健康"**（缺省不是证据）、不得反推；接入点写死为**接线层注入**（AGENTS.md §8，形状同 `ApiContext.assistant`），生产者归路由者 `src/gateway/egress.ts`；同裁定补进 §16.7 裁定 ① 并给出两条自检信号；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2 —— 纯文档，零代码**）；v1.4.10（**§7 `egress_cooldown` 帧的投递语义收口** —— v1.4.8 那句「立即推（不等到下一帧）」是从 `key_health` 抄的，而本帧被 §7 自己定为唯一读面、**不走 REST** ⇒ 照字面实现即**纯事件推**：**刷新 / 重连拿不到"此刻正在冷却"**，前端只能把「全部 key 暂停路由」渲染成正常（最长 30min），且反推被禁 ⇒ **无合规自纠手段**；裁定改为**随每 tick 差分帧下发**（`id: egress:${egressId}`、`sig` 必带 `cooldownUntil`，新连接 `seen` 为空 ⇒ **首 tick 自然全量**），与 `key_health` / `balance` / `task` 同列，**零新增端点、零帧形状变更**，代价写明 **≤1 tick（1s）**；同批**证据订正**：`key_health` 的基线**不是** `metrics` 帧（`live.ts` 该帧不带 `keyHealth[]`）而是与其同款的差分帧首 tick 全量；自检信号由两个增为**三个**（新增差分帧注册面 `git grep -c 'egress:' dev/api -- src/api/routes/live.ts`）；**不改变 v1.4.9「本期不发射」的结论**；**无字段改名、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2 —— 纯文档，零代码**）；v1.4.11（**§7 `egress_cooldown` 生产者形态收口** —— 把 v1.4.8 / v1.4.10 那句「网关的**出口冷却表**」订正为**进程内注册表**：`src/gateway/egress.ts` 的 `createEgressCooldown()` 内部是 `Map<string, EgressState>`、**不落库、重启归零**，经 `stack.ts` 装配注入（`egress?: EgressCooldown`）；同批写死**发帧必须同进程读被注入的实例、不查库**（跨进程读不到则帧发不出来），并补记接线为**三处**（造帧 / 推帧 / 注册进 `tickNow` 的 `live` 集合 —— 漏第三处则帧每秒重发）；帧字段名 / 形状 / v1.4.10 投递语义（差分帧 + 首 tick 全量）/ 三条硬约束 / 三个自检信号 / v1.4.9「本期不发射」结论**全部不动**；**无字段改名、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2 —— 纯文档，零代码**）；v1.5.0（**§7 `egress_cooldown` 读面与 `reason` 两处收口** —— ① **放行纯增量只读** `EgressCooldown.snapshot(): readonly { host, untilMs }[]`（**签名只增不改**、`KeyPool` / `KeyConfig` / engine 零改动）：v1.4.10 钉了「`sig` 必带 `cooldownUntil`」却**没查生产者供不供得出**，实测 `egress.ts` 只有 `isCooling(host)` / `remainingMs(host)`（**须先知道 host**）、**无枚举读、无 `until` 读口** ⇒ 属**已冻结语义的缺件**；**语义钉死两条** —— `untilMs` 必须是**绝对时刻**（禁止 `now() + remainingMs()` 反算，否则指纹每 tick 变、每 tick 白推）、快照必须是**全量**（`live.ts` 差分通道**无墓碑**，id 消失只从 `seen` 删、不发帧 ⇒ 只报冷却中的话**解除帧永不发出**）；推论：冷却层**不得 prune 已过期条目**；② **删除 §7 帧 `reason` 字段**（`cool()` 是唯一变更入口且 `reason` 硬编码 `RATE_LIMITED`、`EgressState` 不存它 ⇒ **常量不是状态**；且本帧从未发射、零消费者，**删除此刻免费**），将来若出现第二种成因**同批加字段与生产者**；③ **不改变 v1.4.9「本期不发射」**，属接线前前置件；**§7 帧首次字段删除**故升 v1.5.0，**无端点增删、无其他字段改名、无 DTO 变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2 —— 纯文档，零代码**）；v1.5.1（**S1 冻结稿** —— 不新增字段 / 端点，只把 S1 口径落到正文并补索引：**§15.10 新增**「Python 工作台退役与数据迁移口径」（ADR-0018 决策 6 早有结论、**§15 正文此前没有** —— 工作台退役、**`workbench.db` 不迁**、账号靠 §15.2 `import` 重建、旧 29 把掩码 key **作废不回捞**统一重建、批量建 key 作为供应商内建能力**不新增端点/任务类型**）；**§15.11 新增 S1 冻结索引表**（八项逐条给出正文落点与状态）；**§2 补**「通用模板不加换算字段」（个例不外溢，`parse.unit` 三值不变、不新增枚举）；**§6 补规则 6**「无限与未知分列，不得相加/顶替」；**同批订正派单三处锚点**（①② 口径 v1.4.0/v1.4.1 早已冻结、解析顺序在 **§2 非 §14** 且早已落、**会话文件路径按 §15.9 纪律 1 不进契约正文**）；**§14 / §7 本次零改动**；**无字段改名、无字段删除、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2 —— 纯文档，零代码**）；v1.6.0（**S2 落地收口的契约订正**，代码已落 `dev/api @ e76a2d6` —— §15 冻结稿里三处「声明与代码对不上」逐条订正：① §15.6「本次唯一动的既有聚合就是 `balanceUnknownKeyCount` 加一个条件」**不成立** （漏了**推导值** `knownKeyCount` —— 它是 `balanceKeyCount - balanceUnknownKeyCount`，正是从那一处改动里算出来的，无限额度 key 会被反过来数成"已知"），实为**两处**既有聚合 + **加一列** `balance_snapshots.unlimited_key_count`（老表加列，随 §15.7 批 `ALTER`），并补不变量的**互斥**写法；② §15.2 `DELETE` 的「解绑（`account_id` 置 `NULL`）」**指的列不存在** —— 归属本来就是 `supplier_account_keys.pooled_key_id` 台账，**刻意不补列**（第二个事实源），并写死 `ACCOUNT_HAS_KEYS` 的 `keyCount` **必须 JOIN `upstream_keys` 回来数**（台账行无外键，`deleteUpstream` 物理删 key 后成悬空引用 ⇒ 照台账数会让账号**永远删不掉**）；③ §14 快照点**不是"零改动"**、§6 `keys[]`/`keysBalance` 的集合同一性此前未成文、`currency` **漏查一张表** —— 补 **§6 规则 7**（`keys[]` 与 `keysBalance` 同一集合、只列无账号归属的 key、带 `unlimited`；**未知 key 仍在列表里**）与 **§6 规则 8**（`currency` 取值集合跟**贡献方**走、与金额判据逐字对齐 —— `supplier_accounts.balance_currency` **存在**，老口径只查 key ⇒ 钱全在账号上的上游恒回 `null`）；**同批补全 §6 两处 `byUpstream[]` 示例**并**修一处真错**（`keys[]` 条目示例误写 `balanceUnknownKeyCount`，同位置应为 `unlimited`）；**无字段改名、无字段删除、无端点增删、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2**）。以上各版同属本契约的同一冻结面。（**版本索引订正 2026-10-07，不升版**：本索引此前在 v1.2.1 之后漏记 v1.2.2 / v1.3.0 两条，本次补齐 —— 仅索引行，无内容变更。）*
+*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`；v1.2.1（§13.4「槽位撞满」二分口径：全候选满并发 `503 NO_AVAILABLE_KEY` / 竞态窗口 `429 RATE_LIMITED`，零新增枚举、零代码改动）为文本对齐；v1.2.2（§2 `DELETE /api/upstreams/:id` 从属资源处置：`force!=true` 拦 key 与模型并报 `{keyCount, modelCount}`、`force=true` 按依赖序物理删整棵子树，修订 §11 C4）见 `docs/adr/0016-delete-upstream-subtree.md`；v1.3.0（§14 余额同步：自动同步节奏与退避、NULL 口径、快照与 `asOf`、方向级漂移提示；同批撤销「单价 × 用量的本地扣减账本」方案）见 `docs/adr/0017-balance-sync-source-of-truth.md`；v1.4.0（§15 供应商账号面 + §16 TierFlow 数据面约束：账号作独立资源、批量新建 key 为唯一入池通路、账号级余额第四口径、套餐不建成 key、`upstream_keys.unlimited`、凭据会话一次性离线导入、`…Cents` 金额口径；`ERROR_CODES` 首次新增 1 个 `ACCOUNT_HAS_KEYS`）见 `docs/adr/0018-supplier-account-batch.md`；v1.4.1（§15.1 非破坏新增 `credentialSource`；§15.9 补凭据双路径定位、自动重登的触发与账号级互斥；§15.3 收口 `action` 枚举的生产者）见 `docs/adr/0018-supplier-account-batch.md` 决策 10；v1.4.2（§3 `KeyDto` 非破坏新增 `models` 模型白名单 + §5 `availableKeyIds` 补白名单条件 + §15.2 `keys` 入参可选 `models` + §15.7 加列 `upstream_keys.model_limits` + §16.1.1 悬空件登记 + §16.5 S1 字段对账）见 `docs/adr/0019-key-model-whitelist.md`；v1.4.3（§16.1.1 **执行主体改锚**：凭据由持有者运行时注入、可明示指定执行会话代跑，路由者只出探针与结论；新增 **§16.6 S4 验收锚定**含执行链三步与三项 S1 占位值表 —— 其中"数据面路径与协议"**明确不落 DTO**；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增**）见 `docs/adr/0018-supplier-account-batch.md` 决策 11；v1.4.4（§16.7 **出口级（IP 级）限流**：定性为第三层限流、取证"轮换放大"回路、归因纪律"IP 级 429 不计 key 健康 + 冷却上移到出口 + 冷却期内不换 key"、处置三档 Tier 1/1.5/2、识别规则按悬空件登记、§15.5 那条依据降级；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 对外行为零变更**）见 `docs/adr/0020-egress-ip-rate-limit.md`；v1.4.3 变更块为**补记**（冻版时正文与版本号已改、变更块漏写，仅补记录、无内容变更）；v1.4.5（§15.7 补 `unlimited=1 ⇒ balance_cents` 落 `NULL` 的**落库规则** + §16.3 该行改写与"白名单还差几处"的量词订正 + 同批落地 `src/db/schema.ts` 三列守卫 `ALTER` 与老库升版 spec + 补记 v1.4.3 变更块；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`SCHEMA_VERSION` 仍为 2**）为落地面收口；v1.4.6（§16.3 白名单口径**裁定**：路由者报回三条中 (a) 确认为既有登记的「4 处 + 1 spec」缺口、(b)(c) 按**非缺陷**关闭 —— 契约四处一致 `[]` ≡ `null` ≡ 不限、与冻结件 `matchesModel()` 同向；§15.2 待实测块**新增**一条「上游 `model_limits_enabled=true` + 空 CSV = 全禁还是不限」，实测前归一化仍为 `NULL`；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2**）；v1.4.7（§16.3 补**拓扑中立取件纪律** —— canonical 落点唯一、车道基线早于该批 `ALTER` 时按路径取件、不派生第二份 `schema.ts`；§16.5 两处文本订正：残留「网关侧还差一行」→ **4 处 + 1 个 spec**、「另两项不需要等任何人」限定为**契约层**；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2**）；v1.4.8（§16.7 两处悬空件**裁定** —— 识别规则**本期不启用**、登记世界 (c)（同一出口第 2 把不同 key 亦 429，代价：确认前第一把仍被记过）并写明「默认关闭期间 Tier 1 是**缝**不是**修**、自伤回路尚未掐断」；出口冷却 **= `max(Retry-After, 60s)`** 地板成文（此前只写"尊重"没写地板，是契约漏写）；**新增 §7 帧 `egress_cooldown`**（`egressId` 不透明字符串、`cooldownUntil` ISO8601、解除推 `null`）并同日写进 ADR-0020 决策 7；§15.5 依据降级落到**表内那一行本身**（此前只在本节写、表内仍是旧依据）、§15.9 / §16.4 两处 0.6s 引用补出口级指引；Tier 1.5「**同一出口共用一条速率**」口径定死、数值占位；Tier 2 订正旧文"若做"（DDL 已落）并写死**账号级绑定非 key 级** / **每出口账号数上限 6 占位** / **`egress_id` 不进任何 DTO**；**无字段改名、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2** —— 唯一的对外形状新增是那条 §7 帧）；v1.4.9（**§7 `egress_cooldown` 帧的「本期状态」裁定** —— 形状已冻结、**本期不发射**（识别器默认关闭 ⇒ 冷却不置起；发帧实现未落 ⇒ `live.ts` 零 egress 代码），故**本期出口级冷却对管理面不可观测**：前端**不得接线**、**不得把"未收到该帧"当作"出口健康"**（缺省不是证据）、不得反推；接入点写死为**接线层注入**（AGENTS.md §8，形状同 `ApiContext.assistant`），生产者归路由者 `src/gateway/egress.ts`；同裁定补进 §16.7 裁定 ① 并给出两条自检信号；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2 —— 纯文档，零代码**）；v1.4.10（**§7 `egress_cooldown` 帧的投递语义收口** —— v1.4.8 那句「立即推（不等到下一帧）」是从 `key_health` 抄的，而本帧被 §7 自己定为唯一读面、**不走 REST** ⇒ 照字面实现即**纯事件推**：**刷新 / 重连拿不到"此刻正在冷却"**，前端只能把「全部 key 暂停路由」渲染成正常（最长 30min），且反推被禁 ⇒ **无合规自纠手段**；裁定改为**随每 tick 差分帧下发**（`id: egress:${egressId}`、`sig` 必带 `cooldownUntil`，新连接 `seen` 为空 ⇒ **首 tick 自然全量**），与 `key_health` / `balance` / `task` 同列，**零新增端点、零帧形状变更**，代价写明 **≤1 tick（1s）**；同批**证据订正**：`key_health` 的基线**不是** `metrics` 帧（`live.ts` 该帧不带 `keyHealth[]`）而是与其同款的差分帧首 tick 全量；自检信号由两个增为**三个**（新增差分帧注册面 `git grep -c 'egress:' dev/api -- src/api/routes/live.ts`）；**不改变 v1.4.9「本期不发射」的结论**；**无字段改名、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2 —— 纯文档，零代码**）；v1.4.11（**§7 `egress_cooldown` 生产者形态收口** —— 把 v1.4.8 / v1.4.10 那句「网关的**出口冷却表**」订正为**进程内注册表**：`src/gateway/egress.ts` 的 `createEgressCooldown()` 内部是 `Map<string, EgressState>`、**不落库、重启归零**，经 `stack.ts` 装配注入（`egress?: EgressCooldown`）；同批写死**发帧必须同进程读被注入的实例、不查库**（跨进程读不到则帧发不出来），并补记接线为**三处**（造帧 / 推帧 / 注册进 `tickNow` 的 `live` 集合 —— 漏第三处则帧每秒重发）；帧字段名 / 形状 / v1.4.10 投递语义（差分帧 + 首 tick 全量）/ 三条硬约束 / 三个自检信号 / v1.4.9「本期不发射」结论**全部不动**；**无字段改名、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2 —— 纯文档，零代码**）；v1.5.0（**§7 `egress_cooldown` 读面与 `reason` 两处收口** —— ① **放行纯增量只读** `EgressCooldown.snapshot(): readonly { host, untilMs }[]`（**签名只增不改**、`KeyPool` / `KeyConfig` / engine 零改动）：v1.4.10 钉了「`sig` 必带 `cooldownUntil`」却**没查生产者供不供得出**，实测 `egress.ts` 只有 `isCooling(host)` / `remainingMs(host)`（**须先知道 host**）、**无枚举读、无 `until` 读口** ⇒ 属**已冻结语义的缺件**；**语义钉死两条** —— `untilMs` 必须是**绝对时刻**（禁止 `now() + remainingMs()` 反算，否则指纹每 tick 变、每 tick 白推）、快照必须是**全量**（`live.ts` 差分通道**无墓碑**，id 消失只从 `seen` 删、不发帧 ⇒ 只报冷却中的话**解除帧永不发出**）；推论：冷却层**不得 prune 已过期条目**；② **删除 §7 帧 `reason` 字段**（`cool()` 是唯一变更入口且 `reason` 硬编码 `RATE_LIMITED`、`EgressState` 不存它 ⇒ **常量不是状态**；且本帧从未发射、零消费者，**删除此刻免费**），将来若出现第二种成因**同批加字段与生产者**；③ **不改变 v1.4.9「本期不发射」**，属接线前前置件；**§7 帧首次字段删除**故升 v1.5.0，**无端点增删、无其他字段改名、无 DTO 变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2 —— 纯文档，零代码**）；v1.5.1（**S1 冻结稿** —— 不新增字段 / 端点，只把 S1 口径落到正文并补索引：**§15.10 新增**「Python 工作台退役与数据迁移口径」（ADR-0018 决策 6 早有结论、**§15 正文此前没有** —— 工作台退役、**`workbench.db` 不迁**、账号靠 §15.2 `import` 重建、旧 29 把掩码 key **作废不回捞**统一重建、批量建 key 作为供应商内建能力**不新增端点/任务类型**）；**§15.11 新增 S1 冻结索引表**（八项逐条给出正文落点与状态）；**§2 补**「通用模板不加换算字段」（个例不外溢，`parse.unit` 三值不变、不新增枚举）；**§6 补规则 6**「无限与未知分列，不得相加/顶替」；**同批订正派单三处锚点**（①② 口径 v1.4.0/v1.4.1 早已冻结、解析顺序在 **§2 非 §14** 且早已落、**会话文件路径按 §15.9 纪律 1 不进契约正文**）；**§14 / §7 本次零改动**；**无字段改名、无字段删除、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2 —— 纯文档，零代码**）；v1.6.0（**S2 落地收口的契约订正**，代码已落 `dev/api @ e76a2d6` —— §15 冻结稿里三处「声明与代码对不上」逐条订正：① §15.6「本次唯一动的既有聚合就是 `balanceUnknownKeyCount` 加一个条件」**不成立** （漏了**推导值** `knownKeyCount` —— 它是 `balanceKeyCount - balanceUnknownKeyCount`，正是从那一处改动里算出来的，无限额度 key 会被反过来数成"已知"），实为**两处**既有聚合 + **加一列** `balance_snapshots.unlimited_key_count`（老表加列，随 §15.7 批 `ALTER`），并补不变量的**互斥**写法；② §15.2 `DELETE` 的「解绑（`account_id` 置 `NULL`）」**指的列不存在** —— 归属本来就是 `supplier_account_keys.pooled_key_id` 台账，**刻意不补列**（第二个事实源），并写死 `ACCOUNT_HAS_KEYS` 的 `keyCount` **必须 JOIN `upstream_keys` 回来数**（台账行无外键，`deleteUpstream` 物理删 key 后成悬空引用 ⇒ 照台账数会让账号**永远删不掉**）；③ §14 快照点**不是"零改动"**、§6 `keys[]`/`keysBalance` 的集合同一性此前未成文、`currency` **漏查一张表** —— 补 **§6 规则 7**（`keys[]` 与 `keysBalance` 同一集合、只列无账号归属的 key、带 `unlimited`；**未知 key 仍在列表里**）与 **§6 规则 8**（`currency` 取值集合跟**贡献方**走、与金额判据逐字对齐 —— `supplier_accounts.balance_currency` **存在**，老口径只查 key ⇒ 钱全在账号上的上游恒回 `null`）；**同批补全 §6 两处 `byUpstream[]` 示例**并**修一处真错**（`keys[]` 条目示例误写 `balanceUnknownKeyCount`，同位置应为 `unlimited`）；**无字段改名、无字段删除、无端点增删、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2**）。v1.6.1（**S2「账号面 Tier A」落地** —— 三条**不打上游管理接口**的端点实现收口：`GET /api/supplier-accounts/subscriptions`（补形状 `Page<SupplierSubscriptionRowDto>` = §15.1 套餐摘要 + `accountId` / **掩码** `accountIdentifier` / `upstreamId`，排序 `end_at ASC` + `NULL` 最后）、`GET /api/supplier-accounts/export`（补列 `upstreamId` + 七条机械形状：`text/csv; charset=utf-8`、`Content-Disposition` 的 UTC 日期文件名、UTF-8 BOM、CRLF、RFC 4180 引号、**公式注入防护**（文本前缀单引号、数值不前缀）、**不分页**）、`DELETE /api/supplier-accounts/:id`（补 `204` / 被拦**不写成功审计**）；§15.7 补登两个审计动作 `supplier.export`（**GET 也写审计**：批量带走全部账号清单是账号面上最该留痕的动作，§6 的"所有写操作"是下限不是上限）与 `supplier.account.delete`；同批把 `subscriptionEndAt`（= 套餐 `end_at` 最大值，依赖**写入侧**归一化 ISO8601）写进正文；**全部是补白，无一处推翻既有口径**；**无字段改名、无字段删除、无端点增删、`ERROR_CODES` 零新增**（`ACCOUNT_HAS_KEYS` 随本批落地）、**`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2、零 DDL 改动**）。以上各版同属本契约的同一冻结面。（**版本索引订正 2026-10-07，不升版**：本索引此前在 v1.2.1 之后漏记 v1.2.2 / v1.3.0 两条，本次补齐 —— 仅索引行，无内容变更。）*

@@ -561,8 +561,24 @@ export interface SupplierSubscriptionDto {
   updatedAt: string;
 }
 
-/** 契约 §15.1 `SupplierAccount`（`GET /api/supplier-accounts` 列表项与详情共用同一形状）。 */
-export interface SupplierAccountDto {
+/**
+ * 契约 §15.2 `GET /api/supplier-accounts/subscriptions` 的一行 = `SupplierSubscriptionDto`
+ * **加上"它是谁的"**。
+ *
+ * 为什么必须带归属：套餐列表是**跨账号**的（详情页里那个 `subscriptions[]` 天然知道
+ * 自己属于谁，扁平列表不知道）。只给 `subNo` 的列表在读的人眼里是一串没有主语的编号，
+ * 对账时第一句话就是"这是哪个号的" —— 而那正是这个端点存在的用途。
+ *
+ * 归属字段**只放掩码**（`accountIdentifier`），真值连这个端点也不出后端（§15.1）。
+ */
+export interface SupplierSubscriptionRowDto extends SupplierSubscriptionDto {
+  accountId: string;
+  /** **掩码**手机号 / 邮箱。与 §15.1 同一条纪律：真值不出后端 */
+  accountIdentifier: string;
+  upstreamId: string;
+}
+
+/** 契约 §15.1 `SupplierAccount`（`GET /api/supplier-accounts` 列表项与详情共用同一形状）。 */export interface SupplierAccountDto {
   id: string;
   upstreamId: string;
   supplier: string;

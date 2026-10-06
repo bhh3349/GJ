@@ -25,7 +25,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
-import { afterEach, describe, it } from 'vitest';
+import { afterAll, afterEach, describe, it } from 'vitest';
 
 /** Windows 上没有 POSIX 信号语义，见文件头 */
 const POSIX = process.platform !== 'win32';
@@ -60,6 +60,19 @@ interface ServerProcess {
 
 const children: ChildProcess[] = [];
 const dirs: string[] = [];
+
+// 用例"跑过"的凭据。CI 上停机判据只有两种可接受结局：真跑通，或整步转红。
+// 被 skip 也算绿的话门禁就成了装饰 —— 而"跳过了"这件事在 CI 的分步结论里
+// 跟"通过了"长得一模一样（step 一样是 success），所以必须由本文件自己把话说死。
+let sigtermCaseRan = false;
+
+afterAll(() => {
+  if (process.env['CI'] !== undefined && !sigtermCaseRan) {
+    throw new Error(
+      'CI 上 SIGTERM 停机用例没有真正执行（被跳过？）：优雅停机这条判据此刻形同虚设',
+    );
+  }
+});
 
 afterEach(() => {
   for (const proc of children.splice(0)) {
@@ -162,6 +175,8 @@ describe('src/server.ts（进程级）', () => {
   it.skipIf(!POSIX)(
     'SIGTERM → 优雅停机：exit 0 / signal null / 无落库失败 / WAL 已收起',
     async () => {
+      sigtermCaseRan = true;
+
       const srv = startServer();
       await waitFor(srv, () => srv.output().includes('管理面已启动'), '管理面启动');
 

@@ -14,3 +14,10 @@ export { createKeyRuntimeFlusher } from './key-runtime-flusher.js';
 export type { KeyPoolView, KeyRuntimeFlusher, KeyRuntimeFlusherOptions } from './key-runtime-flusher.js';
 export { createGatewayRuntime, mountGatewayRoutes } from './runtime.js';
 export type { GatewayRuntime, GatewayRuntimeOptions } from './runtime.js';
+export { createShutdownHandler } from './shutdown.js';
+export type {
+  AsyncClosable,
+  ShutdownLog,
+  ShutdownTarget,
+  SyncClosable,
+} from './shutdown.js';

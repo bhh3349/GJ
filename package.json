@@ -17,7 +17,8 @@
     "web:dev": "pnpm --filter web dev",
     "web:build": "pnpm --filter web build",
     "check:sqlite": "node scripts/g1-sqlite-check.mjs",
-    "check:secrets": "tsx src/security/plaintext-scan.ts"
+    "check:secrets": "tsx src/security/plaintext-scan.ts",
+    "check:shutdown": "vitest run src/wiring/shutdown.spec.ts src/server.spec.ts"
   },
   "dependencies": {
     "@fastify/websocket": "^11.3.3",

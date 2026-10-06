@@ -21,7 +21,7 @@ import { LoginRateLimiter, bootstrapAdmin, purgeExpiredSessions } from './api/au
 import { loadConfig } from './config.js';
 import { openDatabase } from './db/database.js';
 import { pruneLogs } from './db/repo/logs.js';
-import { createGatewayRuntime, mountGatewayRoutes } from './wiring/index.js';
+import { createGatewayRuntime, createShutdownHandler, mountGatewayRoutes } from './wiring/index.js';
 
 const HOUR_MS = 3_600_000;
 
@@ -69,28 +69,16 @@ async function main(): Promise<void> {
     }, 5 * 60_000),
   ];
 
-  let closing = false;
-  const shutdown = (signal: string): void => {
-    if (closing) return; // 连按两次 Ctrl-C 不该跑两遍关停流程
-    closing = true;
-    app.log.info({ signal }, '收到退出信号，正在关闭');
-    for (const t of timers) clearInterval(t);
-    // 顺序：先停网关（把队列里最后一批用量落库、清掉内存里的 key 明文），
-    // 再关两个监听，最后才关库 —— 库先关的话，那次收尾 flush 会写到一个已关闭的连接上。
-    void gateway
-      .stop()
-      .then(() => Promise.all([app.close(), gateway.app.close()]))
-      .then(
-        () => {
-          db.close();
-          process.exit(0);
-        },
-        (err: unknown) => {
-          app.log.error({ err }, '关闭失败');
-          process.exit(1);
-        },
-      );
-  };
+  // 关停顺序（谁先谁后、为什么 db.close() 必须在最后）收在 src/wiring/shutdown.ts，
+  // 那里同时是被判据钉住的地方；这里只负责"信号 → 编排"这一段接线。
+  const shutdown = createShutdownHandler({
+    gateway,
+    app,
+    db,
+    timers,
+    log: app.log,
+    exit: (code) => process.exit(code),
+  });
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 

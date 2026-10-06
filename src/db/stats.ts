@@ -99,10 +99,30 @@ export function computeOverview(db: Db, windowSeconds: number): OverviewMetrics 
   };
 }
 
+/**
+ * 图表上的一个点（契约 §6，M6-A 补 token 维度）。
+ *
+ * `tokens` **按构造**等于 `promptTokens + completionTokens`，不是独立取 `total_tokens`：
+ * 上游偶尔上报的 total 与 prompt+completion 对不上（见 `src/gateway/usage.ts` 的
+ * `total: total ?? p + c`），若各取各的，同一张图上"总 tokens"线与"输入/输出"两条线
+ * 会在个别桶上对不齐 —— 这种小偏差几乎不会被发现，却会让整张图失去可信度。
+ */
+export interface UsagePoint {
+  t: string;
+  requests: number;
+  tokens: number;
+  promptTokens: number;
+  completionTokens: number;
+  /** 该桶内 `is_estimated=1` 的调用**条数**（不是 token 数），>0 时前端标「含估算」 */
+  estimatedTokens: number;
+  costCents: number;
+  errors: number;
+}
+
 export interface UsageSeries {
   key: string;
   label: string;
-  points: { t: string; requests: number; tokens: number; costCents: number; errors: number }[];
+  points: UsagePoint[];
 }
 
 export interface UsageResult {
@@ -112,6 +132,11 @@ export interface UsageResult {
   groupBy: UsageGroupBy;
   axis: string[];
   series: UsageSeries[];
+  /**
+   * `is_estimated=1` 的调用条数。**由各点 `estimatedTokens` 求和得出**，
+   * 不另发一条 COUNT 查询 —— 这样契约里"它恒等于全轴 estimatedTokens 之和"
+   * 就是构造性成立，而不是靠两条 SQL 的口径碰巧一致。
+   */
   isEstimatedTokenCount: number;
 }
 
@@ -162,7 +187,9 @@ export function computeUsage(db: Db, query: UsageQuery): UsageResult {
               ${g.idExpr} AS seriesKey,
               ${g.labelExpr} AS seriesLabel,
               COUNT(*) AS requests,
-              COALESCE(SUM(l.total_tokens), 0) AS tokens,
+              COALESCE(SUM(l.prompt_tokens), 0)     AS promptTokens,
+              COALESCE(SUM(l.completion_tokens), 0) AS completionTokens,
+              COALESCE(SUM(CASE WHEN l.is_estimated = 1 THEN 1 ELSE 0 END), 0) AS estimatedTokens,
               COALESCE(SUM(l.cost_cents), 0)   AS costCents,
               COALESCE(SUM(CASE WHEN l.status >= 400 THEN 1 ELSE 0 END), 0) AS errors
        FROM usage_logs l
@@ -176,16 +203,12 @@ export function computeUsage(db: Db, query: UsageQuery): UsageResult {
     seriesKey: string;
     seriesLabel: string | null;
     requests: number;
-    tokens: number;
+    promptTokens: number;
+    completionTokens: number;
+    estimatedTokens: number;
     costCents: number;
     errors: number;
   }[];
-
-  const estimated = (
-    db.prepare(`SELECT COUNT(*) AS n FROM usage_logs l ${clause} AND l.is_estimated = 1`).get(...params) as {
-      n: number;
-    }
-  ).n;
 
   // 轴：从 from 向下取整到桶边界，一直铺到 to（含）。必须与 points 严格等长。
   const startMs = Date.parse(floorToBucket(query.from, bucket));
@@ -204,7 +227,16 @@ export function computeUsage(db: Db, query: UsageQuery): UsageResult {
       s = {
         key: r.seriesKey,
         label: r.seriesLabel ?? r.seriesKey,
-        points: axis.map((t) => ({ t, requests: 0, tokens: 0, costCents: 0, errors: 0 })),
+        points: axis.map((t) => ({
+          t,
+          requests: 0,
+          tokens: 0,
+          promptTokens: 0,
+          completionTokens: 0,
+          estimatedTokens: 0,
+          costCents: 0,
+          errors: 0,
+        })),
       };
       seriesMap.set(r.seriesKey, s);
     }
@@ -213,18 +245,27 @@ export function computeUsage(db: Db, query: UsageQuery): UsageResult {
     const point = s.points[i];
     if (point === undefined) continue;
     point.requests += r.requests;
-    point.tokens += r.tokens;
+    point.promptTokens += r.promptTokens;
+    point.completionTokens += r.completionTokens;
+    // 契约保证的不变式，在这里由构造保证（见 UsagePoint 的注释）
+    point.tokens = point.promptTokens + point.completionTokens;
+    point.estimatedTokens += r.estimatedTokens;
     point.costCents += r.costCents;
     point.errors += r.errors;
   }
 
+  const allSeries = [...seriesMap.values()];
   return {
     from: query.from,
     to: query.to,
     bucket,
     groupBy: query.groupBy,
     axis,
-    series: [...seriesMap.values()],
-    isEstimatedTokenCount: estimated,
+    series: allSeries,
+    // 由各点求和得出：与 points 同源，两个数永远不会互相打架（见 UsageResult 注释）
+    isEstimatedTokenCount: allSeries.reduce(
+      (sum, s) => sum + s.points.reduce((acc, p) => acc + p.estimatedTokens, 0),
+      0,
+    ),
   };
 }

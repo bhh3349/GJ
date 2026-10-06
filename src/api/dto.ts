@@ -6,7 +6,66 @@
 // 布尔一律 true/false（不是 0/1），可空一律 `| null`（不是 undefined）——
 // JSON 里不出现 undefined 键，前端拿到的字段集合是稳定的。
 
-import type { BalanceQueryTemplate } from '../db/balance-query.js';
+import type { BalanceQueryTemplate, BalanceUnit } from '../db/balance-query.js';
+
+/**
+ * 契约 §2 余额查询失败引导码（ADR-0012 §4）。
+ *
+ * **不是错误码**：不进 `ERROR_CODES`、不映射 HTTP 状态 —— "查不到余额"不是 HTTP 层的失败，
+ * 刷新任务本身是成功的（`202` + `ok` 计数）。它只是给前端一个"该引导用户做什么"的指针。
+ */
+export type HintCode =
+  | 'BALANCE_QUERY_UNSUPPORTED'
+  | 'BALANCE_PARSE_MISMATCH'
+  | 'BALANCE_UPSTREAM_UNREACHABLE'
+  | 'BALANCE_AUTH_REJECTED';
+
+/** 契约 §2 内置余额查询 preset 的命中情况。**只读、可推导**，传了也不生效。 */
+export interface BalancePresetDto {
+  id: string;
+  label: string;
+  matchedBy: 'host';
+  /** 当前真正生效的是它（即用户模板未启用） */
+  effective: boolean;
+}
+
+/** 自测的查询来源。③（无查询方式）走不到 —— 那种情况直接 422。 */
+export type BalanceTestSource = 'user-template' | 'preset';
+export type BalanceTestErrorCode = 'UPSTREAM_UNREACHABLE' | 'PARSE_FAILED';
+
+/** 契约 §2 自测解析结果。`balance` 是**分**；`null` = 取不到（与 0 严格区分）。 */
+export interface BalanceTestParsed {
+  balance: number | null;
+  currency: string | null;
+  remainingTokens: number | null;
+  expiresAt: string | null;
+  unit: BalanceUnit;
+}
+
+/**
+ * 契约 §2 `BalanceTestResult` —— 两个自测端点共用（同步执行、**绝不写库**）。
+ *
+ * 业务性失败（上游不可达 / 取不到值）一律 `200` + `ok:false`：自测是**诊断**，
+ * 前端要展示诊断结论，不该被错误分支吃掉。只有请求本身有问题才 4xx/5xx。
+ */
+export interface BalanceTestResult {
+  ok: boolean;
+  keyId: string | null;
+  maskedKey: string | null;
+  source: BalanceTestSource;
+  presetId: string | null;
+  /** 规范化后的 `协议//host/path`，已剥 query。绝不回显替换过 `{key}` 的 URL */
+  endpoint: string;
+  /** HTTP 状态；`0` = 没拿到响应（不可达 / 超时） */
+  httpStatus: number;
+  durationMs: number;
+  parsed: BalanceTestParsed;
+  /** 上游响应体，已抹掉明文 key 的所有出现并截断至 8KB。取值路径没配对时靠它定位 */
+  raw: unknown;
+  errorCode: BalanceTestErrorCode | null;
+  hintCode: HintCode | null;
+  hint: string | null;
+}
 
 /** 契约 §0.3 分页信封 */
 export interface Page<T> {
@@ -29,6 +88,8 @@ export interface UpstreamDto {
   balanceUnknownKeyCount: number;
   tokenPlanKeyCount: number;
   balanceQuery: BalanceQueryTemplate;
+  /** 该 upstream 的 baseUrl 命中的内置 preset；没命中为 null。用户模板启用后它仍返回，只是 `effective:false` */
+  balancePreset: BalancePresetDto | null;
   revision: number;
   createdAt: string;
   updatedAt: string;

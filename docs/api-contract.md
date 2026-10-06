@@ -14,6 +14,8 @@
 >
 > **补遗 v1.0.4（2026-10-06）**：§10 错误码表按 **ADR-0011** 扩充两处**触发条件**（码值 / HTTP / `type` 全部不变）：① `RATE_LIMITED`(429) 增加「**网关池饱和**」触发路径（候选非空、0 次真实尝试、全候选并发已满），与用户组 RPM / TPM 超限共用码值；② `NO_AVAILABLE_KEY`(503) 增加「**候选存在但密文解不出**」的配置异常路径。同时写明 **429 一律带 `Retry-After`**，并明确「0 次真实尝试」**不得报 502**、不计入任何 key 的健康计数。无字段改名、无类型变更、无端点增删，`GATEWAY_ERROR_CODES` 无新增值。
 
+> **补遗 v1.0.5（2026-10-06）**：M6-A「余额查询与展示」契约落地。① §2 Upstream 对象新增**只读**字段 `balancePreset`（内置 preset 命中情况，未命中为 `null`）；② §2/§3 新增两个**自测端点** `POST /api/upstreams/:id/balance-template/test`、`POST /api/keys/:id/test-balance`，共用一个 `BalanceTestResult` 响应体，**同步执行、绝不写库**；③ §2 新增「余额查询解析顺序与失败引导」小节，定义三段解析顺序（用户模板 → 内置 preset → `skipped`）、`hintCode` / `hint` 两个**非破坏**引导字段（**不进 `ERROR_CODES`、不影响 HTTP 状态**）；④ §6 `/api/stats/usage` 每个点补 `promptTokens` / `completionTokens` / `estimatedTokens` 三个非破坏字段（token 维度，不带钱）。无字段改名、无字段删除、无类型变更、`ERROR_CODES` 零新增，`balanceQuery` 模板契约**未改动**。动机与影响见 ADR-0012。
+
 ---
 
 ## 0. 通用约定
@@ -129,6 +131,7 @@
     },
     "timeoutMs": 5000
   },
+  "balancePreset": { "id": "openai", "label": "OpenAI 官方计费", "matchedBy": "host", "effective": false },
   "revision": 4,
   "createdAt": "2026-10-01T03:00:00.000Z",
   "updatedAt": "2026-10-06T09:12:00.000Z"
@@ -144,6 +147,7 @@
 | `tokenPlanKeyCount` | ❌ | token-plan 类 key 数。这类**不进** `totalBalance` |
 | `balanceQuery.parse.unit` | ❌ | `"yuan"`(×100→分) / `"cents"`(原样) / `"dollar"`(×100→分)。**统一到分是后端的责任** |
 | `balanceQuery.enabled` | ❌ | `false` 表示该上游只能手动录入余额 |
+| `balancePreset` | ✅ `null` | **只读**。按 `baseUrl` 的 host 命中的内置查询 preset；未命中为 `null`。传了也不生效（可推导字段，非入参） |
 | `revision` | ❌ | 乐观锁。写请求带 `revision`，不符则 409 `REVISION_MISMATCH` |
 
 > **安全**：`headers` 里的 `{key}` 是**占位符**，执行时才替换，**替换后的字符串永不落盘、永不进日志、永不回显**。`GET` 时返回的是含占位符的原始模板。
@@ -158,8 +162,101 @@
 | `PATCH` | `/api/upstreams/:id` | 改，body 任意子集 + `revision` |
 | `DELETE` | `/api/upstreams/:id?force=false` | 删。有 key 且 `force!=true` → `409 UPSTREAM_HAS_KEYS`，`details: {keyCount: 6}` |
 | `POST` | `/api/upstreams/:id/balance/refresh` | 按模板查该上游全部 key 余额 → `202 {taskId}` |
+| `POST` | `/api/upstreams/:id/balance-template/test` | **自测**：用草稿模板真实打一次查询 → `200 BalanceTestResult`（见下） |
 
 `baseUrl` 校验：必须 `http(s)://`，无尾斜杠（根路径除外）。不合法 → `400 INVALID_PARAM`。
+
+### 余额查询解析顺序与失败引导
+
+查询一个 key 的余额时，**按顺序取第一个可用的**（互斥、有优先级）：
+
+```
+① 用户模板 enabled=true   → 现有模板引擎（上文 balanceQuery，本版零改动）
+② host 命中内置 preset     → 内置执行器（见 balancePreset）
+③ 都没有                   → 不发请求，计入 skipped，并带 hintCode=BALANCE_QUERY_UNSUPPORTED
+```
+
+**内置 preset 永不覆盖用户模板、永不落库**：库里只有用户自己的 `balanceQuery`，preset 是每次查询时现算的判定。
+本版注册表只有 `openai`（host = `api.openai.com`；`subscription − usage` 双请求相减，USD→分）。
+其余上游（含自建 new-api / one-api）**不做猜测式兜底** —— 自建域名不可判、`quota` 单位随部署方配置、该端点鉴权用的是用户 access token 而非 `sk-` 接口 key，猜错会写出**看起来合理但错误**的余额。这正是"查不到就引导用户提供查询方法"的适用场景。
+
+#### 失败引导字段（非破坏新增）
+
+`hintCode` + `hint` 出现在①余额刷新任务的 `result`、②`BalanceTestResult`。**不是错误码**：不进 `ERROR_CODES`、不映射 HTTP 状态、不影响 `202` 任务本身的成败判定。
+
+| `hintCode` | 触发 | 前端应做 |
+|---|---|---|
+| `BALANCE_QUERY_UNSUPPORTED` | 无用户模板且无 preset（`skipped`） | 引导用户提供查询方法（打开自测表单） |
+| `BALANCE_PARSE_MISMATCH` | 请求成功但取值路径取不到（`unknown`） | 引导用户改字段路径，就地再自测 |
+| `BALANCE_UPSTREAM_UNREACHABLE` | 不可达 / 超时 / 非 2xx（`failed`） | 提示稍后重试，**不**引导改配置 |
+| `BALANCE_AUTH_REJECTED` | 401 / 403（`failed` 子型） | 提示 key 可能失效，或该端点需要另一种凭据 |
+| `null` | `ok` 且解析出数 | 无需引导 |
+
+- `hint`：`string | null`，面向用户的一句话（中文，可直接展示）。
+- 刷新任务 `result` 在原 `{checked, ok, failed, unknown, skipped}` 基础上增加 `hintCode` / `hint` 两字段；计数语义**逐字不变**。
+- **三型口径不变**（`unknown` / `failed` / `skipped` 仍分开计数，失败仍不写库，`balance_cents NULL = 未知 ≠ 0`）。`hintCode` 只是解释，不改变分型。
+
+#### 自测端点请求体
+
+`POST /api/upstreams/:id/balance-template/test`：
+
+```json
+{
+  "keyId": "key_9c21",
+  "url": "https://api.my88.com/user/balance",
+  "method": "GET",
+  "headers": { "Authorization": "Bearer {key}" },
+  "body": null,
+  "parse": { "balance": "data.balance_infos[0].total_balance", "currency": "data.currency", "remainingTokens": null, "expiresAt": null, "unit": "yuan" },
+  "timeoutMs": 5000
+}
+```
+
+- 请求体整体**可省略**（或传 `{}`）→ 用该上游已存的 `balanceQuery` 作草稿。
+- **不含 `enabled`**：`enabled` 是持久化语义，一次自测没有"启用/停用"之分；传了忽略。
+- `keyId` **可选**：省略时取该上游第一把 `enabled=true` 且 `category="balance"` 的 key；显式指定时必须属于该上游（否则 `404 NOT_FOUND`）。上游下无可用 key → `422 UNPROCESSABLE`。
+- 字段合法性同 `balanceQuery`：`url` 必须 http(s)、`method` 仅 `GET|POST`、`timeoutMs` 正数、`unit` 在枚举内，否则 `400 INVALID_PARAM`（`details.field` 指到具体字段）。
+
+`POST /api/keys/:id/test-balance`：**无请求体**，用该 key 所属上游的**生效查询方式**（① 用户模板 → ② 内置 preset）；两条都无 → `422 UNPROCESSABLE`。
+
+**安全**：草稿模板即用即弃 —— 不落盘、不进日志、不进审计；替换过 `{key}` 的 URL 不回显（详见 `endpoint` 字段）。
+
+#### `BalanceTestResult`（两个自测端点共用）
+
+```json
+{
+  "ok": true,
+  "keyId": "key_9c21",
+  "maskedKey": "****a1b2",
+  "source": "user-template",
+  "presetId": null,
+  "endpoint": "https://api.my88.com/user/balance",
+  "httpStatus": 200,
+  "durationMs": 132,
+  "parsed": { "balance": 12345, "currency": "CNY", "remainingTokens": null, "expiresAt": null, "unit": "yuan" },
+  "raw": { "data": { "balance_infos": [ { "total_balance": 123.45 } ] } },
+  "errorCode": null,
+  "hintCode": null,
+  "hint": null
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `source` | `"user-template"` \| `"preset"` —— 本次实际用的是哪一条（③ 走不到，无查询方式时直接 422） |
+| `endpoint` | **规范化后的 `协议//host/path`**，已剥掉 query。绝不回显替换过 `{key}` 的 URL |
+| `parsed.balance` | 分；`null` = 取不到（与"0"严格区分）。**自测永不写库**，所以 `balanceUpdatedAt` / `balanceSource` 不因此改变 |
+| `raw` | 上游响应体，**已抹掉明文 key 的所有出现**并截断至 8KB。取值路径没配对时，用户靠它看出来该填什么 |
+| `errorCode` | `null`（成功）\| `"UPSTREAM_UNREACHABLE"` \| `"PARSE_FAILED"`；HTTP 仍是 `200` |
+
+**状态码约定**：自测是**诊断**，业务性的"上游不可达 / 取不到值"一律 `200` + `ok:false`（前端要展示诊断结论，不该被错误分支吃掉）；只有**请求本身**有问题才 4xx/5xx，且复用既有码：
+
+| 情形 | 响应 |
+|---|---|
+| 上游 / key 不存在 | `404 NOT_FOUND` |
+| 草稿模板形状非法（`url` 非 http(s)、`method` 非 GET/POST、`timeoutMs` 非正、`unit` 不在枚举） | `400 INVALID_PARAM`（`details.field` 指到具体字段） |
+| 无用户模板且无 preset（无查询方式可测） | `422 UNPROCESSABLE`（复用，message 指引配置模板） |
+| 未登录 | `401 UNAUTHORIZED` |
 
 ---
 
@@ -223,6 +320,7 @@
 | `DELETE` | `/api/keys/:id` | 删 → `204` |
 | **`PUT`** | **`/api/keys/:id/balance`** | **手动录入余额**（见下） |
 | `POST` | `/api/keys/:id/balance/refresh` | 按模板查单个 key 余额 → `202 {taskId}`（异步，轮询 `GET /api/tasks/:id`） |
+| `POST` | `/api/keys/:id/test-balance` | **自测**：用该 key 的生效查询方式真实打一次 → `200 BalanceTestResult`（同步、不写库，见 §2） |
 | `POST` | `/api/keys/batch` | `{ids: [], action: "enable"\|"disable"}` → `{updated: 5}` |
 | `POST` | `/api/keys/balance/refresh` | 批量查余额 → `202 {taskId}` |
 
@@ -491,7 +589,7 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
       "key": "up_7f3a",
       "label": "my88",
       "points": [
-        { "t": "2026-10-05T09:00:00.000Z", "requests": 120, "tokens": 84000, "costCents": 320, "errors": 1 }
+        { "t": "2026-10-05T09:00:00.000Z", "requests": 120, "tokens": 84000, "promptTokens": 60000, "completionTokens": 24000, "estimatedTokens": 0, "costCents": 320, "errors": 1 }
       ]
     }
   ],
@@ -500,6 +598,8 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
 ```
 - `axis` 与每个 `series[].points` **等长且下标对齐**，缺失桶补 `0`（这里是计数，补 0 是对的——与余额的 `null` 语义不同）。
 - `isEstimatedTokenCount`：`is_estimated=1` 的调用条数。前端图表需可标注"含估算"。
+- 每个点另带 `promptTokens` / `completionTokens` / `estimatedTokens`（同一桶内 `is_estimated=1` 的调用条数）——token 维度拆到点上，前端才能画输入/输出双线、并**只**给含估算的那几段打标。`tokens` 恒等于 `promptTokens + completionTokens`；`isEstimatedTokenCount` 恒等于全轴 `estimatedTokens` 之和。
+- `costCents` 保留（金额口径见上方「`costCents` 金额口径」）。**本轮不下线、不新增计费**。
 
 ### `GET /api/logs` — 调用记录
 `?from=&to=&groupId=&model=&status=&upstreamId=&keyId=&page=&pageSize=&includeDeleted=`（默认不查已软删资源；`includeDeleted=true` 时按 id 过滤仍可命中已软删的 upstream/key/group）

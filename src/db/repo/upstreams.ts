@@ -7,7 +7,8 @@
 //   2. 每次写都递增 revision 并写 change_log，网关据此感知变更。
 
 import { ApiError } from '../../api/errors.js';
-import type { Page, UpstreamDto } from '../../api/dto.js';
+import type { BalancePresetDto, Page, UpstreamDto } from '../../api/dto.js';
+import { findPresetByBaseUrl } from '../../balance/preset.js';
 import { nowIso } from '../../util/time.js';
 import { computeGlobalBalance } from '../balance.js';
 import {
@@ -59,6 +60,7 @@ function toDto(
 ): UpstreamDto {
   const c = counts.get(row.id) ?? { keyCount: 0, enabledKeyCount: 0 };
   const b = balance.get(row.id) ?? { totalBalance: null, unknown: 0, tokenPlan: 0 };
+  const template = normalizeBalanceQuery(JSON.parse(row.balance_query) as unknown);
   return {
     id: row.id,
     name: row.name,
@@ -69,11 +71,20 @@ function toDto(
     totalBalance: b.totalBalance,
     balanceUnknownKeyCount: b.unknown,
     tokenPlanKeyCount: b.tokenPlan,
-    balanceQuery: normalizeBalanceQuery(JSON.parse(row.balance_query) as unknown),
+    balanceQuery: template,
+    // 只读、可推导：preset 从不落库，这里每次现算。命中与否只看 host，
+    // `effective` 才是"当前真正生效的是它吗"——用户模板一启用，它就变成 false。
+    balancePreset: balancePresetOf(row.base_url, template),
     revision: row.revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function balancePresetOf(baseUrl: string, template: BalanceQueryTemplate): BalancePresetDto | null {
+  const preset = findPresetByBaseUrl(baseUrl);
+  if (preset === null) return null;
+  return { id: preset.id, label: preset.label, matchedBy: 'host', effective: !template.enabled };
 }
 
 function balanceIndex(db: Db): Map<string, { totalBalance: number | null; unknown: number; tokenPlan: number }> {

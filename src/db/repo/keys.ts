@@ -503,6 +503,25 @@ export interface DecryptedKeyRef {
 }
 
 /**
+ * 自测时"没指定 key"用哪一把：该上游第一把启用的余额类 key。
+ *
+ * 排序键与 `decryptedKeyRefs` 逐字一致（`created_at, id`）—— 两处不一致会让
+ * "第一把"在自测与刷新里指向不同的 key，而用户看到的只是两个不同的余额。
+ * 本函数只管诊断选谁，不参与网关的路由选 key（那套算法在 `src/gateway/`）。
+ */
+export function firstUsableBalanceKeyId(db: Db, upstreamId: string): string | null {
+  const row = db
+    .prepare(
+      `SELECT id FROM upstream_keys
+       WHERE upstream_id = ? AND deleted_at IS NULL AND enabled = 1 AND category = 'balance'
+       ORDER BY created_at, id
+       LIMIT 1`,
+    )
+    .get(upstreamId) as { id: string } | undefined;
+  return row?.id ?? null;
+}
+
+/**
  * 余额刷新专用出口：解密出可用的 key 明文。
  *
  * 这是全仓极少数会拿到明文的函数之一，所以：

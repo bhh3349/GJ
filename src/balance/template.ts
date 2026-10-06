@@ -75,7 +75,7 @@ export function substitute(template: string, secret: string): string {
   return template.split('{key}').join(secret);
 }
 
-function toNumber(value: unknown): number | null {
+export function toNumber(value: unknown): number | null {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'string') {
     const n = Number(value.trim());
@@ -129,6 +129,23 @@ export interface QueryOutcome {
   parsed: ParsedBalance | null;
   errorCode: 'UPSTREAM_UNREACHABLE' | 'PARSE_FAILED' | null;
   message: string | null;
+  /**
+   * HTTP 状态；`0` = 没拿到响应（不可达 / 超时）。
+   * 有它才分得出 `failed` 的子型：401/403 是"鉴权被拒"（该改配置或换 key），
+   * 其余才是"上游挂了"（等等就行）。两者给用户的引导完全不同（ADR-0012 §4）。
+   */
+  httpStatus: number;
+  /**
+   * 上游响应体原文。**仅当调用方显式要求采集时才有值**（自测诊断用）；
+   * 批量刷新不采集 —— 省内存，也少一处明文可能外溢的面。
+   * 拿到它的人必须先过 `balance/raw.ts` 的 sanitizeUpstreamBody 才能外露。
+   */
+  raw?: unknown;
+}
+
+/** 执行选项。默认全关：批量刷新不需要响应体，也不该为此付内存。 */
+export interface QueryOptions {
+  captureRaw?: boolean;
 }
 
 export interface QueryTarget {
@@ -148,13 +165,15 @@ export async function queryBalance(
   template: BalanceQueryTemplate,
   target: QueryTarget,
   fetchImpl: typeof fetch = fetch,
+  options: QueryOptions = {},
 ): Promise<QueryOutcome> {
+  const captureRaw = options.captureRaw === true;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), template.timeoutMs);
 
   try {
     if (template.url === null) {
-      return { maskedKey: target.maskedKey, ok: false, parsed: null, errorCode: 'PARSE_FAILED', message: '未配置查询地址' };
+      return { maskedKey: target.maskedKey, ok: false, parsed: null, errorCode: 'PARSE_FAILED', message: '未配置查询地址', httpStatus: 0 };
     }
     const url = substitute(template.url, target.decrypted);
     const headers: Record<string, string> = { Accept: 'application/json' };
@@ -171,6 +190,18 @@ export async function queryBalance(
       signal: controller.signal,
     });
 
+    // 先读文本再解析，而不是 res.json()：非 JSON 的响应（HTML 报错页、网关拦截页）
+    // 是自测里最常见的一类故障，把它归到"上游不可达"会让人去查网络，
+    // 而归到 PARSE_FAILED 并让他看 raw，一眼就知道是端点打错了。
+    const text = await res.text();
+    let body: unknown = null;
+    let jsonOk = true;
+    try {
+      body = JSON.parse(text) as unknown;
+    } catch {
+      jsonOk = false;
+    }
+
     if (!res.ok) {
       return {
         maskedKey: target.maskedKey,
@@ -179,11 +210,31 @@ export async function queryBalance(
         errorCode: 'UPSTREAM_UNREACHABLE',
         // 只说状态码与主机名 —— 不把 URL 原文写进来，它可能已被替换过
         message: `上游返回 ${res.status}（${safeEndpointLabel(template.url)}）`,
+        httpStatus: res.status,
+        raw: captureRaw ? (jsonOk ? body : text) : undefined,
+      };
+    }
+    if (!jsonOk) {
+      return {
+        maskedKey: target.maskedKey,
+        ok: false,
+        parsed: null,
+        errorCode: 'PARSE_FAILED',
+        message: '上游响应不是合法 JSON',
+        httpStatus: res.status,
+        raw: captureRaw ? text : undefined,
       };
     }
 
-    const body = (await res.json()) as unknown;
-    return { maskedKey: target.maskedKey, ok: true, parsed: parseBalanceResponse(template, body), errorCode: null, message: null };
+    return {
+      maskedKey: target.maskedKey,
+      ok: true,
+      parsed: parseBalanceResponse(template, body),
+      errorCode: null,
+      message: null,
+      httpStatus: res.status,
+      raw: captureRaw ? body : undefined,
+    };
   } catch (err) {
     const aborted = err instanceof Error && err.name === 'AbortError';
     return {
@@ -192,6 +243,7 @@ export async function queryBalance(
       parsed: null,
       errorCode: 'UPSTREAM_UNREACHABLE',
       message: aborted ? `查询超时（${template.timeoutMs}ms）` : '上游不可达',
+      httpStatus: 0,
     };
   } finally {
     clearTimeout(timer);

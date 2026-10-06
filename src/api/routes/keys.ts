@@ -21,7 +21,9 @@ import {
 import { ApiError } from '../errors.js';
 import { auditWrite } from '../http.js';
 import { idParam, includeDeletedProp, nullableInteger, nullableString, pageProps, revisionProp } from '../schemas.js';
-import { countRefreshableKeys, loadUsableTemplate, refreshBalances } from '../services/balance-refresh.js';
+import { assertQueryable } from '../services/balance-query.js';
+import { countRefreshableKeys, refreshBalances } from '../services/balance-refresh.js';
+import { runKeyBalanceTest, describeTestForAudit } from '../services/balance-selftest.js';
 import { startTask } from '../task-runner.js';
 import type { ApiContext } from '../app.js';
 
@@ -275,8 +277,8 @@ export function registerKeyRoutes(app: FastifyInstance, ctx: ApiContext): void {
       const { id } = req.params;
       const key = getKey(db, id, false);
       if (!key) throw ApiError.notFound('Key', id);
-      // 前置校验，理由同上游批量刷新：模板不可用就别起任务
-      loadUsableTemplate(db, key.upstreamId);
+      // 前置校验，理由同上游批量刷新：三条路都拿不到查询方式就别起任务
+      assertQueryable(db, key.upstreamId);
 
       const task = startTask(db, 'balance_refresh', 1, (reporter) =>
         refreshBalances(db, config.masterKey, { keyIds: [id] }, reporter),
@@ -288,6 +290,28 @@ export function registerKeyRoutes(app: FastifyInstance, ctx: ApiContext): void {
         detail: task.id,
       });
       return reply.code(202).send({ taskId: task.id });
+    },
+  );
+
+  /**
+   * 单 key 余额自测（契约 §3 / §2 的 `BalanceTestResult`）。
+   *
+   * 无请求体：用该 key 所属上游的**生效查询方式**（用户模板 → 内置 preset）。
+   * 与 `POST /api/keys/:id/balance/refresh` 的区别只有两处 —— 同步、不写库；
+   * 查询方式完全同源，所以"自测通了这个 key 的刷新就会通"这句话成立。
+   */
+  app.post<{ Params: { id: string } }>(
+    '/api/keys/:id/test-balance',
+    { schema: { params: idParam } },
+    async (req, reply) => {
+      const result = await runKeyBalanceTest(db, req.params.id, config.masterKey);
+      auditWrite(db, req, config, {
+        action: 'key.balance_selftest',
+        targetType: 'key',
+        targetId: req.params.id,
+        detail: describeTestForAudit(result),
+      });
+      return reply.code(200).send(result);
     },
   );
 

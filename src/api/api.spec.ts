@@ -13,7 +13,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../config.js';
 import { openDatabase, type Db } from '../db/database.js';
 import { sha256Hex } from '../db/crypto.js';
@@ -141,6 +141,20 @@ async function createKey(
   });
   expect(res.statusCode, res.body).toBe(201);
   return { ...(res.json() as { id: string; maskedKey: string }), raw: res.body };
+}
+
+/**
+ * 等到墙上时钟跨过一个毫秒边界。
+ *
+ * 只为让「同序不变量」那类断言变得确定：`created_at` 是毫秒精度（`nowIso()` 直取
+ * `toISOString()`），而 id 是随机 hex，所以同毫秒的两行相对次序不可预测。
+ * 上界 200 次是防御性的 —— 即便时钟被冻住也不会把用例挂死。
+ */
+async function nextMillisecond(): Promise<void> {
+  const start = Date.now();
+  for (let i = 0; i < 200 && Date.now() === start; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
 }
 
 /** db 文件 + WAL + SHM 的裸字节。WAL 里可能还留着尚未 checkpoint 的页。 */
@@ -451,6 +465,12 @@ describe('用户组与网关 key（契约 §4，C1）', () => {
       gatewayKeyMasked: string | null;
       gatewayKey: { id: string; gatewayKey: string; maskedKey: string };
     };
+    // 显式错开一毫秒再签发第二把。`gateway_keys` 的列表序是 `ORDER BY created_at, id`，
+    // 而 id 是随机 hex —— 同毫秒内签发的两把 key，相对次序由随机 id 决定。
+    // 下面那条用例要验的是「列表第一项 == Group.gatewayKeyMasked」（契约承诺的同序不变量），
+    // 它只在两次签发落在**不同毫秒**时才有意义；不错开的话，快机器上两次插入常常同毫秒，
+    // 用例会以约 50% 概率随机失败，把「四闸全绿」变成掷骰子。这是修一个既有的 flaky，不是改判据。
+    await nextMillisecond();
     const second = await h.app.inject({
       method: 'POST',
       url: `/api/groups/${body.id}/keys`,
@@ -584,5 +604,207 @@ describe('用户组与网关 key（契约 §4，C1）', () => {
     expect(containsPlaintext(raw, first.gatewayKey)).toBe(false);
     expect(containsPlaintext(raw, second.gatewayKey)).toBe(false);
     expect(containsPlaintext(Buffer.concat([raw, Buffer.from(second.gatewayKey, 'utf8')]), second.gatewayKey)).toBe(true);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 自测用假上游。未声明的请求直接抛 —— 静默返回 `{}` 会把"打错端点"伪装成"上游没给数据"。
+ *
+ * 只实现 queryBalance 真正用到的三个成员（`ok`/`status`/`text`），
+ * 不去凑一个完整的 Response：凑出来的假 Response 反而会掩盖真实的读取路径缺陷。
+ */
+function fakeUpstreamFetch(body: unknown, status = 200): void {
+  vi.stubGlobal('fetch', async () => ({
+    ok: status >= 200 && status < 300,
+    status,
+    text: async (): Promise<string> => (typeof body === 'string' ? body : JSON.stringify(body)),
+  }));
+}
+
+/** 自测草稿的默认形状：一个 GET + 直接取值路径。 */
+function draft(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    url: 'https://upstream.example.com/api/balance?token={key}',
+    method: 'GET',
+    headers: { Authorization: 'Bearer {key}' },
+    body: null,
+    parse: {
+      balance: 'data.balance',
+      currency: 'data.currency',
+      remainingTokens: null,
+      expiresAt: null,
+      unit: 'yuan',
+    },
+    timeoutMs: 5000,
+    ...overrides,
+  };
+}
+
+describe('余额自测（契约 §2 · M6-A）：同步、诊断语义、绝不写库', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('上游级自测用草稿打真实查询：200 + 诊断全量，且不改动已有余额', async () => {
+    const h = await setup();
+    const upstreamId = await createUpstream(h);
+    // 先人工录入一个余额，用来证明"自测只是预览"
+    const key = await createKey(h, upstreamId, { key: probeSecret(), balance: 8888 });
+
+    fakeUpstreamFetch({ data: { balance: '123.45', currency: 'CNY' } });
+    const res = await h.app.inject({
+      method: 'POST',
+      url: `/api/upstreams/${upstreamId}/balance-template/test`,
+      headers: auth(h),
+      payload: { ...draft(), keyId: key.id },
+    });
+
+    expect(res.statusCode, res.body).toBe(200);
+    const body = res.json() as {
+      ok: boolean;
+      source: string;
+      presetId: string | null;
+      endpoint: string;
+      httpStatus: number;
+      parsed: { balance: number | null; unit: string };
+      keyId: string | null;
+      hintCode: string | null;
+    };
+    expect(body.ok).toBe(true);
+    expect(body.source).toBe('user-template');
+    expect(body.presetId).toBeNull();
+    expect(body.keyId).toBe(key.id);
+    expect(body.parsed.balance).toBe(12345); // 123.45 元 → 分
+    expect(body.hintCode).toBeNull();
+    // endpoint 只留 协议//host/path：URL 里的 `{key}` 已被替换过，绝不能回显
+    expect(body.endpoint).toBe('https://upstream.example.com/api/balance');
+    expect(res.body).not.toContain(probeSecret());
+
+    // 余额没被这次自测改掉（预览语义）
+    const after = await h.app.inject({ method: 'GET', url: `/api/keys/${key.id}`, headers: auth(h) });
+    expect((after.json() as { balance: number | null }).balance).toBe(8888);
+    await closeHarness(h);
+  });
+
+  it('取不到值时 200 + ok:false + 引导码，且 raw 已抹掉明文 key', async () => {
+    const h = await setup();
+    const upstreamId = await createUpstream(h);
+    const key = await createKey(h, upstreamId, { key: probeSecret(), balance: 8888 });
+
+    // 上游正常返回，但字段路径取不到数；同时把 key 明文回显在报错体里（上游常见行为）
+    fakeUpstreamFetch({ data: { currency: 'CNY' }, echo: `invalid api key ${probeSecret()}` });
+    const res = await h.app.inject({
+      method: 'POST',
+      url: `/api/upstreams/${upstreamId}/balance-template/test`,
+      headers: auth(h),
+      payload: { ...draft(), keyId: key.id },
+    });
+
+    expect(res.statusCode, res.body).toBe(200);
+    const body = res.json() as { ok: boolean; hintCode: string | null; hint: string | null; raw: unknown };
+    expect(body.ok).toBe(false);
+    expect(body.hintCode).toBe('BALANCE_PARSE_MISMATCH');
+    expect(body.hint).toBeTruthy();
+    // 明文 key 绝不随 raw 外露（上游回显的那份也必须被抹掉）
+    expect(res.body).not.toContain(probeSecret());
+    expect(JSON.stringify(body.raw)).toContain('****');
+
+    const after = await h.app.inject({ method: 'GET', url: `/api/keys/${key.id}`, headers: auth(h) });
+    expect((after.json() as { balance: number | null }).balance).toBe(8888);
+    await closeHarness(h);
+  });
+
+  it('上游返回 401 时引导码是"鉴权被拒"，而不是"上游不可达"', async () => {
+    const h = await setup();
+    const upstreamId = await createUpstream(h);
+    const key = await createKey(h, upstreamId, { key: probeSecret() });
+
+    fakeUpstreamFetch({ error: 'unauthorized' }, 401);
+    const res = await h.app.inject({
+      method: 'POST',
+      url: `/api/upstreams/${upstreamId}/balance-template/test`,
+      headers: auth(h),
+      payload: { ...draft(), keyId: key.id },
+    });
+
+    expect(res.statusCode, res.body).toBe(200);
+    expect((res.json() as { hintCode: string | null }).hintCode).toBe('BALANCE_AUTH_REJECTED');
+    await closeHarness(h);
+  });
+
+  it('草稿字段写错是 400（请求本身有问题），并指名到具体字段', async () => {
+    const h = await setup();
+    const upstreamId = await createUpstream(h);
+    const res = await h.app.inject({
+      method: 'POST',
+      url: `/api/upstreams/${upstreamId}/balance-template/test`,
+      headers: auth(h),
+      payload: { ...draft(), parse: { balance: null, unit: 'yuan' } },
+    });
+    expect(res.statusCode).toBe(400);
+    const body = res.json() as { code: string; details?: { field?: string } };
+    expect(body.code).toBe('INVALID_PARAM');
+    expect(body.details?.field).toBe('parse.balance');
+    await closeHarness(h);
+  });
+
+  it('key 级自测：没有可用查询方式时 422，未知 key 404', async () => {
+    const h = await setup();
+    // 该上游既没启用模板，host 也不命中任何 preset → 三段解析落到 skipped
+    const upstreamId = await createUpstream(h);
+    const key = await createKey(h, upstreamId, { key: probeSecret() });
+
+    const unprocessable = await h.app.inject({
+      method: 'POST',
+      url: `/api/keys/${key.id}/test-balance`,
+      headers: auth(h),
+    });
+    expect(unprocessable.statusCode).toBe(422);
+    expect((unprocessable.json() as { code: string }).code).toBe('UNPROCESSABLE');
+
+    const missing = await h.app.inject({
+      method: 'POST',
+      url: '/api/keys/key_does_not_exist/test-balance',
+      headers: auth(h),
+    });
+    expect(missing.statusCode).toBe(404);
+    await closeHarness(h);
+  });
+
+  it('命中内置 preset 的上游，key 级自测走 preset（无需用户配模板）', async () => {
+    const h = await setup();
+    const created = await h.app.inject({
+      method: 'POST',
+      url: '/api/upstreams',
+      headers: auth(h),
+      payload: { name: 'openai-probe', baseUrl: 'https://api.openai.com/v1' },
+    });
+    expect(created.statusCode, created.body).toBe(201);
+    const upstreamId = (created.json() as { id: string; balancePreset: { id: string; effective: boolean } | null }).id;
+    // 只读派生字段：命中 preset 且用户模板未启用 → 它就是当前生效者
+    expect((created.json() as { balancePreset: { id: string } | null }).balancePreset?.id).toBe('openai');
+    expect((created.json() as { balancePreset: { effective: boolean } | null }).balancePreset?.effective).toBe(true);
+
+    const key = await createKey(h, upstreamId, { key: probeSecret() });
+    vi.stubGlobal('fetch', async (input: unknown) => {
+      const url = String(input);
+      const body = url.includes('/subscription') ? { hard_limit_usd: 50 } : { total_usage: 1000 };
+      return { ok: true, status: 200, text: async (): Promise<string> => JSON.stringify(body) };
+    });
+
+    const res = await h.app.inject({
+      method: 'POST',
+      url: `/api/keys/${key.id}/test-balance`,
+      headers: auth(h),
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    const body = res.json() as { ok: boolean; source: string; presetId: string | null; parsed: { balance: number | null } };
+    expect(body.ok).toBe(true);
+    expect(body.source).toBe('preset');
+    expect(body.presetId).toBe('openai');
+    expect(body.parsed.balance).toBe(4000); // (50 − 10) 美元 × 100
+    await closeHarness(h);
   });
 });

@@ -15,7 +15,9 @@ import {
 import { ApiError } from '../errors.js';
 import { auditWrite } from '../http.js';
 import { idParam, pageProps, revisionProp } from '../schemas.js';
-import { countRefreshableKeys, loadUsableTemplate, refreshBalances } from '../services/balance-refresh.js';
+import { assertQueryable } from '../services/balance-query.js';
+import { countRefreshableKeys, refreshBalances } from '../services/balance-refresh.js';
+import { runUpstreamBalanceTest, describeTestForAudit } from '../services/balance-selftest.js';
 import { startTask } from '../task-runner.js';
 import type { ApiContext } from '../app.js';
 
@@ -211,9 +213,9 @@ export function registerUpstreamRoutes(app: FastifyInstance, ctx: ApiContext): v
     { schema: { params: idParam } },
     (req, reply) => {
       const { id } = req.params;
-      // 前置校验：模板没启用或没配全时直接 422，而不是建一个注定全失败的任务
+      // 前置校验：三段解析都拿不到查询方式时直接 422，而不是建一个注定全 skipped 的任务
       // 让前端转圈到轮询结束。
-      loadUsableTemplate(db, id);
+      assertQueryable(db, id);
 
       const total = countRefreshableKeys(db, { upstreamId: id });
       const task = startTask(db, 'balance_refresh', total, (reporter) =>
@@ -226,6 +228,40 @@ export function registerUpstreamRoutes(app: FastifyInstance, ctx: ApiContext): v
         detail: task.id,
       });
       return reply.code(202).send({ taskId: task.id });
+    },
+  );
+
+  /**
+   * 余额自测（契约 §2 / ADR-0012 §3）。
+   *
+   * **刻意不声明 body schema**：请求体整体可省略（省略 = 用已存模板），而声明了
+   * `type: 'object'` 的 schema 会把"没带 body"判成校验失败。字段级校验因此全部
+   * 落在 `parseDraft` 里 —— 那边能把 `details.field` 精确指到 `parse.balance` 这一层，
+   * 比 fastify 的结构化报错更适合给前端标红输入框。
+   *
+   * 业务性失败（上游不可达 / 取不到值）一律 `200 + ok:false`：自测是**诊断**，
+   * 前端要展示诊断结论，不该被错误分支吃掉。
+   */
+  app.post<{ Params: { id: string }; Body: unknown }>(
+    '/api/upstreams/:id/balance-template/test',
+    { schema: { params: idParam } },
+    async (req, reply) => {
+      const result = await runUpstreamBalanceTest(
+        db,
+        req.params.id,
+        req.body,
+        config.masterKey,
+      );
+      // 审计只记"测了什么来源、成没成"：草稿模板里有 `{key}` 占位符与端点地址，
+      // 不该被抄进审计表（替换后的串更不行）。
+      auditWrite(db, req, config, {
+        action: 'upstream.balance_selftest',
+        targetType: 'upstream',
+        targetId: req.params.id,
+        detail: describeTestForAudit(result),
+      });
+      // 显式 200：诊断结论走正常响应体，不走错误分支
+      return reply.code(200).send(result);
     },
   );
 }

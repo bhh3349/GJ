@@ -421,6 +421,7 @@ describe('错误事件：热路径 → 队列 → 落库（契约 §12.1 / ADR-0
     upstream_id: string | null;
     key_id: string | null;
     key_masked: string | null;
+    stream: number;
     upstream_status: number | null;
     attempts: number;
     candidates: number | null;
@@ -431,7 +432,7 @@ describe('错误事件：热路径 → 队列 → 落库（契约 §12.1 / ADR-0
     return db
       .prepare(
         `SELECT request_id, severity, category, status, gateway_code, failure_reason, endpoint, model,
-                upstream_id, key_id, key_masked, upstream_status, attempts, candidates, message
+                upstream_id, key_id, key_masked, stream, upstream_status, attempts, candidates, message
            FROM gateway_error_events ORDER BY ts, id`,
       )
       .all() as EventRow[];
@@ -463,6 +464,48 @@ describe('错误事件：热路径 → 队列 → 落库（契约 §12.1 / ADR-0
     // 关联键端到端第五跳：调用方手上的回执 == 库里那一行的关联键（ADR-0014 §2）
     assert.equal(row.request_id, res.headers['x-request-id']);
     assert.ok(typeof row.request_id === 'string' && row.request_id.length >= 8);
+  });
+
+  it('用户组被禁用 → 403 一行：已过鉴权读 body 填 model/stream，分型归 AUTH_FAILED（组合，非仅 HTTP）', async () => {
+    // 这是 401 那条「没鉴权、不读 body」的对照：403 已过鉴权，事件里的 model/stream 必须非空。
+    // 也是 621f40b 修的那个缝的组合层 —— 两个单测各自绿不等于拼起来对。
+    const h = await setup();
+    h.db.prepare('UPDATE groups SET enabled = 0').run();
+
+    const res = await chat(h, { stream: true });
+
+    assert.equal(res.statusCode, 403);
+    const body = res.json() as { error: { type: string; code: string } };
+    assert.equal(body.error.type, 'authentication_error');
+    assert.equal(body.error.code, 'GROUP_DISABLED');
+
+    assert.equal(eventRows(h.db).length, 0, '响应都回到客户端了，事件还只在内存队列里 —— 热路径不许同步落库');
+    assert.equal(h.runtime.errors.pending(), 1);
+    assert.equal(h.runtime.errors.dropped(), 0);
+
+    assert.equal(h.runtime.errors.flush(), 1);
+    const [row] = eventRows(h.db);
+    assert.ok(row);
+    assert.equal(row.status, 403);
+    assert.equal(row.gateway_code, 'GROUP_DISABLED');
+    assert.equal(row.category, 'AUTH_FAILED', 'sink 分型：403 GROUP_DISABLED 归 AUTH_FAILED，不是 INTERNAL');
+    assert.equal(row.severity, 'warn');
+    assert.equal(row.endpoint, '/v1/chat/completions');
+    assert.equal(row.model, 'gpt-4o', '已过鉴权 → 读 body 填 clientModel（与 401 的 null 区分）');
+    assert.equal(row.stream, 1, '已过鉴权 → 读 body 填 stream（契约 §12.1）');
+    assert.equal(row.failure_reason, null);
+    assert.equal(row.key_id, null, '一次上游都没碰到');
+    assert.equal(row.upstream_id, null);
+    assert.equal(row.attempts, 0);
+    assert.equal(row.candidates, null, '没走到选路，"候选数"不适用');
+    assert.equal(row.upstream_status, null);
+    assert.equal(row.request_id, res.headers['x-request-id'], '关联键与响应头同值');
+    assert.ok(typeof row.request_id === 'string' && row.request_id.length >= 8);
+    assert.equal(row.message, 'user group is disabled');
+
+    // 被拒的请求不该写 usage_logs（与错误事件是两条独立的落库路径）
+    h.runtime.sink.flush();
+    assert.equal(logRows(h.db).length, 0, '被拒的请求不该进 usage_logs');
   });
 
   it('上游全挂 → 502 一行：掩码 key、上游原始状态、尝试数都如实落库，且库里没有明文', async () => {

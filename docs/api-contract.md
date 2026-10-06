@@ -1290,7 +1290,7 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 
 ---
 
-## 15. 供应商账号面（TierFlow 专用，v1.4.0）
+## 15. 供应商账号面（TierFlow 专用，v1.4.0 / v1.4.1）
 
 本节只服务 **TierFlow**（`upstreams.supplier = "tierflow"`），是 Bo 指定的**个例**：
 它解决"一个上游下有几十个账号、每个账号各有一套管理凭据"，**不**抽象成通用多供应商框架。
@@ -1342,6 +1342,7 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
       "updatedAt": "2026-10-07T02:15:03.114Z"
     }
   ],
+  "credentialSource": "password",
   "hasSession": true,
   "sessionExpiresAt": "2026-11-06T02:15:03.114Z",
   "revision": 3,
@@ -1361,7 +1362,8 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 | `unlimitedKeyCount` | int | `keyCount` 中无限额度（`upstream_keys.unlimited = 1`）的条数。**是子集，不额外相加** |
 | `maskedKeyCount` | int | 只拿到掩码、**进不了池**的 key 数（对账用）。**不得与 `keyCount` 相加**成"key 总数" |
 | `subscriptions` | 数组（0..N） | 套餐摘要。**恒为数组**，无套餐为 `[]` —— 上游 `/api/subscription/self` 返回的是 `all_subscriptions: []`，单数对象表达不了它 |
-| `hasSession` | bool | 会话是否在手。**只回答有无**，会话值永不出后端 |
+| `credentialSource` | `"password"` \| `"session"` | 该账号**当前持有的凭据形态**。`password` = 库里有存档密码，**会话过期可自动重登**；`session` = 只有会话、无密码，**过期即不可自动恢复**（§15.9）。**由这一个字段回答"能不能自动重登"**，前端不自行推断 |
+| `hasSession` | bool | 会话是否在手。**只回答有无**，会话值永不出后端。与 `credentialSource` **正交**：`credentialSource="password"` 且 `hasSession=false` 是合法态（密码在手、当前无有效会话，等下一次重登） |
 | `sessionExpiresAt` | ISO8601 \| `null` | 会话到期时刻，供前端提示"需重登" |
 | `revision` | int | 乐观锁，写请求带 `revision`，不符 → `409 REVISION_MISMATCH` |
 
@@ -1407,6 +1409,9 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 - 已存在的 `identifier` **不重复建行**，执行"重登 + 刷新"，`action: "relogin"` 在逐行结果里标明。
 - **每号只试一次登录**（供应商风控），失败即记 `login_failed`。
 - **本端点只收密码型凭据**（`text` 管道）。会话型凭据**不走 HTTP**，见 §15.9。
+- 对已是 `credentialSource="session"` 的 `identifier` **补录密码**是本端点的正常用法（不是特例）：
+  走"重登 + 刷新"，`action: "relogin"`，该行**就地升级**为 `credentialSource="password"`
+  并从此纳入自动重登（§15.9）—— 不新建行、不改 `id`。
 
 #### `POST /api/supplier-accounts/refresh`
 
@@ -1535,7 +1540,10 @@ createdAt, updatedAt`。
 }
 ```
 
-- `action`：`login` \| `relogin` \| `refresh` \| `create` \| `sync`。
+- `action`：`login` \| `relogin` \| `refresh` \| `create` \| `sync`。**每个值都必须有生产者**，
+  不留"枚举里有、没人发"的空值：`login` = `import` 里**新建**的账号首次登录成功；
+  `relogin` = 已有账号在 `import` / `refresh` / `keys` 中被重登；`refresh` = `refresh`；
+  `create` = `keys`；`sync` = `keys/sync`。
 - `code`：供应商错误码原样（如 `LOGIN_INVALID_CREDENTIALS`）或本节错误码；`message` 一句人话。
 - **逐行结果不含任何凭据**（`keyMasked` 是掩码，`keyId` / `tokenNo` 是内部标识）。
 - 进度**只由真正干完的账号推进**（复用 `startTask` 的 `step()`），不做假进度条。
@@ -1663,6 +1671,7 @@ createdAt, updatedAt`。
 | 6 | 套餐算不算 key | **不算**。套餐挂**账号**，不建 `category='token-plan'` 行 → 表格是**两级**（账号 → key），套餐是账号下的第二个分区 | 见下 |
 | 7 | 会话从哪来、怎么退场 | 会话型凭据**只走离线一次性导入**（不经 HTTP、不进仓库/日志/聊天），入库即视为该文件作废 | §15.9 |
 | 8 | 套餐能不能进池被网关"先烧" | **不能**。套餐 key 只拿得到掩码 → 本上游池内**没有** `token-plan` 行 | 见下 |
+| 9 | 密码与会话孰为第一事实源（2026-10-07 二拍） | **密码型是第一事实源，会话型是冷备 / 加速通道**；一个账号只建一行，两路输入汇入同一行，`credentialSource` 取 `password`；会话过期由存档密码自动重登续命 | §15.9 |
 
 **第 6 问展开（这条最容易被做成错的形状）**：
 
@@ -1701,20 +1710,29 @@ createdAt, updatedAt`。
 `username`（`user_j4iCrFEB`）与上游站点登录名同值，同样不掩码 —— 但**它不是登录凭据**，
 登录凭据是 `identifier`(手机号) + `password`，`password` 永不出口。
 
-### 15.9 凭据来源与会话生命周期（v1.4.0 新增）
+### 15.9 凭据来源与会话生命周期（v1.4.0 新增，v1.4.1 补双路径定位）
 
 本节的账号凭据有**两条来源**，纪律同一条：**只进不回、用后即弃**。
 
+**两条路径的定位（2026-10-07 二拍，Bo 提出"也可以密码接口批量登录"）**：
+**密码型是第一事实源，会话型是冷备 / 加速通道**，两者并存、不互斥 —— 不是"先会话、以后再换密码"的临时态，
+而是会话到期后**由存档密码自动续命**的长期形态。用户侧没有任何一步必须提供会话文件。
+
 | 来源 | 载体 | 入口 | 能否自动重登 |
 |---|---|---|---|
-| **密码型** | 人工维护的「手机号,密码」清单（粘贴 / CSV） | `POST /api/supplier-accounts/import` 的 `text` | ✅ 会话过期用存档密码重登 |
-| **会话型** | 操作员本地的一份**离线导出文件**（手机号 → uid / session / username / quota） | **离线一次性导入**（非 HTTP），见下 | ❌ **无密码即无法重登** |
+| **密码型**（第一事实源） | 人工维护的「手机号,密码」清单（粘贴 / CSV） | `POST /api/supplier-accounts/import` 的 `text` | ✅ 会话过期用存档密码重登 |
+| **会话型**（冷备） | 操作员本地的一份**离线导出文件**（手机号 → uid / session / username / quota） | **离线一次性导入**（非 HTTP），见下 | ❌ **无密码即无法重登** |
+
+同一 `identifier` 两路都到过时，`credentialSource` 取 **`password`**（密码是超集能力：有密码就一定能登，
+有会话不一定）—— 这是一个账号只有一行，两路输入**汇入同一行**，不建第二行。
 
 **会话型导入的四条纪律**：
 
 1. **不进 HTTP 面**：不给 `/api/*` 开"提交会话值"的入口 —— 那个端点一旦存在，
    浏览器、代理日志、前端 `localStorage` 就都成了会话明文的过路点。会话型导入只由
    **操作员在本机执行一次性导入**完成，路径由**运行时环境变量**给出（不写进配置仓库、不写进文档正文）。
+   **前端不提供任何会话值输入控件**："粘贴会话"这个词在本契约里只指**操作员在其本机导入脚本里粘贴**，
+   不存在"页面上贴 cookie"这条路径（ADR-0018 备选方案表最后一行就是否决它的理由）。
 2. **不经 Agent / 不进本仓**：该文件的内容**不读入任何 AI 会话上下文、不进 git、不进日志、不进聊天记录**。
    仓库里只有"如何导入"的说明，没有值本身。
 3. **入库后即视为该文件作废**：`session_cipher`（aes-256-gcm，`MASTER_KEY`）落库成功后，
@@ -1735,6 +1753,29 @@ createdAt, updatedAt`。
 - 到期时间：文件里的会话有效期由操作员说明给出（本次为**约 30 天**），
   写入 `session_expires_at` 供前端提示"需重登"；**它是估计值，不是保证值** ——
   真实失效由"下次查询返回 401"来证实，证实即落 `session_expired`。
+
+**重登：触发、互斥、节奏（v1.4.1 补）**
+
+重登 = 用存档密码调 `/api/user/login` 换一枚新 `session`（+ `TF-User`），覆写 `session_cipher`
+并更新 `session_expires_at`。它是**唯一**会把 `session_expired` 拉回 `active` 的路径。
+
+| 触发 | 时机 | 行为 |
+|---|---|---|
+| **被动** | 任一管理面请求（`refresh` / `keys` / `keys/sync` / `import` / `:id/test`）收到 401/403 | 用存档密码重登 **1 次** → 成功则**重试本次请求一次**；再失败 → `status="login_failed"`，本轮到此为止 |
+| **主动** | §14 定时同步开始时，账号同时满足 `credentialSource="password"` 且 `sessionExpiresAt - now < 24h` | 先重登、再刷余额 —— 把失效挡在这一轮**之前**，而不是等它变成一轮 `failed` |
+
+- **`credentialSource="session"` 的账号两路都不触发**：直接落 `status="session_expired"`，
+  连一次注定 401 的请求都不发。这正是 `credentialSource` 这个字段存在的理由 ——
+  它让"该不该试着重登"在**发请求之前**就有答案。
+- **不新增调度器**：主动重登挂在 §14 **已有的**定时同步上（ADR-0018 决策 4「不新造第二套节拍」），
+  不引入 cron、不引入第二套退避参数。
+- **账号级互斥**：同一账号的重登与刷新**共用一把账号级锁**，并共用 §15.5 的 0.6s 串行队列 ——
+  27 个账号并发重登就是自己撞自己的登录接口，也正是站点风控最容易抓的形状。
+- **每号一次**：与 §15.5 登录口径一致，**失败不重试、不循环**（避免触发账号锁定）。
+  连续 `login_failed` 的账号**不自动重试**，由操作员在页面上手动触发 `:id/login`。
+- **升级路径**：`credentialSource="session"` 的账号经 `import` 补录密码（同一 `identifier`）后，
+  该行**就地**升级为 `"password"` 并纳入自动重登 —— 不新建行、不改 `id`；
+  这也是把冷备升成完整形态的**唯一**路径。
 
 ---
 
@@ -1792,4 +1833,4 @@ createdAt, updatedAt`。
 
 ---
 
-*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`；v1.2.1（§13.4「槽位撞满」二分口径：全候选满并发 `503 NO_AVAILABLE_KEY` / 竞态窗口 `429 RATE_LIMITED`，零新增枚举、零代码改动）为文本对齐；v1.2.2（§2 `DELETE /api/upstreams/:id` 从属资源处置：`force!=true` 拦 key 与模型并报 `{keyCount, modelCount}`、`force=true` 按依赖序物理删整棵子树，修订 §11 C4）见 `docs/adr/0016-delete-upstream-subtree.md`；v1.3.0（§14 余额同步：自动同步节奏与退避、NULL 口径、快照与 `asOf`、方向级漂移提示；同批撤销「单价 × 用量的本地扣减账本」方案）见 `docs/adr/0017-balance-sync-source-of-truth.md`；v1.4.0（§15 供应商账号面 + §16 TierFlow 数据面约束：账号作独立资源、批量新建 key 为唯一入池通路、账号级余额第四口径、套餐不建成 key、`upstream_keys.unlimited`、凭据会话一次性离线导入、`…Cents` 金额口径；`ERROR_CODES` 首次新增 1 个 `ACCOUNT_HAS_KEYS`）见 `docs/adr/0018-supplier-account-batch.md`。以上各版同属本契约的同一冻结面。（**版本索引订正 2026-10-07，不升版**：本索引此前在 v1.2.1 之后漏记 v1.2.2 / v1.3.0 两条，本次补齐 —— 仅索引行，无内容变更。）*
+*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`；v1.2.1（§13.4「槽位撞满」二分口径：全候选满并发 `503 NO_AVAILABLE_KEY` / 竞态窗口 `429 RATE_LIMITED`，零新增枚举、零代码改动）为文本对齐；v1.2.2（§2 `DELETE /api/upstreams/:id` 从属资源处置：`force!=true` 拦 key 与模型并报 `{keyCount, modelCount}`、`force=true` 按依赖序物理删整棵子树，修订 §11 C4）见 `docs/adr/0016-delete-upstream-subtree.md`；v1.3.0（§14 余额同步：自动同步节奏与退避、NULL 口径、快照与 `asOf`、方向级漂移提示；同批撤销「单价 × 用量的本地扣减账本」方案）见 `docs/adr/0017-balance-sync-source-of-truth.md`；v1.4.0（§15 供应商账号面 + §16 TierFlow 数据面约束：账号作独立资源、批量新建 key 为唯一入池通路、账号级余额第四口径、套餐不建成 key、`upstream_keys.unlimited`、凭据会话一次性离线导入、`…Cents` 金额口径；`ERROR_CODES` 首次新增 1 个 `ACCOUNT_HAS_KEYS`）见 `docs/adr/0018-supplier-account-batch.md`；v1.4.1（§15.1 非破坏新增 `credentialSource`；§15.9 补凭据双路径定位、自动重登的触发与账号级互斥；§15.3 收口 `action` 枚举的生产者）见 `docs/adr/0018-supplier-account-batch.md` 决策 10。以上各版同属本契约的同一冻结面。（**版本索引订正 2026-10-07，不升版**：本索引此前在 v1.2.1 之后漏记 v1.2.2 / v1.3.0 两条，本次补齐 —— 仅索引行，无内容变更。）*

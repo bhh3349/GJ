@@ -2,7 +2,8 @@
 
 - 状态：**生效**（2026-10-07 Bo 拍板冻结；契约已落 `docs/api-contract.md` §15 + §16 = v1.4.0）
 - 日期：2026-10-07（同日 rc2：并入画师的 6 个契约问题 → 新增决策 7 / 8，修正掩码匹配与加列迁移口径；
-  同日冻结：新增决策 9（会话型凭据一次性离线导入）+ 拍板记录）
+  同日冻结：新增决策 9（会话型凭据一次性离线导入）+ 拍板记录；
+  同日 **v1.4.1 补遗**：新增决策 10（凭据双路径定位与自动重登）—— Bo 提出"也可以密码接口批量登录"）
 - 决策者：管家 · 管理后端（提案与冻结）、Bo（业务口径拍板）、画师（字段依赖）、路由者（池写入面确认）
 - 关联：ADR-0003（余额三口径 / 未知≠0）/ ADR-0006（明文纪律）/ ADR-0012（三段解析）
   / ADR-0016（物理删除上游子树）/ ADR-0017（余额唯一事实源 = 上游接口 + 自动同步）
@@ -178,6 +179,33 @@ Bo 提供的是**登录会话**（27 个账号的 `session` + `uid`），不是�
   长期看**密码型才是完整形态**，会话型是"先把今天的余额接进来"的过渡通路。
 - 离线文件里带的 `quota` **不入库为余额**，只当首次对账参考（ADR-0017 口径不变）。
 
+## 决策 10：凭据双路径并存 —— 密码是第一事实源，会话是冷备（v1.4.1）
+
+决策 9 把会话型导入写成"过渡通路"，前提是"只有会话、拿不到密码"。Bo 随后明确
+**"也可以密码接口批量登录"**，这个前提不成立了一半，于是补这条定位 ——
+**两条路径长期并存，不是先后替代关系**：
+
+- **密码型 = 第一事实源**：`import` 的 `text` 管道（`手机号,密码`）批量登录 →
+  一次拿到 `session` + `uid` 落库。会话到期后由**存档密码自动重登**续命，
+  于是账号池**不再依赖任何一份外部文件**（决策 9 纪律 3 的"文件用完即弃"才真正闭环：
+  以前弃掉文件就等于只剩 30 天寿命，现在弃掉文件只是弃掉一份加速缓存）。
+- **会话型 = 冷备 / 加速通道**：零请求即入池，用于在拿到 27 个密码之前先把余额接进来，
+  以及密码路径个别失败时的兜底。它是**可选**的，不是必答项。
+- **一个账号一行**：两路输入按 `identifier` **汇入同一行**，不建第二行、不改 `id`。
+  新增 `credential_source`（DB 列 `credential_source TEXT`，出口字段 `credentialSource`），
+  取值 `"password"` \| `"session"`；两路都到过时取 **`password`**（超集能力）。
+- **自动重登的触发与互斥**：被动（401/403 → 重登 1 次 → 重试本次请求 1 次）与
+  主动（§14 定时同步前，`sessionExpiresAt - now < 24h` 且 `credentialSource="password"` → 先重登）
+  两路；共用**账号级锁** + §15.5 的 0.6s 串行队列；每号一次、失败不循环。
+  **不新增调度器** —— 主动重登挂在 §14 已有的定时同步上（决策 4 同一条纪律）。
+- **`credentialSource="session"` 的账号两路都不触发**，直接落 `session_expired` ——
+  连一次注定 401 的请求都不发。这就是这个字段的价值：让"该不该试着重登"在**发请求之前**有答案，
+  而不是靠"先试一次看看"。
+- **升级路径唯一且就地**：会话型账号经 `import` 补录密码后，该行 `credentialSource` 就地升级为
+  `password`，从此纳入自动重登。
+- **不开会话粘贴入口**：前端不提供任何会话值输入控件。PM 口径里的"粘贴"只指**操作员在本机导入脚本里粘贴**；
+  一个 `POST …/session` 会让浏览器、代理日志、前端存储都成为会话明文的过路点（见备选方案表）。
+
 ## 备选方案与为什么否掉
 
 | 备选 | 否掉理由 |
@@ -195,12 +223,12 @@ Bo 提供的是**登录会话**（27 个账号的 `session` + `uid`），不是�
 
 | 面 | 改动 |
 |---|---|
-| `src/db/schema.ts` | 加表 `supplier_accounts` / `supplier_account_subscriptions` / `supplier_account_keys`；加列 `upstreams.supplier`、`upstream_keys.unlimited`。**加列必须走 `migrate()` 里 `hasColumn()` 守卫的 `ALTER TABLE`** —— `CREATE TABLE IF NOT EXISTS` 对已存在的表是空操作，只改 DDL 文本老库升不上来。`SCHEMA_VERSION` 仍为 2（照 `request_id` 那一批：加列不算搬迁） |
+| `src/db/schema.ts` | 加表 `supplier_accounts` / `supplier_account_subscriptions` / `supplier_account_keys`；加列 `upstreams.supplier`、`upstream_keys.unlimited`、`supplier_accounts.credential_source`（决策 10，`TEXT NOT NULL DEFAULT 'password'`）。**加列必须走 `migrate()` 里 `hasColumn()` 守卫的 `ALTER TABLE`** —— `CREATE TABLE IF NOT EXISTS` 对已存在的表是空操作，只改 DDL 文本老库升不上来。`SCHEMA_VERSION` 仍为 2（照 `request_id` 那一批：加列不算搬迁） |
 | `src/db/balance.ts` | 上游 / 全局合计 SQL 增账号一格 + `unlimitedKeyCount`；`balanceUnknownKeyCount` 加 `unlimited = 0`（**唯一**要动的既有聚合点） |
 | `src/db/repo/**` | 新增 `supplier-accounts.ts`；`createKey` 复用不新增写路径（多一个可选入参 `unlimited`） |
 | `src/api/services/supplier/tierflow.ts` | 新增驱动器（登录 / 余额 / 建 key / 列表 / 套餐），唯一接触会话明文的地方 |
 | `src/api/routes/supplier-accounts.ts` | 新增 §15 端点 |
-| 契约 | v1.4.0：新增 §15（管理面）与 §16（数据面约束）；§2 Upstream 非破坏新增 6 字段 + `POST/PATCH /api/upstreams` 可选 `supplier` + 解析顺序三段扩四段；§3 `KeyDto` 新增 `unlimited`；§6 合计口径补账号级。**`ERROR_CODES` 新增 1 个**（`ACCOUNT_HAS_KEYS`(409)）—— 契约自 v1.0 冻结以来首次新增码值 |
+| 契约 | v1.4.0：新增 §15（管理面）与 §16（数据面约束）；§2 Upstream 非破坏新增 6 字段 + `POST/PATCH /api/upstreams` 可选 `supplier` + 解析顺序三段扩四段；§3 `KeyDto` 新增 `unlimited`；§6 合计口径补账号级。**`ERROR_CODES` 新增 1 个**（`ACCOUNT_HAS_KEYS`(409)）—— 契约自 v1.0 冻结以来首次新增码值。**v1.4.1 补遗**：§15.1 新增 `credentialSource`（非破坏新增）、§15.9 补双路径定位与重登触发/互斥语义、§15.3 收口 `action` 枚举的生产者 |
 | `web/` | 画师新增「供应商账号」页（列表 / 导入 / 批量操作进度 / 套餐明细） |
 | `src/gateway/` | **零改动**：写入的还是同一张 `upstream_keys`，走的还是同一条 `change_log` + 1s 轮询；余额不在热路径上 |
 | 安全扫描 | `check:secrets` 现有规则不变；新增"响应序列化里不得出现密码/会话真值"的断言（注入真值后断言不出现在响应 JSON 中） |
@@ -224,11 +252,15 @@ Bo 提供的是**登录会话**（27 个账号的 `session` + `uid`），不是�
 | 3 | Python 工作台退役还是保留只读（决策 6） | **退役**（不迁 `workbench.db`，账号靠导入重建） | PM 收拢为裁定，Bo 未提异议 |
 | 4 | 默认建 key 额度（§15.2 `keys`） | **默认无限额度**，固定额度留作可选参数 | PM 收拢为裁定，Bo 未提异议 |
 | 5 | 账号凭据来源 | Bo 提供**登录会话文件**（非密码）→ 见决策 9 | Bo 明确 |
+| 6 | 是否加开"密码接口批量登录"（决策 10） | **加**，且**双路径长期并存**：密码为第一事实源、会话为冷备 / 加速通道 | Bo 提出（"也可以密码接口批量登录"） |
 
 - 第 2 项若日后被推翻，代价是 §2/§6 的**合计组成**修订一处（字段形状非破坏、`GET /api/stats/balance`
   形状不变），加一次 ADR 修订即可，**不影响已写代码的端点形状**。
 - 第 5 项是本 ADR 冻结后**新增的一路输入**：Bo 直接给了会话，于是"导入必须带密码"这条假设
   被现实推翻 —— 决策 9 是这个输入的直接产物，不是预先设计的形态。
+- 第 6 项**修订了第 5 项的隐含结论**（"会话是唯一来源、密码要先攒齐"）：密码路径是并存的**第一**通路，
+  会话退为冷备。决策 9 的纪律（会话不走 HTTP、不进本仓、不入 AI 上下文）**零改动**，只是它服务的
+  定位从"过渡通路"改为"冷备 / 加速通道"。
 
 ## 与路由者 / 画师上轮影响的差异（**必须对照**）
 
@@ -259,3 +291,6 @@ Bo 提供的是**登录会话**（27 个账号的 `session` + `uid`），不是�
   `balanceUnknownKeyCount` **不因它们增加**，UI 显示「无限额度」徽标。
 - **加列可重复跑**：对一份 v2 老库连开两次库，`migrate()` 不抛 `duplicate column name`
   （照 `request_id` 那批的既有断言）。
+- **凭据形态可判**（决策 10）：`credentialSource="session"` 的账号在 `sessionExpiresAt` 到期后
+  **零登录请求**即落 `session_expired`（断言不调 `/api/user/login`）；`credentialSource="password"`
+  的账号到期后一轮自动重登即回 `active`，且重登期间**不出现同账号并发登录**（账号级锁断言）。

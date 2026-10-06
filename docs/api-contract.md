@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.4.2**
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.4.3**
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -1834,12 +1834,12 @@ createdAt, updatedAt`。
 | 项 | 口径 |
 |---|---|
 | **未知** | 数据面 relay 路径与协议；以及 P1–P4 四类错误体的形状与时序 |
-| **执行主体** | **凭据持有者本人（Bo）**，在他自己的 shell 里跑；或由他指定的操作员执行。**不是路由者，也不是管家** |
-| **为什么不是 AI** | 两个 AI 会话的授权工作区都是 `C:\WorkSpace\sub`，账号凭据在该路径之外；且 §15.9 纪律 2 已明写会话值"不经 Agent / 不进本仓"。**这不是排期问题、不是分工问题，是能力边界** —— 换谁来做这条都成立 |
+| **执行主体** | **凭据持有者本人（Bo）**；或**由他在运行时把凭据注入执行环境后、明示指定的执行会话（含管家）代跑** —— 见 §16.6。**路由者不是执行主体**，只出探针与结论 |
+| **为什么不是"某车道随后自测"** | 两个 AI 会话都不持有凭据、也不读任何凭据文件（账号凭据在授权工作区 `C:\WorkSpace\sub` 之外；§15.9 纪律 2 明写会话值"不经 Agent / 不进本仓"）。**但"AI 不持凭据"≠"AI 不能代跑"**：凭据由 Bo 在运行时注入环境后，代跑者只面对"环境里已有的一枚网关 key"，永远不接触账号密码 / 会话文件 —— 这条区分是 v1.4.3 改锚的实质（见 §16.6） |
 | **产物** | `pnpm probe:tierflow` 的**脱敏报告**（P0–P4，只打 stdout、不落盘、全量 `scrubCredentials`） |
 | **回执** | 报告整段贴回本群（凭据不会跟着出来）。**不需要**贴 cookie / 密码 / 任何明文 |
 | **执行前提** | `PROBE_KEY` + `PROBE_MODEL` 由执行者运行时注入（P4 另需 `PROBE_EXHAUSTED_KEY`）；值不落 `.env`、不提交、不进聊天 |
-| **收口** | 路由者：拿到报告当天钉 §16.2 的 pre-first-chunk 改判与本节的数据面路径 |
+| **收口** | 路由者：拿到报告当天钉 §16.2 的 pre-first-chunk 改判与本节的数据面路径（执行主体不是他，结论是他的交付） |
 | **兜底** | Bo 不跑、也不转述结果 → 本节保持"未实测"，**S1 与之相关的字段一律留 `null` 占位**，按默认假设接入但不写 `classify` 改判；**不因为"缺数据"就跳过而当成已确认** |
 
 > **与 §15.9 的边界对齐**：这里注入的是**最终产物**（`sk-` 明文 + baseUrl + 路径），不是账号凭据。
@@ -1904,6 +1904,42 @@ createdAt, updatedAt`。
 > —— `src/wiring/store.ts` 的 `models: null` 改为读该列（§16.3 末注）。**签名零改动**，
 > 但**取值**确实要动，路由者原话"`KeyConfig` / `KeyPool` 签名不动"**依然成立**，只是不等于"零改动"。
 
+> 三项在 S1 期间的**占位值**见 §16.6。
+
+### 16.6 S4 验收锚定：探针执行链与三项 S1 占位值（v1.4.3）
+
+**执行链（2026-10-07 改锚：凭据由持有者注入，执行可指定代跑）**
+
+1. **取得 key** —— 两条路都成立，**不必等 §15 落地**：
+   - **既有路（今天即可用）**：人工把一枚真实 `sk-` 粘贴进 §3 `POST /api/keys`（请求体有 `key: string`，实现已在）。
+     探针只吃最终产物，**不关心这枚 key 是谁建的、从哪来**；
+   - **§15 路（S2 之后）**：`/api/supplier-accounts/*` 批量建 key。
+   > **推论要写明**：**P0 / P1 不挂在 S2 后面**。探针需要的是"一枚可用 key + 一个真实模型 id"，
+   > 不是账号面端点。把 P0 排成"等 S2 建完 key"是排期上的假依赖。
+2. **注入**：`PROBE_KEY` / `PROBE_MODEL`（P4 另需 `PROBE_EXHAUSTED_KEY`）由 **Bo 在运行时**注入执行者环境；
+   值不落 `.env`、不提交、不进聊天、不贴群。**执行者不读任何凭据文件**（那 27 个账号的会话文件与本步无关，见 §15.9）。
+3. **执行**：**Bo 本人，或他在注入凭据后明示指定的执行会话（含管家）代跑**。
+   Bo 是**唯一**注入凭据的人；代跑者只面对"运行时环境里已有的一枚网关 key"。
+   **代跑不放松 §15.9 纪律 2** —— 账号密码 / 会话值在任何情况下都不进 AI 上下文。
+
+**路由者的交付边界（收窄，写死）**：**只负责探针脚本 + 官网结论**，不代持凭据、不作为执行主体。
+结论 = 报告到手当天钉死 §16.1 的数据面路径与 §16.2 的 pre-first-chunk 改判。
+
+**三项 S1 占位值（实测前逐项照此写，不许各车道自行发明）**
+
+| # | 字段 | 载体 | 未实测期间的占位值 | 钉死条件 |
+|---|---|---|---|---|
+| 1 | `baseUrl` | §2 Upstream DTO（**既有字段**，不新增） | `"https://tierflow.cn"`（默认假设） | P0 报告 |
+| 2 | **数据面路径与协议** | **不进 DTO** —— 它是 §16 的**网关接入约束**，不是 Upstream 对象字段 | `null` 语义 = "按 OpenAI 兼容默认路径接入；`classify` **不做** 200+`success:false` 改判" | P0 / P1 报告 |
+| 3 | `model_limits` → 可用模型清单 | §3 `KeyDto.models` + §15.2 `keys` 入参 + §15.7 列 | `null`（= 不限，与 `[]` 同义，ADR-0019 决策 2） | **不等实测** —— S2 直接落 |
+
+> **第 2 项为什么明确不落 DTO**：给通用 `Upstream` 对象加一个供应商专用的路径字段，就是拿个例往通用层
+> 开口子（ADR-0018 决策 0「个例不外溢」的同一条理由）。数据面路径是**网关侧接入常量**，实测结论只改
+> §16 正文 + 路由者实现，**不改管理面契约**。**S1「先占位」不许体现为新增 DTO 字段。**
+
+**兜底（较 v1.4.2 不变）**：Bo 既不跑也不指定代跑 → §16.1 相关字段一律 `null` 占位、按默认假设接入、
+**不写 `classify` 改判**、**不把"缺数据"当已确认**。
+
 ---
 
-*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`；v1.2.1（§13.4「槽位撞满」二分口径：全候选满并发 `503 NO_AVAILABLE_KEY` / 竞态窗口 `429 RATE_LIMITED`，零新增枚举、零代码改动）为文本对齐；v1.2.2（§2 `DELETE /api/upstreams/:id` 从属资源处置：`force!=true` 拦 key 与模型并报 `{keyCount, modelCount}`、`force=true` 按依赖序物理删整棵子树，修订 §11 C4）见 `docs/adr/0016-delete-upstream-subtree.md`；v1.3.0（§14 余额同步：自动同步节奏与退避、NULL 口径、快照与 `asOf`、方向级漂移提示；同批撤销「单价 × 用量的本地扣减账本」方案）见 `docs/adr/0017-balance-sync-source-of-truth.md`；v1.4.0（§15 供应商账号面 + §16 TierFlow 数据面约束：账号作独立资源、批量新建 key 为唯一入池通路、账号级余额第四口径、套餐不建成 key、`upstream_keys.unlimited`、凭据会话一次性离线导入、`…Cents` 金额口径；`ERROR_CODES` 首次新增 1 个 `ACCOUNT_HAS_KEYS`）见 `docs/adr/0018-supplier-account-batch.md`；v1.4.1（§15.1 非破坏新增 `credentialSource`；§15.9 补凭据双路径定位、自动重登的触发与账号级互斥；§15.3 收口 `action` 枚举的生产者）见 `docs/adr/0018-supplier-account-batch.md` 决策 10；v1.4.2（§3 `KeyDto` 非破坏新增 `models` 模型白名单 + §5 `availableKeyIds` 补白名单条件 + §15.2 `keys` 入参可选 `models` + §15.7 加列 `upstream_keys.model_limits` + §16.1.1 悬空件登记 + §16.5 S1 字段对账）见 `docs/adr/0019-key-model-whitelist.md`。以上各版同属本契约的同一冻结面。（**版本索引订正 2026-10-07，不升版**：本索引此前在 v1.2.1 之后漏记 v1.2.2 / v1.3.0 两条，本次补齐 —— 仅索引行，无内容变更。）*
+*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`；v1.2.1（§13.4「槽位撞满」二分口径：全候选满并发 `503 NO_AVAILABLE_KEY` / 竞态窗口 `429 RATE_LIMITED`，零新增枚举、零代码改动）为文本对齐；v1.2.2（§2 `DELETE /api/upstreams/:id` 从属资源处置：`force!=true` 拦 key 与模型并报 `{keyCount, modelCount}`、`force=true` 按依赖序物理删整棵子树，修订 §11 C4）见 `docs/adr/0016-delete-upstream-subtree.md`；v1.3.0（§14 余额同步：自动同步节奏与退避、NULL 口径、快照与 `asOf`、方向级漂移提示；同批撤销「单价 × 用量的本地扣减账本」方案）见 `docs/adr/0017-balance-sync-source-of-truth.md`；v1.4.0（§15 供应商账号面 + §16 TierFlow 数据面约束：账号作独立资源、批量新建 key 为唯一入池通路、账号级余额第四口径、套餐不建成 key、`upstream_keys.unlimited`、凭据会话一次性离线导入、`…Cents` 金额口径；`ERROR_CODES` 首次新增 1 个 `ACCOUNT_HAS_KEYS`）见 `docs/adr/0018-supplier-account-batch.md`；v1.4.1（§15.1 非破坏新增 `credentialSource`；§15.9 补凭据双路径定位、自动重登的触发与账号级互斥；§15.3 收口 `action` 枚举的生产者）见 `docs/adr/0018-supplier-account-batch.md` 决策 10；v1.4.2（§3 `KeyDto` 非破坏新增 `models` 模型白名单 + §5 `availableKeyIds` 补白名单条件 + §15.2 `keys` 入参可选 `models` + §15.7 加列 `upstream_keys.model_limits` + §16.1.1 悬空件登记 + §16.5 S1 字段对账）见 `docs/adr/0019-key-model-whitelist.md`；v1.4.3（§16.1.1 **执行主体改锚**：凭据由持有者运行时注入、可明示指定执行会话代跑，路由者只出探针与结论；新增 **§16.6 S4 验收锚定**含执行链三步与三项 S1 占位值表 —— 其中"数据面路径与协议"**明确不落 DTO**；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增**）见 `docs/adr/0018-supplier-account-batch.md` 决策 11。以上各版同属本契约的同一冻结面。（**版本索引订正 2026-10-07，不升版**：本索引此前在 v1.2.1 之后漏记 v1.2.2 / v1.3.0 两条，本次补齐 —— 仅索引行，无内容变更。）*

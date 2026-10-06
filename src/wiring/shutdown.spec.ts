@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import assert from 'node:assert/strict';
-import { afterEach, describe, it } from 'vitest';
+import { afterAll, afterEach, describe, it } from 'vitest';
 
 import { loadConfig } from '../config.js';
 import { openDatabase, openReadonly } from '../db/database.js';
@@ -61,6 +61,21 @@ interface Harness {
 
 const dirs: string[] = [];
 const dbs: Db[] = [];
+
+// 与 `src/server.spec.ts` 的 `sigtermCaseRan` 同款，堵的是另一半僵尸：
+// `check:shutdown` 拆成两段（各自唯一过滤器）之后，文件被删/改名会转红 ——
+// 但"文件还在、顺序用例却被 `skip` 掏空"仍然静默绿（`1 skipped` 退出 0）。
+// 于是让顺序判据自己记账：CI 上只有两种结局，真跑过，或整步转红。
+// 前提是本文件里至少留一条无跳过用例（现有三条全是），日后给它加 `skipIf` 会连带失效。
+let orderCaseRan = false;
+
+afterAll(() => {
+  if (process.env['CI'] !== undefined && !orderCaseRan) {
+    throw new Error(
+      'CI 上停机顺序用例没有真正执行（被跳过？）：db.close() 必须最后 这条判据此刻形同虚设',
+    );
+  }
+});
 
 afterEach(() => {
   // 正常路径下 db 由停机编排关掉，失败用例里可能还开着 —— 两种都要收干净，
@@ -153,6 +168,8 @@ function instrument(h: Harness, order: string[], dbOpenAt: Record<string, boolea
 
 describe('停机编排（src/wiring/shutdown.ts）', () => {
   it('顺序：sink.close → mirror.close → secrets.clear → 两个监听 → db.close → exit(0)', async () => {
+    orderCaseRan = true;
+
     const h = makeHarness();
     const order: string[] = [];
     const dbOpenAt: Record<string, boolean> = {};

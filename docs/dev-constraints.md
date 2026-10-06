@@ -175,7 +175,9 @@ interface KeyPool {
 
 > 上表 `test:gateway` / `test:fault` / `bench:ttfb` 三行是 **M0 冻结的语义名**，脚本尚未落地（M5 前补），**当前不可跑**；不得在门禁/CI/交付证据里当已存在的命令引用。
 
-**DoD**：门禁**四闸**全绿 —— `pnpm typecheck` / `pnpm test` / `pnpm build` / `pnpm check:secrets`（CI 另跑 `pnpm check:sqlite` 作原生绑定判据）+ 可复现证据（命令与真实输出）+ 契约改动已回写 `docs/api-contract.md`。性能类验收必须报**同机直连基准对比**，不接受只有绝对值。
+**DoD**：门禁**四闸**全绿 —— `pnpm typecheck` / `pnpm test` / `pnpm build` / `pnpm check:secrets`（CI 另跑 `pnpm check:sqlite` 作原生绑定判据、`pnpm check:shutdown` 作优雅停机证据步；这两条是**单列证据步，不属于四闸**，四闸永远只有上面四个名字）+ 可复现证据（命令与真实输出）+ 契约改动已回写 `docs/api-contract.md`。性能类验收必须报**同机直连基准对比**，不接受只有绝对值。
+
+> `pnpm check:shutdown`（2026-10-06 口径）：**证据步 + 两个具名 spec，删除任一即转红**。命令是 `vitest run src/wiring/shutdown.spec.ts && vitest run src/server.spec.ts` —— 两段各只有一个过滤器。为什么不写成一个 run 带两个参数：vitest 的 positional 参数是**过滤器**而非路径断言，落空的过滤器被静默忽略（`vitest run <存在的 spec> <不存在的 spec>` → exit 0、零警告），那样删掉 `shutdown.spec.ts` 闸照样绿，"`db.close()` 必须最后"整条判据消失。`pnpm test` 是全量回归，与 `check:shutdown` 重复跑不是冗余：后者是能指名道姓的停机证据步，CI 步骤名与四闸字面量均不变。
 
 > `pnpm lint` 已于 2026-10-06 删除（仓库无 eslint 配置，脚本实际不可跑，属幽灵门禁），不再计入任何 DoD。
 

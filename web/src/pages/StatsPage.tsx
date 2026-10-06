@@ -79,7 +79,14 @@ const GROUP_BY_LABEL: Record<UsageGroupBy, string> = {
   model: '按模型',
 };
 
-const METRIC_ORDER: readonly UsageMetric[] = ['requests', 'tokens', 'costCents', 'errors'];
+const METRIC_ORDER: readonly UsageMetric[] = [
+  'requests',
+  'tokens',
+  'promptTokens',
+  'completionTokens',
+  'costCents',
+  'errors',
+];
 
 /** 自动刷新间隔：统计页是聚合查询，不需要仪表盘那种每秒帧。 */
 const AUTO_REFRESH_MS = 15_000;

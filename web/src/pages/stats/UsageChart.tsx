@@ -23,11 +23,13 @@ import { formatCents, formatCompact, formatCount } from '@/utils/format';
 
 use([LineChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer]);
 
-export type UsageMetric = 'requests' | 'tokens' | 'costCents' | 'errors';
+export type UsageMetric = 'requests' | 'tokens' | 'promptTokens' | 'completionTokens' | 'costCents' | 'errors';
 
 export const METRIC_LABEL: Record<UsageMetric, string> = {
   requests: '请求数',
   tokens: 'tokens',
+  promptTokens: '输入 tokens',
+  completionTokens: '输出 tokens',
   costCents: '成本',
   errors: '错误数',
 };
@@ -109,7 +111,13 @@ function buildOption(
       textStyle: { color: tokens.color.textPrimary, fontSize: 12 },
       formatter: (params: unknown): string => {
         if (!Array.isArray(params) || params.length === 0) return '';
-        const rows = params as readonly { dataIndex?: unknown; marker?: unknown; seriesName?: unknown; value?: unknown }[];
+        const rows = params as readonly {
+          dataIndex?: unknown;
+          seriesIndex?: unknown;
+          marker?: unknown;
+          seriesName?: unknown;
+          value?: unknown;
+        }[];
         const firstIndex = rows[0]?.dataIndex;
         const index = typeof firstIndex === 'number' ? firstIndex : -1;
         const bucketTime = index >= 0 ? axis[index] : undefined;
@@ -122,7 +130,16 @@ function buildOption(
             const value = typeof row.value === 'number' ? row.value : 0;
             const marker = typeof row.marker === 'string' ? row.marker : '';
             const name = typeof row.seriesName === 'string' ? row.seriesName : '';
-            return `${marker}${escapeHtml(name)}&nbsp;&nbsp;<b>${formatMetric(metric, value)}</b>`;
+            // 该点是否含估算 token（is_estimated=1）：seriesIndex/dataIndex 回查原始 points。
+            const point =
+              typeof row.seriesIndex === 'number' && typeof row.dataIndex === 'number'
+                ? series[row.seriesIndex]?.points[row.dataIndex]
+                : undefined;
+            const estimated = point !== undefined && point.estimatedTokens > 0;
+            const estimatedTag = estimated
+              ? `&nbsp;<span style="color:${tokens.color.warning}">· 含估算</span>`
+              : '';
+            return `${marker}${escapeHtml(name)}&nbsp;&nbsp;<b>${formatMetric(metric, value)}</b>${estimatedTag}`;
           })
           .join('<br/>');
         return `<div style="color:${tokens.color.textSecondary};font-size:11px;margin-bottom:4px">${head}</div>${body}`;

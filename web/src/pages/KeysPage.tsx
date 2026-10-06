@@ -30,16 +30,20 @@ import { useAction, useResource } from '@/api/hooks';
 import { useTaskPolling } from '@/api/useTaskPolling';
 import {
   PAGE_SIZE_DEFAULT,
+  type BalanceRefreshResult,
+  type HintCode,
   type KeyCategory,
   type KeyHealth,
   type Upstream,
   type UpstreamKey,
 } from '@/api/types';
+import { BalanceHint } from '@/components/BalanceHint';
 import { BalanceText } from '@/components/BalanceText';
 import { HealthTag, failureReasonLabel } from '@/components/HealthTag';
 import { PageHeader } from '@/components/PageHeader';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { BalanceModal, KeyFormModal } from '@/pages/keys/KeyModals';
+import { KeyBalanceSelfTest } from '@/pages/keys/KeyBalanceSelfTest';
 import { useLive } from '@/realtime/useLive';
 import { tokens } from '@/theme/tokens';
 import { formatCompact, formatIso, formatRelative } from '@/utils/format';
@@ -76,6 +80,8 @@ export default function KeysPage() {
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<UpstreamKey | null>(null);
   const [balanceTarget, setBalanceTarget] = useState<UpstreamKey | null>(null);
+  const [testTarget, setTestTarget] = useState<UpstreamKey | null>(null);
+  const [refreshHint, setRefreshHint] = useState<{ hintCode: HintCode; hint: string | null } | null>(null);
 
   const upstreams = useResource(() => upstreamsApi.list({ pageSize: 200 }), []);
   const upstreamName = useMemo(() => {
@@ -100,7 +106,11 @@ export default function KeysPage() {
   const queryKey = JSON.stringify(query);
 
   const list = useResource(() => keysApi.list(JSON.parse(queryKey)), [queryKey]);
-  const task = useTaskPolling(() => {
+  const task = useTaskPolling((finished) => {
+    const result = finished.result as BalanceRefreshResult | null;
+    setRefreshHint(
+      result && result.hintCode ? { hintCode: result.hintCode, hint: result.hint } : null,
+    );
     message.success('余额刷新完成');
     list.reload();
   });
@@ -294,7 +304,7 @@ export default function KeysPage() {
     {
       title: '操作',
       key: 'actions',
-      width: 230,
+      width: 260,
       render: (_: unknown, row) => (
         <Space size={tokens.space.sm}>
           <Button
@@ -325,6 +335,17 @@ export default function KeysPage() {
           >
             查余额
           </Button>
+          {row.category === 'balance' ? (
+            <Button
+              size="small"
+              type="link"
+              style={{ padding: 0 }}
+              disabled={row.deletedAt !== null}
+              onClick={() => setTestTarget(row)}
+            >
+              自测
+            </Button>
+          ) : null}
           <Button size="small" type="link" danger style={{ padding: 0 }} onClick={() => removeKey(row)}>
             删除
           </Button>
@@ -520,6 +541,12 @@ export default function KeysPage() {
         </div>
       ) : null}
 
+      {refreshHint ? (
+        <div style={{ marginBottom: tokens.space.md }}>
+          <BalanceHint hintCode={refreshHint.hintCode} hint={refreshHint.hint} />
+        </div>
+      ) : null}
+
       <Table<UpstreamKey>
         rowKey="id"
         size="small"
@@ -570,6 +597,12 @@ export default function KeysPage() {
         target={balanceTarget}
         onClose={() => setBalanceTarget(null)}
         onSaved={list.reload}
+      />
+      <KeyBalanceSelfTest
+        open={testTarget !== null}
+        keyId={testTarget?.id ?? null}
+        maskedKey={testTarget?.maskedKey ?? null}
+        onClose={() => setTestTarget(null)}
       />
     </>
   );

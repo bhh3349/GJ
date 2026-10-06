@@ -30,7 +30,8 @@ import { upstreamsApi } from '@/api/endpoints';
 import { describeError, isApiError } from '@/api/http';
 import { useAction, useResource } from '@/api/hooks';
 import { useTaskPolling } from '@/api/useTaskPolling';
-import { PAGE_SIZE_DEFAULT, type Upstream } from '@/api/types';
+import { PAGE_SIZE_DEFAULT, type BalanceRefreshResult, type HintCode, type Upstream } from '@/api/types';
+import { BalanceHint } from '@/components/BalanceHint';
 import { BalanceText } from '@/components/BalanceText';
 import { PageHeader } from '@/components/PageHeader';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
@@ -60,13 +61,18 @@ export default function UpstreamsPage() {
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<Upstream | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
+  const [refreshHint, setRefreshHint] = useState<{ hintCode: HintCode; hint: string | null } | null>(null);
 
   const queryKey = JSON.stringify({ q, enabled, page, pageSize });
   const list = useResource(
     () => upstreamsApi.list(JSON.parse(queryKey)),
     [queryKey],
   );
-  const task = useTaskPolling(() => {
+  const task = useTaskPolling((finished) => {
+    const result = finished.result as BalanceRefreshResult | null;
+    setRefreshHint(
+      result && result.hintCode ? { hintCode: result.hintCode, hint: result.hint } : null,
+    );
     message.success('余额查询完成');
     list.reload();
   });
@@ -193,21 +199,34 @@ export default function UpstreamsPage() {
     {
       title: '余额模板',
       dataIndex: 'balanceQuery',
-      width: 120,
-      render: (_: unknown, row) =>
-        row.balanceQuery?.enabled ? (
-          <Tooltip title={`${row.balanceQuery.method} ${row.balanceQuery.url}（超时 ${row.balanceQuery.timeoutMs}ms）`}>
-            <Tag bordered={false} style={{ background: tokens.tint.info, color: tokens.color.info }}>
-              已配置
-            </Tag>
-          </Tooltip>
-        ) : (
-          <Tooltip title="未启用模板查询：该上游的余额只能手动录入。">
+      width: 160,
+      render: (_: unknown, row) => {
+        if (row.balanceQuery?.enabled) {
+          return (
+            <Tooltip title={`${row.balanceQuery.method} ${row.balanceQuery.url}（超时 ${row.balanceQuery.timeoutMs}ms）`}>
+              <Tag bordered={false} style={{ background: tokens.tint.info, color: tokens.color.info }}>
+                已配置
+              </Tag>
+            </Tooltip>
+          );
+        }
+        if (row.balancePreset) {
+          return (
+            <Tooltip title="内置余额查询来源（只读、可推导）。不配模板也能自动查询余额。">
+              <Tag bordered={false} style={{ background: tokens.tint.success, color: tokens.color.success }}>
+                内置 · {row.balancePreset.label}
+              </Tag>
+            </Tooltip>
+          );
+        }
+        return (
+          <Tooltip title="未配置模板查询，也未识别到内置来源：该上游的余额只能手动录入。">
             <Tag bordered={false} style={{ background: tokens.tint.neutral, color: tokens.color.textSecondary }}>
               仅手动
             </Tag>
           </Tooltip>
-        ),
+        );
+      },
     },
     {
       title: '更新于',
@@ -349,6 +368,12 @@ export default function UpstreamsPage() {
       {task.error ? (
         <div style={{ marginBottom: tokens.space.md }}>
           <ErrorState error={task.error} onRetry={task.refresh} title="余额查询任务查询失败" />
+        </div>
+      ) : null}
+
+      {refreshHint ? (
+        <div style={{ marginBottom: tokens.space.md }}>
+          <BalanceHint hintCode={refreshHint.hintCode} hint={refreshHint.hint} />
         </div>
       ) : null}
 

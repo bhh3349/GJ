@@ -96,6 +96,82 @@ export interface BalanceQueryTemplate {
   timeoutMs: number;
 }
 
+/** 内置余额查询 preset（只读、可推导，永不落库；本批仅注册 `openai`）。 */
+export interface BalancePreset {
+  id: string;
+  label: string;
+  matchedBy: 'host';
+  /** 当前真正生效的是它（即用户模板未启用）。 */
+  effective: boolean;
+}
+
+/**
+ * 余额查询失败引导码。**不是错误码**：不进 `ERROR_CODES`、不映射 HTTP 状态，
+ * 只是给前端一个「该引导用户做什么」的指针。
+ */
+export type HintCode =
+  | 'BALANCE_QUERY_UNSUPPORTED'
+  | 'BALANCE_PARSE_MISMATCH'
+  | 'BALANCE_UPSTREAM_UNREACHABLE'
+  | 'BALANCE_AUTH_REJECTED';
+
+/** 自测的查询来源。③（无查询方式）走不到，直接 422。 */
+export type BalanceTestSource = 'user-template' | 'preset';
+
+export type BalanceTestErrorCode = 'UPSTREAM_UNREACHABLE' | 'PARSE_FAILED';
+
+/** 自测解析结果。`balance` 是分；`null` = 取不到（与 0 严格区分）。 */
+export interface BalanceTestParsed {
+  balance: Cents | null;
+  currency: string | null;
+  remainingTokens: number | null;
+  expiresAt: Iso8601 | null;
+  unit: 'yuan' | 'cents' | 'dollar';
+}
+
+/**
+ * 两个自测端点共用的响应（同步、不写库）。业务性失败仍 200 + `ok:false`。
+ * `raw` 是上游原文，后端已抹掉明文 key 并截断 8KB；前端只做只读展示，绝不当 HTML 渲染。
+ */
+export interface BalanceTestResult {
+  ok: boolean;
+  keyId: string | null;
+  maskedKey: string | null;
+  source: BalanceTestSource;
+  presetId: string | null;
+  /** 规范化后的 `协议//host/path`，已剥 query，绝不回显替换过 `{key}` 的 URL。 */
+  endpoint: string;
+  httpStatus: number;
+  durationMs: number;
+  parsed: BalanceTestParsed;
+  raw: unknown;
+  errorCode: BalanceTestErrorCode | null;
+  hintCode: HintCode | null;
+  hint: string | null;
+}
+
+/** 自测草稿模板 = 余额查询模板去掉 `enabled`（测试语义无「启用」）。 */
+export type BalanceTestTemplate = Omit<BalanceQueryTemplate, 'enabled'>;
+
+/**
+ * 上游级自测请求体 = 草稿模板 + 可选 `keyId`。
+ * `keyId` 缺省 = 上游第一把 `enabled=true` 且 `category="balance"` 的 key（契约 §2）。
+ */
+export interface BalanceTemplateTestRequest extends BalanceTestTemplate {
+  keyId?: string;
+}
+
+/** 余额刷新任务的 `result`：原计数 + 失败引导两字段（非破坏新增，计数语义不变）。 */
+export interface BalanceRefreshResult {
+  checked: number;
+  ok: number;
+  failed: number;
+  unknown: number;
+  skipped: number;
+  hintCode: HintCode | null;
+  hint: string | null;
+}
+
 export interface Upstream {
   id: string;
   name: string;
@@ -110,6 +186,8 @@ export interface Upstream {
   /** token-plan 类 key 数。这类**不进** totalBalance。 */
   tokenPlanKeyCount: number;
   balanceQuery: BalanceQueryTemplate | null;
+  /** 内置 preset（只读、可推导）。未命中任何 preset 时为 `null`。 */
+  balancePreset: BalancePreset | null;
   revision: number;
   createdAt: Iso8601;
   updatedAt: Iso8601;
@@ -450,6 +528,11 @@ export interface UsagePoint {
   t: Iso8601;
   requests: number;
   tokens: number;
+  /** token 维度补缺（ADR-0012）：输入/输出/估算分列，`tokens = prompt + completion`。 */
+  promptTokens: number;
+  completionTokens: number;
+  /** 本点中 `is_estimated=1` 的调用条数，>0 时该点需标「含估算」。 */
+  estimatedTokens: number;
   costCents: Cents;
   errors: number;
 }

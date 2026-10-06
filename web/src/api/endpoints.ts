@@ -8,6 +8,8 @@ import { api, type QueryValue } from './http';
 import type {
   AuditEntry,
   BalanceStats,
+  BalanceTemplateTestRequest,
+  BalanceTestResult,
   CallLog,
   Group,
   GroupCreateRequest,
@@ -73,6 +75,12 @@ export const upstreamsApi = {
     api.del<void>(`/upstreams/${id}`, { query: { force: force ? true : undefined } }),
   /** 按模板查该上游全部 key 余额（异步）。 */
   refreshBalance: (id: string) => api.post<TaskAccepted>(`/upstreams/${id}/balance/refresh`),
+  /**
+   * 用草稿模板打一次真实查询（同步、不写库）。`body` 缺省 = 用已存模板；
+   * `keyId` 可选，缺省 = 上游第一把可用 balance key。响应 `raw` 用于帮用户定位该填哪条解析路径。
+   */
+  testBalanceTemplate: (id: string, body?: BalanceTemplateTestRequest) =>
+    api.post<BalanceTestResult>(`/upstreams/${id}/balance-template/test`, body),
 };
 
 // ── §3 Key ────────────────────────────────────────────────────────────────
@@ -94,6 +102,8 @@ export const keysApi = {
   upsertBalance: (id: string, body: KeyBalanceUpsertRequest) =>
     api.put<UpstreamKey>(`/keys/${id}/balance`, body),
   refreshBalance: (id: string) => api.post<UpstreamKey | TaskAccepted>(`/keys/${id}/balance/refresh`),
+  /** 用该 key 所属上游的**生效查询方式**（用户模板或 preset）打一次，回诊断（不写库）。 */
+  testBalance: (id: string) => api.post<BalanceTestResult>(`/keys/${id}/test-balance`),
   batch: (body: KeyBatchRequest) => api.post<KeyBatchResult>('/keys/batch', body),
   refreshAllBalances: () => api.post<TaskAccepted>('/keys/balance/refresh'),
 };

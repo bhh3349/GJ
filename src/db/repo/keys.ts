@@ -15,6 +15,7 @@ import { nowIso, utcDay } from '../../util/time.js';
 import { decryptSecret, encryptSecret, maskKey } from '../crypto.js';
 import type { Db } from '../database.js';
 import { newId } from '../ids.js';
+import { parseModelLimits, serializeModelLimits } from '../model-limits.js';
 import { appendChange } from './change-log.js';
 import { translateWriteError } from './write-errors.js';
 
@@ -28,6 +29,7 @@ interface KeyRow {
   enabled: number;
   weight: number;
   unlimited: number;
+  model_limits: string | null;
   balance_cents: number | null;
   balance_currency: string | null;
   balance_updated_at: string | null;
@@ -76,6 +78,9 @@ function toDto(row: KeyRow, nowMs: number, nowDay: string): KeyDto {
     // 与 category 同一层纪律：只有 balance 类才谈得上"无限额度"。token-plan 行即使历史残留
     // `unlimited = 1`，出口也必须是 false —— 那个类别不看余额（§3 表格里两个分支互斥）。
     unlimited: isBalance && row.unlimited === 1,
+    // 契约 §3 `models`（v1.4.2）：模型白名单，来源是库里的 CSV 列而不是到上游现查 ——
+    // 网关读的是**同一个列**（`src/wiring/store.ts`），两边必须逐字同源。
+    models: parseModelLimits(row.model_limits),
     // 类别决定可见字段：token-plan 的 balance 恒为 null，balance 类的 tokenPlan 恒为 null。
     // 存储列可能有过期残留（改类别时），所以在**读路径**再拦一道，
     // 保证无论库里什么状态，响应都不会违反契约。
@@ -281,6 +286,13 @@ export interface CreateKeyInput {
   tokenPlan?: { remainingTokens: number; expiresAt: string | null } | null | undefined;
   /** §15.7：`true` ⇒ 上游无限额度（`unlimited_quota`）。见下方落库规则。 */
   unlimited?: boolean | undefined;
+  /**
+   * §15.2（v1.4.2）：模型白名单。省略 / `[]` / 全空白 ⇒ 落 `NULL` = **不限模型**。
+   *
+   * 只给 §15 批量建 key 用 —— §3 `POST /api/keys` 的请求体**零变更**，不收该字段
+   * （白名单是"上游账号面"的事实，手工建 key 没有它）。
+   */
+  models?: string[] | null | undefined;
 }
 
 export function createKey(db: Db, input: CreateKeyInput, masterKey: Buffer): KeyDto {
@@ -311,9 +323,9 @@ export function createKey(db: Db, input: CreateKeyInput, masterKey: Buffer): Key
       `INSERT INTO upstream_keys (
          id, upstream_id, label, masked_key, secret, category, enabled, weight,
          balance_cents, balance_currency, balance_updated_at, balance_source,
-         token_plan_remaining, token_plan_expires_at, unlimited,
+         token_plan_remaining, token_plan_expires_at, unlimited, model_limits,
          today_tokens, today_day, revision, deleted_at, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, NULL, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, NULL, ?, ?)`,
     ).run(
       id,
       input.upstreamId,
@@ -329,6 +341,7 @@ export function createKey(db: Db, input: CreateKeyInput, masterKey: Buffer): Key
       isBalance ? null : (input.tokenPlan?.remainingTokens ?? null),
       isBalance ? null : (input.tokenPlan?.expiresAt ?? null),
       unlimited ? 1 : 0,
+      serializeModelLimits(input.models),
       utcDay(),
       at,
       at,

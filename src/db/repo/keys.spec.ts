@@ -118,3 +118,91 @@ describe('§15.7 落库规则：unlimited ⇒ balance_cents 必须是 NULL', () 
     expect(getKey(db, created.id, false)?.unlimited).toBe(true);
   });
 });
+
+// §15.2（v1.4.2）：`models` → `upstream_keys.model_limits` CSV。
+//
+// 这条的失败方式同样静默：列存在、DTO 有字段、网关也读这一个列，但**写侧没人落它**时，
+// 白名单在页面上看得见、在网关上不生效，且不报任何错（§16.3 那行"对不上且无报错"）。
+// 契约 §15.7 另行钉死「空 ⇒ `NULL`，**不落 `''`**」—— `''` 与 `NULL` 两个值表达同一语义，
+// 早晚有人写出只判其中一个的查询，所以空值归一化也在这里钉住。
+describe('§15.2 / §15.7 落库规则：models ⇒ model_limits CSV（空一律归一化为 NULL）', () => {
+  /** 直读列：DTO 出口会拦一道，库里那一列才是真正的落库结果。 */
+  function storedCsv(db: Db, keyId: string): string | null {
+    const row = db.prepare('SELECT model_limits FROM upstream_keys WHERE id = ?').get(keyId) as {
+      model_limits: string | null;
+    };
+    return row.model_limits;
+  }
+
+  it('给了白名单：落成 CSV，且 getKey 读回同一个集合', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'tf', baseUrl: 'https://tierflow.cn', supplier: 'tierflow' });
+
+    const created = createKey(
+      db,
+      { upstreamId: up.id, key: probeSecret(), category: 'balance', models: ['gpt-4o', 'claude-3-5-sonnet'] },
+      MASTER_KEY,
+    );
+
+    expect(storedCsv(db, created.id)).toBe('gpt-4o,claude-3-5-sonnet');
+    expect(created.models).toEqual(['gpt-4o', 'claude-3-5-sonnet']);
+    expect(getKey(db, created.id, false)?.models).toEqual(['gpt-4o', 'claude-3-5-sonnet']);
+  });
+
+  it('省略 / `[]` / 全空白：一律落 NULL，不落 `\'\'`', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'tf', baseUrl: 'https://tierflow.cn', supplier: 'tierflow' });
+
+    const omitted = createKey(db, { upstreamId: up.id, key: probeSecret(), category: 'balance' }, MASTER_KEY);
+    const empty = createKey(
+      db,
+      { upstreamId: up.id, key: probeSecret(), category: 'balance', models: [] },
+      MASTER_KEY,
+    );
+    const blank = createKey(
+      db,
+      { upstreamId: up.id, key: probeSecret(), category: 'balance', models: ['', '   '] },
+      MASTER_KEY,
+    );
+
+    for (const k of [omitted, empty, blank]) {
+      expect(storedCsv(db, k.id)).toBeNull();
+      // `[]` 与 `null` 同义（§3），出口恒不出现 `[]`
+      expect(k.models).toBeNull();
+      expect(getKey(db, k.id, false)?.models).toBeNull();
+    }
+  });
+
+  it('去空白、丢空项 —— 但不改模型名本身（`*` 原样透出）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'tf', baseUrl: 'https://tierflow.cn', supplier: 'tierflow' });
+
+    const created = createKey(
+      db,
+      { upstreamId: up.id, key: probeSecret(), category: 'balance', models: [' gpt-4o ', '', '  ', '*'] },
+      MASTER_KEY,
+    );
+
+    expect(storedCsv(db, created.id)).toBe('gpt-4o,*');
+    expect(created.models).toEqual(['gpt-4o', '*']);
+  });
+
+  it('token-plan 行同样可带白名单（白名单与余额类别是两条正交的维度）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'tf', baseUrl: 'https://tierflow.cn', supplier: 'tierflow' });
+
+    const created = createKey(
+      db,
+      {
+        upstreamId: up.id,
+        key: probeSecret(),
+        category: 'token-plan',
+        models: ['gpt-4o'],
+        tokenPlan: { remainingTokens: 1000, expiresAt: null },
+      },
+      MASTER_KEY,
+    );
+
+    expect(getKey(db, created.id, false)?.models).toEqual(['gpt-4o']);
+  });
+});

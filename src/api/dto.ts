@@ -143,6 +143,14 @@ export interface KeyDto {
    * 是无意义的负数（如 `-331119`），前端若照抄会把"无限"画成"欠费"。
    */
   unlimited: boolean;
+  /**
+   * 契约 §3 `models`（v1.4.2）。模型白名单，取自 `upstream_keys.model_limits` CSV。
+   *
+   * `null` = 无白名单、不限模型；**`[]` 与 `null` 同义**（§3 / §5），故出口恒不出现 `[]`。
+   * 与网关 `KeyConfig.models` 同源同口径 —— 两边读的是**同一个列**。
+   * **只读**：`PATCH /api/keys/:id` 不收该字段；建 key 时由 §15.2 `keys` 入参给。
+   */
+  models: string[] | null;
   /** 分；null = 未知 */
   balance: number | null;
   balanceCurrency: string | null;

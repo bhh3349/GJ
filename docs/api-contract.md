@@ -17,6 +17,8 @@
 > **补遗 v1.0.5（2026-10-06）**：M6-A「余额查询与展示」契约落地。① §2 Upstream 对象新增**只读**字段 `balancePreset`（内置 preset 命中情况，未命中为 `null`）；② §2/§3 新增两个**自测端点** `POST /api/upstreams/:id/balance-template/test`、`POST /api/keys/:id/test-balance`，共用一个 `BalanceTestResult` 响应体，**同步执行、绝不写库**；③ §2 新增「余额查询解析顺序与失败引导」小节，定义三段解析顺序（用户模板 → 内置 preset → `skipped`）、`hintCode` / `hint` 两个**非破坏**引导字段（**不进 `ERROR_CODES`、不影响 HTTP 状态**）；④ §6 `/api/stats/usage` 每个点补 `promptTokens` / `completionTokens` / `estimatedTokens` 三个非破坏字段（token 维度，不带钱）。无字段改名、无字段删除、无类型变更、`ERROR_CODES` 零新增，`balanceQuery` 模板契约**未改动**。动机与影响见 ADR-0012。
 
 > **v1.1.0（2026-10-06，M6-B 接口阶段）**：新增 **§12 运维观测** —— ①网关**错误事件**结构化 schema（`GatewayErrorEvent`，落表 `gateway_error_events`）；②**健康指标**口径与 **60s 健康快照**（落表 `gateway_health_snapshots`）；③**四个只读查询端点** `/api/observability/*`（结构化 JSON、机器可读、支持时间窗 + 分型 + 分页过滤）；④**只读维护令牌** `READONLY_TOKEN`（独立于管理员会话、与 `ADMIN_TOKEN` 互斥、作用域仅 `/api/observability/*` 的 GET）。**新增 4 端点 / 2 表 / 1 令牌；无字段改名、无字段删除、无类型变更、`ERROR_CODES` 零新增、§10 网关错误码表零新增** —— 事件里的 `category` / `severity` 是**事件分类维度**（给机器分组用），不是错误码，不进 `ERROR_CODES`。版本号由补遗序列（v1.0.1–v1.0.5）升为 **v1.1.0**：本节开的是一个**新面**（新命名空间 + 新鉴权主体），与前面几版"文本对齐实现"不是同一档次。动机与影响见 ADR-0013。
+>
+> **勘误（2026-10-06，不升版）**：§12.1 的 `keyMasked` 一栏原写「无"那一把 key"可言时为 `null`」，与实现不符 —— sink 侧一律写 `****`（4 位掩码的退化形态，与 `usage_logs.key_masked` 同约定）；"没有哪把具体 key"这个事实由 `keyId` 为 `null` 承担，不由 `keyMasked` 为 `null` 承担。纯文本对齐实现：无字段改名、无类型变更、无端点增删。同批把 `docs/adr/0013` §7 的端口签名块按已落地的 `ErrorEventEntry` 订正（初稿的 `GatewayErrorEventInput` / `ts` / `model` 与实现不符）。§12 其余内容不变。
 
 ---
 
@@ -818,7 +820,7 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
 | `model` | string \| null | ✅ | **客户端请求的模型名**（非凭据），与 §6 日志同口径 |
 | `upstreamId` | string \| null | ✅ | 抹名引用：只记 id，不记 baseUrl / 上游名 |
 | `keyId` | string \| null | ✅ | 抹名引用：只记 id |
-| `keyMasked` | string \| null | ✅ | `****后4位`，**永不出现明文**；无"那一把 key"可言时为 `null` |
+| `keyMasked` | string \| null | ✅ | `****后4位`；**永不出现明文**。没有"哪一把 key"可言时（`keyId` 为 `null`）产出侧写 **`****`**（4 位掩码的退化形态），**不是 `null`** —— 与 `usage_logs.key_masked` 同约定；类型保留 `string \| null` 但产出侧永不写 `null`，消费方按"总是有值"渲染即可 |
 | `stream` | bool | ❌ | |
 | `upstreamStatus` | int \| null | ✅ | 上游返回的原始状态码；一次都没打到上游为 `null` |
 | `attempts` | int | ❌ | **真实**上游尝试次数（`0` = 一次都没发出去） |

@@ -120,30 +120,35 @@ C1 的关键在**互相排斥**这一条：两把令牌配成同一个值时**�
 ## §7 冻结的端口签名（路由者按此对接）
 
 ```ts
-// src/gateway/ports.ts —— 由路由者添加，形状由本 ADR 冻结
+// src/gateway/ports.ts —— 类型已随本批（18a165d）落在 main 上：纯类型、零行为，
+// 网关侧只需要在失败终态调 record()。以**代码为准**，本块已按实现订正。
 export interface ErrorEventSink {
-  record(entry: GatewayErrorEventInput): void;  // 必须 O(1)、不得抛、不得同步落库
+  record(entry: ErrorEventEntry): void;  // 必须 O(1)、不得抛、不得同步落库
 }
 
-export interface GatewayErrorEventInput {
-  ts: string;                       // ISO8601 UTC，网关侧时刻
-  status: number;                   // 回给客户端的状态；客户端断开写 499
-  gatewayCode: string | null;
-  failureReason: 'AUTH_INVALID' | 'INSUFFICIENT_BALANCE' | 'RATE_LIMITED' | 'UPSTREAM_ERROR' | 'NETWORK' | null;
-  // ↑ 直接复用 src/gateway/types.ts 的 FailureReason，不新造一套大小写
+export interface ErrorEventEntry {
+  at: string;                           // ISO8601 UTC，网关侧时刻（落库列名为 ts）
+  status: number;                       // 回给客户端的状态；客户端断开写 499
+  gatewayCode: string | null;           // 契约 §10 的码；网关自身未预期异常传 null
+  failureReason: FailureReason | null;  // 复用 src/gateway/types.ts 的枚举，未触达上游传 null
   endpoint: string;
-  model: string | null;             // 客户端请求的模型名
-  upstreamId: string | null;
-  keyId: string | null;
-  keyMasked: string | null;         // 只 4 位掩码；调用方不得传明文
+  clientModel: string | null;           // 客户端请求的模型名（落库列名为 model）；无模型概念传 null
+  upstreamId: string;                   // 空串 = 没有某把上游可言（与 UsageLogEntry 同约定）
+  keyId: string;                        // 空串 = 同上；实现侧 flush 时转 null
   stream: boolean;
   upstreamStatus: number | null;
-  attempts: number;                 // 真实上游尝试次数
+  attempts: number;                     // 真实上游尝试次数
   candidates: number | null;
   latencyMs: number | null;
-  message: string | null;           // 可含上游原文；落盘前由 sink 统一 scrub + 截断
+  message: string | null;               // 可含上游原文；落盘前由 sink 统一 scrub + 截断
 }
 ```
+
+**勘误（2026-10-06，本块按实现订正）**：初稿写的是接口名 `GatewayErrorEventInput`、字段 `ts` / `model`、`keyId: string | null`，且带一个 `keyMasked` 入参。落地实现有三处不同，都不是打字差异，值得写清楚免得下游按初稿写：
+
+1. **接口名 / 时间 / 模型字段**：`ErrorEventEntry` / `at` / `clientModel`。命名向 `UsageLogEntry` 看齐（同一份端口文件里两个出口同形状）；`at`→列 `ts`、`clientModel`→列 `model` 的映射由实现侧做，**契约 §12.1 的字段名不变**。
+2. **`keyId` / `upstreamId` 用空串表示"没有"**：与 `UsageLogEntry` 同约定（网关侧不必构造 `null` 分支），实现侧 flush 时转成 DB 的 `NULL`。
+3. **`keyMasked` 不由网关传**：掩码由实现侧在 flush 时用注入的 `maskOf(keyId)` 反查产出。网关侧**拿不到掩码、也就无从传明文** —— 这是把"不许传明文"从"约定"变成"类型上就传不进来"。同理 `category` / `severity` 也由实现侧派生（见下）。
 
 `category` / `severity` **不由网关传**，由 sink 侧按 §12.1 的映射表从 `gatewayCode` + `status` 派生——映射只有一个实现处，网关侧不需要理解分型，也就不会与契约漂移。
 

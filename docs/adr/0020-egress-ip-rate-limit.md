@@ -125,7 +125,7 @@ IP 级 429  →  key₁ 被冷 60s  →  引擎换 key₂ 重试
 出口被限流与"池饱和"对调用方**同形**（都是 `429 RATE_LIMITED`），前端若从 429 / `Retry-After` / 日志反推，
 **必然猜错**，然后把它渲染成"某些 key 坏了" —— 正是本 ADR 要消灭的那个误读。
 
-因此新增一条实时帧 `egress_cooldown { serverTime, egressId, cooldownUntil, reason }`：
+因此新增一条实时帧 `egress_cooldown { serverTime, egressId, cooldownUntil }`：
 
 - **只走已存在的 `WS /api/stats/live`**：不新增 HTTP 端点、§14 端点侧不加字段。
   出口状态是**秒级瞬态**，给它开一个 REST 端点等于让它天生滞后。
@@ -142,6 +142,19 @@ IP 级 429  →  key₁ 被冷 60s  →  引擎换 key₂ 重试
   （同批订正一条证据：`key_health` 的基线来自它自己的差分帧首 tick，**不是** `metrics` 帧 ——
   `live.ts` 的 `metrics` 帧不带 `keyHealth[]`。）
 - **零新增错误码、零新增 HTTP 状态。**
+- **无 `reason` 字段**（v1.5.0 删；本决策首版曾含它）：`EgressCooldown` 只有**一个**变更入口
+  `cool(host, retryAfterMs?)`，其 `reason` **硬编码 `RATE_LIMITED`**，表内（`EgressState = {consecutive, until}`）
+  **不存它** ⇒ 在本帧里它是**常量、不是状态**。**常量字段比没有字段更贵** —— 前端会照它写一个恒真分支，
+  而它携带的信息量为零。且该帧**从未发射过、零消费者**（三个自检信号全 0），**删除此刻是免费的**。
+  将来若真出现第二种出口级冷却成因，**同批把字段与生产者一起加回**（**禁止先加字段、后补生产者**）。
+- **生产者读面 = 全量 + 绝对 `until`**（v1.5.0 放行）：放行一次**纯增量只读**
+  `snapshot(): readonly { host: string; untilMs: number }[]`（**签名只增不改**，`KeyPool` / `KeyConfig` /
+  engine 零改动）。它是**已冻结语义的缺件**，不是新功能：本决策上一条钉了「`sig` 必带 `cooldownUntil`」，
+  却没查过生产者供不供得出 —— `egress.ts` 原只有 `isCooling(host)` / `remainingMs(host)`（**都要先知道 host**）、
+  **无枚举读、无 `until` 读口**。两条语义：**(a)** `untilMs` 是**绝对时刻**，发帧侧**不得** `now() + remainingMs()`
+  反算（否则指纹每 tick 变 ⇒ **每 tick 白推**）；**(b)** 快照是**全量**（该层记录过的全部出口），
+  **不是"只在冷却期内的"** —— 差分通道**无墓碑**（id 消失只从 `seen` 删、不发帧），只报冷却中的话
+  **解除帧永不发出**。推论：冷却层**不得 prune 已过期条目**（要 prune 得先加墓碑，另一笔）。
 
 **命名说明**：PM 的派单里写作 `egressCooldown` / `until`，本决策按本契约 §7 的既有口径
 归一为 **`egress_cooldown` / `cooldownUntil`**（帧类型名一律 snake_case；时间戳字段与 `key_health` 同名 ——
@@ -154,6 +167,8 @@ IP 级 429  →  key₁ 被冷 60s  →  引擎换 key₂ 重试
   `/v1/*` 对外行为零变更、`SCHEMA_VERSION` 不变**。§15.5 表内那行本身在 **v1.4.8** 收口
   （此前只在本节写了降级，表内仍是旧依据 —— 同一事实两处不一致）。**v1.4.8 新增一条 §7 帧
   （决策 7），是本期唯一的对外形状新增**：它不在 REST 面，故"无端点增删"仍成立。
+  **v1.5.0 修正**：该帧的 `reason` 字段**已删**，并放行生产者只读读面 `snapshot()`（见决策 7 末两条）——
+  上面"无字段改名 / 删除"一句是 **v1.4.8 当时的实况**，**不覆盖 v1.5.0**。
 - **网关**（路由者，Tier 1）：`classify` 分流 + 出口级冷却态 + 冷却期内短路。**已落 `dev/gateway-rotation`**；
   但**识别规则仍未启用**（见决策 4 裁定），故**运行时行为与改动前逐字节相同** ——
   "自伤回路已掐断"这句话现在**还不成立**。

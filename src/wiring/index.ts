@@ -26,3 +26,5 @@ export type {
   ShutdownTarget,
   SyncClosable,
 } from './shutdown.js';
+export { createAssistantInvoker, createAssistantMetrics } from './assistant-invoker.js';
+export type { AssistantInvokerOptions, AssistantMetrics } from './assistant-invoker.js';

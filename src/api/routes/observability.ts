@@ -12,7 +12,6 @@
 // 同 §6 回显降档后 `bucket` 的惯例。
 
 import type { FastifyInstance } from 'fastify';
-import type { GatewayErrorCategory, GatewayErrorSeverity } from '../dto.js';
 import { computeHealthMetrics } from '../../db/observability.js';
 import {
   getGatewayErrorEvent,
@@ -21,8 +20,14 @@ import {
 import { listHealthSnapshots } from '../../db/repo/health-snapshots.js';
 import { ApiError } from '../errors.js';
 import { pageProps, idParam } from '../schemas.js';
-import { isIso8601WithTz } from '../../util/time.js';
 import type { ApiContext } from '../app.js';
+import {
+  DEFAULT_ERRORS_WINDOW_MS,
+  parseCategories,
+  parseRangeBounds,
+  parseSeverity,
+  toIso,
+} from '../services/observability-params.js';
 import { parseWindow } from './stats.js';
 
 /**
@@ -33,23 +38,8 @@ import { parseWindow } from './stats.js';
 const MAX_SPAN_DAYS = 30;
 const MAX_SPAN_MS = MAX_SPAN_DAYS * 86_400_000;
 
-/** 两个列表端点各自的默认窗口（契约 §12.3）。 */
-const DEFAULT_ERRORS_WINDOW_MS = 3600_000; // 1h
-const DEFAULT_SNAPSHOTS_WINDOW_MS = 6 * 3600_000; // 6h
-
-const CATEGORIES: readonly GatewayErrorCategory[] = [
-  'CLIENT_REQUEST',
-  'AUTH_FAILED',
-  'RATE_LIMITED',
-  'QUOTA_EXCEEDED',
-  'NO_AVAILABLE_KEY',
-  'UPSTREAM_ERROR',
-  'UPSTREAM_TIMEOUT',
-  'CLIENT_ABORTED',
-  'INTERNAL',
-];
-
-const SEVERITIES: readonly GatewayErrorSeverity[] = ['warn', 'error'];
+/** 快照列表的默认窗口（契约 §12.3）。错误事件列表的默认窗口与助手共用，在 services 里。 */
+const DEFAULT_SNAPSHOTS_WINDOW_MS = 6 * 3600_000;
 
 interface TreeQuery {
   window?: string;
@@ -70,74 +60,19 @@ interface ListQuery {
 }
 
 /**
- * 解析时间窗：`from`/`to` 都可省。
- *
- * 三条规则都写在这里，不散在 handler 里：
- *   1. 必须是**带时区**的 ISO8601（不带时区会被 `Date.parse` 按服务器本地时区解释，
- *      换个 TZ 环境同一份查询就整体偏移几小时，且没人会发现）；
- *   2. 只给 `to` 或都不给 → `from` 取 `to - 默认跨度`；只给 `from` → `to` 取现在；
- *   3. 跨度上限 30 天，超限 400，`details.field='from'`。
+ * 解析时间窗：取值规则（带时区 ISO8601 / 缺省跨度 / `to > from`）在
+ * `services/observability-params.ts` 里与助手共用，这里只加**本端点**的跨度上限。
  */
 function resolveRange(
   query: Pick<ListQuery, 'from' | 'to'>,
   defaultSpanMs: number,
   now: Date,
 ): { from: string; to: string } {
-  const rawTo = query.to;
-  const rawFrom = query.from;
-
-  if (rawTo !== undefined && !isIso8601WithTz(rawTo)) {
-    throw ApiError.invalidParam('to', 'to 必须是带时区的 ISO8601');
-  }
-  if (rawFrom !== undefined && !isIso8601WithTz(rawFrom)) {
-    throw ApiError.invalidParam('from', 'from 必须是带时区的 ISO8601');
-  }
-
-  const toMs = rawTo === undefined ? now.getTime() : Date.parse(rawTo);
-  const fromMs = rawFrom === undefined ? toMs - defaultSpanMs : Date.parse(rawFrom);
-
-  if (fromMs >= toMs) throw ApiError.invalidParam('to', 'to 必须晚于 from');
+  const { fromMs, toMs } = parseRangeBounds(query, defaultSpanMs, now);
   if (toMs - fromMs > MAX_SPAN_MS) {
     throw ApiError.invalidParam('from', `查询跨度最长 ${MAX_SPAN_DAYS} 天`);
   }
-
-  return { from: new Date(fromMs).toISOString(), to: new Date(toMs).toISOString() };
-}
-
-/**
- * 解析 `category`：逗号分隔多值（最多 9 个）。
- *
- * 空串/纯空白段**按"不过滤"处理**（不是错误）：前端"全部分型"这个选项最自然的表达
- * 就是一个空字符串，为一个正常 UI 状态回 400 只会逼前端在发请求前加特判。
- * 但一旦给了非空的段，就必须全部落在枚举内 —— 静默忽略未知分型会让用户以为
- * "筛选生效了、只是没有这类事件"，那是真的误导。
- */
-function parseCategories(raw: string | undefined): GatewayErrorCategory[] | undefined {
-  if (raw === undefined) return undefined;
-  const parts = raw
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s !== '');
-  if (parts.length === 0) return undefined;
-
-  const out: GatewayErrorCategory[] = [];
-  for (const p of parts) {
-    if (!(CATEGORIES as readonly string[]).includes(p)) {
-      throw ApiError.invalidParam('category', `未知分型 ${p}；取值见契约 §12.1`);
-    }
-    if (!out.includes(p as GatewayErrorCategory)) out.push(p as GatewayErrorCategory);
-  }
-  return out;
-}
-
-function parseSeverity(raw: string | undefined): GatewayErrorSeverity | undefined {
-  if (raw === undefined) return undefined;
-  const v = raw.trim();
-  if (v === '') return undefined;
-  if (!(SEVERITIES as readonly string[]).includes(v)) {
-    throw ApiError.invalidParam('severity', 'severity 取值 warn | error');
-  }
-  return v as GatewayErrorSeverity;
+  return { from: toIso(fromMs), to: toIso(toMs) };
 }
 
 export function registerObservabilityRoutes(app: FastifyInstance, ctx: ApiContext): void {
@@ -165,6 +100,10 @@ export function registerObservabilityRoutes(app: FastifyInstance, ctx: ApiContex
         windowLabel: label,
         startedAt: ctx.startedAt,
         droppedEvents: ctx.droppedEvents(),
+        // 助手独立计量（契约 §12.2 `assistant` / §13.4）。口径提醒：它**不计入**本响应里的
+        // `traffic.*`（助手不写 usage_logs），也不计入 `events.*`（助手调用不产错误事件）——
+        // 值班要靠它把"助手把并发槽位吃满"与"业务流量打满"分开归因。
+        assistant: ctx.assistantMetrics,
       });
     },
   );

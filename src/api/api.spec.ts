@@ -88,6 +88,8 @@ function makeConfig(dbPath: string): AppConfig {
     maxAttempts: 3,
     maxConcurrencyPerKey: 4,
     cooldownLadderSeconds: [0, 60, 300, 900, 1800],
+    // 助手未接线：本套用例只覆盖管理面 REST，助手端点有自己的 spec（routes/assistant.spec.ts）
+    assistantModel: null,
   };
 }
 

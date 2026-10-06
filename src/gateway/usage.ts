@@ -9,18 +9,17 @@
  * 这里取「非 ASCII 字符合计权重 1、其余 0.25」的折中，只在缺 usage 时使用。
  */
 
+import { estimateTextTokens } from '../util/tokens.js';
 import type { TokenUsage } from './types.js';
 
-/** 估算：ASCII 0.25 token/字符，非 ASCII 1 token/字符；向上取整、最小 0 */
-export function estimateTokens(text: string): number {
-  let ascii = 0;
-  let wide = 0;
-  for (const ch of text) {
-    if (ch.codePointAt(0)! > 0x7f) wide += 1;
-    else ascii += 1;
-  }
-  return Math.ceil(ascii / 4) + wide;
-}
+/**
+ * 估算：ASCII 0.25 token/字符，非 ASCII 1 token/字符；向上取整、最小 0。
+ *
+ * 实现已提到 `src/util/tokens.ts`：助手侧 §13.3 的"单条 / 总 token"上限要用**同一套**
+ * 口径，而 `src/api` 不许 import 本目录。留这一层薄壳是因为本函数是网关侧既有的公开名字
+ * （`engine` / `routes` / 测试都在用），改名或内联会把调用方一起拖着改，收益为零。
+ */
+export const estimateTokens = estimateTextTokens;
 
 function textOfPart(part: unknown): string {
   if (typeof part === 'string') return part;

@@ -80,6 +80,8 @@ function makeConfig(dbPath: string): AppConfig {
     maxAttempts: 3,
     maxConcurrencyPerKey: 4,
     cooldownLadderSeconds: [0, 60, 300, 900, 1800],
+    // 新增必填配置项（契约 §13 `ASSISTANT_MODEL`）的测试取值：本套用例不涉及助手
+    assistantModel: null,
   };
 }
 

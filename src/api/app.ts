@@ -19,10 +19,14 @@ import fastifyWebsocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import type { AppConfig } from '../config.js';
 import type { Db } from '../db/database.js';
+import { NO_ASSISTANT_METRICS } from '../db/observability.js';
+import { unwiredAssistantInvoker, type AssistantModelInvoker } from './assistant-port.js';
 import { LoginRateLimiter, requireSession, type SessionInfo } from './auth.js';
+import type { AssistantMetricsDto } from './dto.js';
 import { ApiError } from './errors.js';
 import { createHealthSnapshotWriter } from './health-snapshot-writer.js';
 import { isWriteMethod, sessionCookieValue, verifyCsrf } from './http.js';
+import { registerAssistantRoutes } from './routes/assistant.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerGroupRoutes } from './routes/groups.js';
 import { registerKeyRoutes } from './routes/keys.js';
@@ -54,6 +58,17 @@ export interface ApiContext {
   startedAt: Date;
   /** 错误事件累计丢弃数（契约 §12.2 `events.dropped`）。sink 未接入时恒 0 */
   droppedEvents: () => number;
+  /**
+   * 内置助手的模型调用入口（契约 §13 / ADR-0015）。
+   *
+   * **由接线层注入**（`src/server.ts`），因为实现要用到网关侧同一个 key 池与密文出口，
+   * 而那两样 `src/api` 拿不到也不该拿到（AGENTS.md §8）。缺省是 `unwiredAssistantInvoker`：
+   * 它回一个说明"未接线"的失败终止帧 —— 未配置时前端看到的是**一条明确的错误**，
+   * 而不是一个转不完的圈。
+   */
+  assistant: AssistantModelInvoker;
+  /** 助手独立计量（契约 §12.2 `assistant`）。经 `/api/observability/health` 只读暴露 */
+  assistantMetrics: AssistantMetricsDto;
 }
 
 /** 唯一免鉴权路径（契约 §0.5）。用 method+path 精确匹配，不用前缀。 */
@@ -139,6 +154,15 @@ export interface BuildAppOptions {
    */
   droppedEvents?: () => number;
   /**
+   * 内置助手的模型调用入口（契约 §13）。缺省 `unwiredAssistantInvoker` —— 见 `ApiContext.assistant`。
+   *
+   * 管理面**不检查它是否已接线**：检查出来的唯一动作是"别让这条路由生效"，而把路由摘掉
+   * 会让前端拿到 404（看起来像版本不对）。回一个 503 终止帧的语义精确得多。
+   */
+  assistant?: AssistantModelInvoker;
+  /** 助手独立计量出口（与 invoker 共用一个对象）；缺省全 0 */
+  assistantMetrics?: AssistantMetricsDto;
+  /**
    * 是否启动 60s 健康快照写入器（契约 §12.2 / ADR-0013 §5）。默认 `true`（线上行为）。
    *
    * 测试可注入 `false`：快照是**历史序列**，"建 app 时先写一条"会让每个用例的库里
@@ -170,6 +194,8 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     loginLimiter: opts.loginLimiter ?? new LoginRateLimiter(),
     startedAt,
     droppedEvents,
+    assistant: opts.assistant ?? unwiredAssistantInvoker,
+    assistantMetrics: opts.assistantMetrics ?? NO_ASSISTANT_METRICS,
   };
 
   app.decorateRequest('auth', null);
@@ -278,6 +304,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   registerStatsRoutes(app, ctx);
   registerMiscRoutes(app, ctx);
   registerObservabilityRoutes(app, ctx);
+  registerAssistantRoutes(app, ctx);
 
   // 形状必须是这样：`register` 的回调被 avvio 排队，等前面排的 WS 插件**加载完**才执行；
   // 插件的 onRoute 钩子是在那一刻才装上的，早于它的路由它一个都看不见。

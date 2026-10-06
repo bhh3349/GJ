@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.2.0**
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.2.1**
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -25,6 +25,8 @@
 > **补遗 v1.1.2（2026-10-06，M6-B 接口阶段收口）**：登记网关已在用但 §10 漏登的 **`GROUP_DISABLED`(403)**（key 有效、用户组被禁用，`type=authentication_error`），并把 §12.1 的 `AUTH_FAILED` 分型从「仅 401」扩为「401 / 403」、对应码从「仅 `INVALID_API_KEY`」扩为「`INVALID_API_KEY` / `GROUP_DISABLED`」——由此网关对 403 组禁用**开始产事件**（此前宁缺不产）。同时把四条产出边界写进 §12.1：仅 `/v1/*`、未过鉴权 `model=null`、上游 4xx 透传不产事件、Fastify 413/415 等不产事件。**无字段改名、无字段删除、无类型变更、`ERROR_CODES` 零新增、`category` 枚举 9 值不变**（`GROUP_DISABLED` 归入既有 `AUTH_FAILED`，不新增分型）。动机与影响见 ADR-0013「落地补遗」。
 
 > **v1.2.0（2026-10-06，M6-B 第二阶段）**：新增 **§13 内置 AI 助手聊天** —— ① `POST /api/assistant/chat`（SSE 流）端点；② SSE 帧契约（`delta` / `done` / `error` + 单调递增 `seq` + `done` 内联 `citations`，终止帧 `error.code` 复用 §10 码值）；③ 三重上限（`messages` 条数 24 / 单条 token 8000 / 总 token 16000 / 日志注入 50 条 × ≤24h，超限回 `done.truncated:true` 不静默截）；④ 鉴权走登录会话（§0.5），**不复用 `READONLY_TOKEN`**（§12.4 作用域之外自动 `403 FORBIDDEN`）；⑤ `GET /api/observability/health` 新增只读字段 `assistant`（助手独立计量：**计入 key 健康、不计入业务流量口径**）；⑥ SSE 失败终止帧 `error` 复用 **§10 码值**（`code` / `status` / 429 带 `retryAfterSec`）零新增枚举，`seq` 从 1 起、单请求内单调、重试重置；`truncated` 挂在 `done` 上（非独立帧）；`citations` 元素带可展示标签 `model` + `summary`；⑦ 助手与业务**同池同语义占上游并发槽位**、撞满即 429 `RATE_LIMITED`，断流走**同一条 signal 入口** abort 上游（引擎零新增分支）。**无字段改名、无字段删除、无类型变更、`ERROR_CODES` 零新增、§10 网关错误码表零新增、`SCHEMA_VERSION` 不变、零新表零迁移**（对话不落库、服务端无状态）。动机与影响见 ADR-0015。
+
+> **v1.2.1（2026-10-07，M6-B 第二阶段收口）**：§13.4 把「槽位撞满」由一句简写（"撞满即 429 `RATE_LIMITED`"）改成**二分口径**：**全候选满并发**（`getAvailableKeys` 的 `isUsable` 已把满并发 key 过滤掉、候选集为空）是稳定出口 → **`503 NO_AVAILABLE_KEY`**；**429 `RATE_LIMITED`（"网关池饱和"）只出现在「选路返回 → `beginAttempt` 占位」的竞态窗口**，是偶发出口。给前端留一条硬要求：`429` 与 `503` 两条都要能落"稍后重试"分支。**§10 码表零新增、`ERROR_CODES` 零新增、无字段改名/删除/类型变更、帧契约与 `seq` 语义零变更** —— 本条是把 v1.2.0 的简写**订正为与实现一致**（§10 的「候选非空、0 次真实尝试、全候选并发已满」本来就是准的那一条），属文本对齐，不涉及两端代码改动。
 
 ---
 
@@ -1110,9 +1112,13 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 - **计入 key 健康**：`reportFailure` / `reportSuccess` 与业务调用同路径，助手撞坏 key 同样进冷却。**对助手坏的 key，对业务同样是坏的**，所以照常报失败，不为助手开"免检"旁路。
 - **不计入业务流量口径**：不写 `usage_logs`，因此不出现在 §6 `overview`/`usage` 与 §12.2 `traffic.*` 的 QPS/成功率里。
 - **独立计数**（进程内、重启归零、不落表）：由 §12.2 的 `assistant` 字段只读暴露。
-- **助手占用上游并发槽位，与业务同池同语义**：内部调用不过 `/v1/*`，所以 **RPM / TPM / 日配额那层不拦助手** —— 这是有意的（助手不该被组级配额当成业务调用掐掉），代价是助手能一直吃 key 的并发槽位，**撞满即 429 池饱和（`RATE_LIMITED`，`retryAfterSec=1`）**。MVP **不为助手单独预留槽位**（同池最简），因此由 `assistant.*` 独立计数 + 本节这句口径，让值班能把"助手把槽位吃满"与"业务流量打满"分开归因：
+- **助手占用上游并发槽位，与业务同池同语义**：内部调用不过 `/v1/*`，所以 **RPM / TPM / 日配额那层不拦助手** —— 这是有意的（助手不该被组级配额当成业务调用掐掉），代价是助手能一直吃 key 的并发槽位。MVP **不为助手单独预留槽位**（同池最简），因此由 `assistant.*` 独立计数 + 本节这句口径，让值班能把"助手把槽位吃满"与"业务流量打满"分开归因：
   - `keys.*`（健康/冷却/失败计数）**包含**助手的影响；
   - `traffic.*` / §6 QPS / 成功率 / token 用量**不包含**助手。
+- **"槽位撞满"在真实池语义下有两个出口，两个都照 §10 原样透传、都不新增枚举**（v1.2.1 限定，见文首补遗；§10 的 `RATE_LIMITED`：「候选非空、0 次真实尝试、全候选并发已满」是准的那一条）：
+  - **全候选都满并发**（`getAvailableKeys` 在 `isUsable` 处把满并发的 key 全部过滤掉，候选集为空）→ 选路阶段即失败：**`503 NO_AVAILABLE_KEY`**。这是"所有 key 都被占住"的**稳定形态**，助手侧与业务侧同码。
+  - **"选路返回 → `beginAttempt` 占位"之间的竞态窗口**（候选非空、0 次真实尝试，到占位时槽位刚被抢走）→ **`429 RATE_LIMITED`**（`retryAfterSec=1`，即 §10「网关池饱和」那条路径）。该窗口窄、不必然出现，是"撞满"的**偶发出口，不是常规出口**。
+  - 因此：调用方**按 `code` 分支**，"请稍后重试"必须同时覆盖 `429 RATE_LIMITED` 与 `503 NO_AVAILABLE_KEY`；**"撞满即 429"的简写不再成立**——本版起以本条的二分口径为准。
 - **断流 = abort 上游，走同一条 signal 入口，不新增旁路**：助手链路自造一个 `AbortController`，其 `signal` 与业务请求一样进 `chatCompletions({ signal })`；客户端断开或用户点"取消"即 `abort()`，由引擎既有的 `linkedAbort` 合并上游超时、既有 499 处置（`CLIENT_ABORTED`，不计 key 失败）自然接上。**引擎侧零新增分支**；未接上这条 signal 的助手实现 = 白烧 token + 占住并发槽位，属缺陷。
 
 ### 13.5 鉴权与作用域
@@ -1122,4 +1128,4 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 
 ---
 
-*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`。*
+*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`；v1.2.1（§13.4「槽位撞满」二分口径：全候选满并发 `503 NO_AVAILABLE_KEY` / 竞态窗口 `429 RATE_LIMITED`，零新增枚举、零代码改动）为文本对齐，同属本契约的同一冻结面。*

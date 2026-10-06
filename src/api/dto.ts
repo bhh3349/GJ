@@ -357,6 +357,27 @@ export interface HealthEventsDto {
   byCategory: HealthEventCategoryDto[];
 }
 
+/**
+ * 契约 §12.2 / §13.4 `assistant` —— 内置助手的**独立计量**。
+ *
+ * 本进程内计数、重启归零、不落表（与 `events.dropped` 同属"本进程"口径，不是窗口内量）。
+ * 之所以能在 §12.2 只读暴露：助手调用**计入 key 健康**（`keys.*` 含它的影响），但
+ * **不计入业务流量口径**（不写 `usage_logs`，故 `traffic.*` 不含它）—— 值班必须能把
+ * "助手把并发槽位吃满"与"业务流量打满"分开归因，否则会去查一个根本不存在的流量尖峰。
+ *
+ * 结构上等同于 `src/wiring/assistant-invoker.ts` 的 `AssistantMetrics`。刻意不复用那个类型：
+ * 依赖方向是 wiring → api，dto 反向 import wiring 会绕出一个环（AGENTS.md §8）。
+ * 两端形状由 §12.2 钉住，`server.ts` 以此为接线点，字段增删必须同时改契约。
+ */
+export interface AssistantMetricsDto {
+  /** 助手调用总次数 */
+  requests: number;
+  /** 以 `error` 终止帧结束的次数 */
+  errors: number;
+  /** 累计 token（上游 usage 或字符估算） */
+  tokens: { prompt: number; completion: number; total: number };
+}
+
 /** 契约 §12.2 `GET /api/observability/health` */
 export interface HealthMetricsDto {
   generatedAt: string;
@@ -368,6 +389,8 @@ export interface HealthMetricsDto {
   keys: HealthKeysDto;
   db: HealthDbDto;
   events: HealthEventsDto;
+  /** 契约 §12.2 / §13.4：助手独立计量。未接线时为全 0（这是事实：本进程确实没跑过助手调用） */
+  assistant: AssistantMetricsDto;
 }
 
 /** 契约 §12.2 / §12.3 历史健康快照。落当时算出来的结果，不事后重算。 */

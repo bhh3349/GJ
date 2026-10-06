@@ -92,6 +92,7 @@ function makeConfig(dbPath: string): AppConfig {
     maxAttempts: 3,
     maxConcurrencyPerKey: 4,
     cooldownLadderSeconds: [0, 60, 300, 900, 1800],
+    assistantModel: null,
   };
 }
 

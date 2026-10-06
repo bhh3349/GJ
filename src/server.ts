@@ -21,11 +21,18 @@
 // 再起一个 cron 进程去写库，就同时有两个写者了。
 
 import { buildApp } from './api/app.js';
+import { unwiredAssistantInvoker } from './api/assistant-port.js';
 import { LoginRateLimiter, bootstrapAdmin, purgeExpiredSessions } from './api/auth.js';
 import { loadConfig } from './config.js';
 import { openDatabase } from './db/database.js';
 import { pruneLogs } from './db/repo/logs.js';
-import { createGatewayRuntime, createShutdownHandler, mountGatewayRoutes } from './wiring/index.js';
+import {
+  createAssistantInvoker,
+  createAssistantMetrics,
+  createGatewayRuntime,
+  createShutdownHandler,
+  mountGatewayRoutes,
+} from './wiring/index.js';
 
 const HOUR_MS = 3_600_000;
 
@@ -44,6 +51,26 @@ async function main(): Promise<void> {
   await mountGatewayRoutes(gateway);
   gateway.start();
 
+  // 内置助手（契约 §13 / ADR-0015）。三处接线刻意都放在**管理面之前**，
+  // 且共用同一个 metrics 对象：
+  //   - 池子与密文出口取自 `gateway`，所以助手调用与业务请求**同源**结算 key 健康；
+  //   - invoker 内部另起一个 engine 且不挂任何 sink（不写 usage_logs / 不产错误事件），
+  //     这条隔离在 `src/wiring/assistant-invoker.ts` 里是结构性的，不靠调用方自觉；
+  //   - 未配 `ASSISTANT_MODEL` 时注入 `unwiredAssistantInvoker`：前端拿到一条说人话的
+  //     503 终止帧，同时这里留一条 warn 说明"功能没坏，是没配"。
+  //     **不编一个默认模型名** —— 那只会把"没配"伪装成"配错了"（每次走一遍选路失败）。
+  const assistantMetrics = createAssistantMetrics();
+  const assistant =
+    config.assistantModel === null
+      ? unwiredAssistantInvoker
+      : createAssistantInvoker({
+          pool: gateway.stack.pool,
+          secrets: gateway.store.secrets,
+          models: gateway.store.catalog,
+          model: config.assistantModel,
+          metrics: assistantMetrics,
+        });
+
   // 管理面：`droppedEvents` 接到网关侧的事件队列上（见文件头第 4 条）。
   // 只传一个取值函数而不是 sink 本身：管理面只需要那一个**累计数**，
   // 拿到 sink 就等于拿到了往事件流里写的能力 —— 观测面不该有写入口。
@@ -53,7 +80,15 @@ async function main(): Promise<void> {
     logger: true,
     loginLimiter,
     droppedEvents: () => gateway.errors.dropped(),
+    assistant,
+    assistantMetrics,
   });
+
+  if (config.assistantModel === null) {
+    app.log.warn('未配置 ASSISTANT_MODEL：内置助手未接线，/api/assistant/chat 将回 503 NO_AVAILABLE_KEY');
+  } else {
+    app.log.info({ model: config.assistantModel }, '内置助手已接线');
+  }
 
   // 维护任务一律 try/catch 吞掉异常：清垃圾失败不该把整台服务带走，
   // 下一次 tick 还会再来一遍。

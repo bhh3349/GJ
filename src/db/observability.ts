@@ -12,7 +12,13 @@
 //      而用户只会相信其中任意一个 —— 那种修复成本远高于省下的这次函数调用。
 
 import { statSync } from 'node:fs';
-import type { HealthDbDto, HealthKeysDto, HealthMetricsDto, LatencyPercentilesDto } from '../api/dto.js';
+import type {
+  AssistantMetricsDto,
+  HealthDbDto,
+  HealthKeysDto,
+  HealthMetricsDto,
+  LatencyPercentilesDto,
+} from '../api/dto.js';
 import { listKeyHealthDetail } from './repo/keys.js';
 import { summarizeErrorEvents } from './repo/gateway-events.js';
 import { computeOverview } from './stats.js';
@@ -148,7 +154,25 @@ export interface ComputeHealthOptions {
   droppedEvents: number;
   /** 注入"现在"，便于测试；缺省取真实时间 */
   now?: Date | undefined;
+  /**
+   * 助手独立计量（契约 §12.2 `assistant` / §13.4）。由 `buildApp` 从接线层注入；
+   * 缺省（未接线）为全 0 —— 那是**事实**（本进程确实没跑过助手调用），不是占位假数据。
+   */
+  assistant?: AssistantMetricsDto | undefined;
 }
+
+/**
+ * 未接线时的助手计量：全 0。
+ *
+ * 导出（而不是留在本文件私有）是为了让 `buildApp` 的缺省值**引用同一个对象** ——
+ * 两处各写一份字面量，将来契约加一个字段就会出现"健康页读到的 assistant 有 4 个字段、
+ * 缺省那份只有 3 个"这种只在未接线部署下才出现的形状差异。
+ */
+export const NO_ASSISTANT_METRICS: AssistantMetricsDto = {
+  requests: 0,
+  errors: 0,
+  tokens: { prompt: 0, completion: 0, total: 0 },
+};
 
 /**
  * 组装 `GET /api/observability/health` 的响应体。
@@ -186,5 +210,8 @@ export function computeHealthMetrics(opts: ComputeHealthOptions): HealthMetricsD
       dropped: opts.droppedEvents,
       byCategory: events.byCategory,
     },
+    // 进程内计数（重启归零），与 `dropped` 同属"本进程"口径：它是"这个进程跑了多少助手调用"，
+    // 不是"这个窗口内跑了多少"。前端要标成"自本次启动"，别当成窗口量去和 traffic 对齐。
+    assistant: opts.assistant ?? NO_ASSISTANT_METRICS,
   };
 }

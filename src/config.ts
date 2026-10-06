@@ -39,6 +39,15 @@ export interface AppConfig {
    * 默认 = 冻结阶梯 0/1m/5m/15m/30m（首档 0，即首次失败只吃该 reason 的基础冷却）
    */
   cooldownLadderSeconds: number[];
+  /**
+   * 内置助手（契约 §13 / ADR-0015）使用的**客户端模型名**；为空 = 助手未接线。
+   *
+   * 刻意**不给默认值**：这个名字必须已在模型档案里建档并绑到上游 key，编一个默认值
+   * 只会让 `/api/assistant/chat` 每次都走一遍"选路失败"再回 503，把"没配"伪装成"配错了"。
+   * 为空时 server.ts 注入 `unwiredAssistantInvoker`，前端拿到的是一个说人话的终止帧
+   * （而不是挂到超时），启动日志里也有一条 warn 说明原因。
+   */
+  assistantModel: string | null;
 }
 
 /**
@@ -183,5 +192,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     maxAttempts: positiveIntFromEnv(env, 'MAX_ATTEMPTS', 3),
     maxConcurrencyPerKey: positiveIntFromEnv(env, 'MAX_CONCURRENCY_PER_KEY', 4),
     cooldownLadderSeconds: cooldownLadderFromEnv(env),
+    // 空串按"未配置"处理（同两把令牌的写法）：`ASSISTANT_MODEL=` 是部署脚本里最常见的
+    // "这一行先留着"写法，把它当成一个叫空字符串的模型名会让助手静默走 503。
+    assistantModel: (env['ASSISTANT_MODEL'] ?? '').trim() === '' ? null : (env['ASSISTANT_MODEL'] ?? '').trim(),
   };
 }

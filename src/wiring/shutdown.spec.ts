@@ -31,7 +31,9 @@ const MASTER_KEY_HEX = 'a7'.repeat(32);
 
 /**
  * 一条真实形状的用量记录。字段取"能落库"的最小合法组合：
- * 三个 id 传空串 —— 实现侧会把它转成 null（空串进库等于指向空主键的假外键）。
+ * 四个 id 传空串 —— 实现侧会把它转成 null（空串进库等于指向空主键的假外键）。
+ * `requestId` 也走同一条路：这条探针不是任何一次真实调用，本就该落 NULL
+ * （历史行 / 无关联行都是 NULL，契约 §6 / ADR-0014 §4）。
  */
 const ENTRY: UsageLogEntry = {
   groupId: '',

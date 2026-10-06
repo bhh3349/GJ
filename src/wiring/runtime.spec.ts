@@ -407,3 +407,123 @@ describe('/v1/models 与内部观测口', () => {
     assert.equal(h.runtime.store.poolSnapshot().upstreams[0]?.models?.length, 2);
   });
 });
+
+describe('错误事件：热路径 → 队列 → 落库（契约 §12.1 / ADR-0013 §7 / ADR-0014）', () => {
+  interface EventRow {
+    request_id: string | null;
+    severity: string;
+    category: string;
+    status: number;
+    gateway_code: string | null;
+    failure_reason: string | null;
+    endpoint: string;
+    model: string | null;
+    upstream_id: string | null;
+    key_id: string | null;
+    key_masked: string | null;
+    upstream_status: number | null;
+    attempts: number;
+    candidates: number | null;
+    message: string | null;
+  }
+
+  function eventRows(db: Db): EventRow[] {
+    return db
+      .prepare(
+        `SELECT request_id, severity, category, status, gateway_code, failure_reason, endpoint, model,
+                upstream_id, key_id, key_masked, upstream_status, attempts, candidates, message
+           FROM gateway_error_events ORDER BY ts, id`,
+      )
+      .all() as EventRow[];
+  }
+
+  it('被拒的请求：先只有队列、flush 后才落一行，且 request_id 与响应头同值', async () => {
+    const h = await setup();
+    // 不带 Authorization：鉴权在**读 body 之前**就拒了，这是最热的那条拒绝路径
+    const res = await h.runtime.app.inject({ method: 'POST', url: '/v1/chat/completions', payload: { model: 'gpt-4o', messages: [] } });
+
+    assert.equal(res.statusCode, 401);
+    assert.equal(eventRows(h.db).length, 0, '响应都回到客户端了，事件还只在内存队列里 —— 热路径不许同步落库');
+    assert.equal(h.runtime.errors.pending(), 1);
+    assert.equal(h.runtime.errors.dropped(), 0);
+
+    assert.equal(h.runtime.errors.flush(), 1);
+    const [row] = eventRows(h.db);
+    assert.ok(row);
+    assert.equal(row.gateway_code, 'INVALID_API_KEY');
+    assert.equal(row.category, 'AUTH_FAILED', '码值 → 分型由 sink 派生，网关不报 category');
+    assert.equal(row.severity, 'warn');
+    assert.equal(row.endpoint, '/v1/chat/completions');
+    assert.equal(row.model, null, '未通过鉴权的请求不该有往事件表里写字的能力');
+    assert.equal(row.key_id, null, '一次上游都没碰到');
+    assert.equal(row.upstream_id, null);
+    assert.equal(row.attempts, 0);
+    assert.equal(row.candidates, null, '没走到选路，"候选数"不适用');
+    assert.equal(row.upstream_status, null);
+    // 关联键端到端第五跳：调用方手上的回执 == 库里那一行的关联键（ADR-0014 §2）
+    assert.equal(row.request_id, res.headers['x-request-id']);
+    assert.ok(typeof row.request_id === 'string' && row.request_id.length >= 8);
+  });
+
+  it('上游全挂 → 502 一行：掩码 key、上游原始状态、尝试数都如实落库，且库里没有明文', async () => {
+    const h = await setup(() => jsonResponse({ error: { message: 'bad key' } }, 401));
+    assert.equal((await chat(h)).statusCode, 502);
+    h.runtime.errors.flush();
+
+    const [row] = eventRows(h.db);
+    assert.ok(row);
+    assert.equal(row.category, 'UPSTREAM_ERROR');
+    assert.equal(row.severity, 'error');
+    assert.equal(row.upstream_status, 401, '「502 里藏着 401」是值班最需要的那个数');
+    assert.equal(row.failure_reason, 'AUTH_INVALID');
+    assert.equal(row.attempts, 2);
+    assert.equal(row.candidates, 2);
+    assert.equal(row.key_id, null, '两把都试完了：没有"那把 key"可言');
+    assert.equal(row.upstream_id, null);
+    assert.ok(row.key_masked !== null && row.key_masked.startsWith('****'), `掩码列只能是 ****+后4位，实际 ${String(row.key_masked)}`);
+    assert.equal(row.model, 'gpt-4o');
+
+    // 明文纪律：整表 dump 里不许出现任何一把上游 key
+    const dump = JSON.stringify(eventRows(h.db));
+    assert.ok(!dump.includes(h.keyPlain1) && !dump.includes(h.keyPlain2), '事件表里出现上游 key 明文');
+  });
+
+  it('stop() 做最后一次 flush：退出前的存量事件不丢', async () => {
+    const h = await setup();
+    const res = await h.runtime.app.inject({ method: 'POST', url: '/v1/chat/completions', payload: { model: 'gpt-4o', messages: [] } });
+    assert.equal(res.statusCode, 401);
+    assert.equal(eventRows(h.db).length, 0);
+
+    await h.runtime.stop();
+    assert.equal(eventRows(h.db).length, 1, 'stop() 不 flush 的话，进程退出时最后一批事件就没了');
+  });
+
+  it('成功请求：flush 之后事件表仍是 0 行（它是稀疏的失败流，不是访问日志）', async () => {
+    const h = await setup();
+    assert.equal((await chat(h)).statusCode, 200);
+    h.runtime.errors.flush();
+    assert.equal(eventRows(h.db).length, 0);
+    assert.equal(h.runtime.errors.dropped(), 0);
+  });
+
+  it('成功请求：usage_logs.request_id == 响应头 == 发给上游的那个头（ADR-0014 §2 三跳同值）', async () => {
+    const h = await setup();
+    const inbound = 'req-abcde12345';
+    const res = await h.runtime.app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      headers: { ...auth(h), 'x-request-id': inbound },
+      payload: { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] },
+    });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.headers['x-request-id'], inbound, '入站合法的值原样回写 —— 调用方排障时手里就是它');
+    h.runtime.sink.flush();
+
+    const log = h.db.prepare('SELECT request_id FROM usage_logs').get() as { request_id: string | null };
+    assert.equal(log.request_id, inbound, '第二张表（用量）落的是同一个值，否则两表对不上账');
+    const [call] = h.calls;
+    assert.ok(call);
+    assert.equal(headerOf(call, 'x-request-id'), inbound, '上游也要收到同一个值：跨我们这层的调用链才对得起来');
+  });
+});

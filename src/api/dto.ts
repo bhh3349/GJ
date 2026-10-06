@@ -214,6 +214,8 @@ export interface TaskDto {
 export interface LogDto {
   id: string;
   ts: string;
+  /** 关联键（契约 §6「关联键 `x-request-id`」/ ADR-0014）。本列上线前的历史行为 `null` */
+  requestId: string | null;
   groupId: string | null;
   model: string | null;
   upstreamId: string | null;
@@ -273,6 +275,8 @@ export type GatewayErrorSeverity = 'warn' | 'error';
 export interface GatewayErrorEventDto {
   id: string;
   ts: string;
+  /** 关联键（契约 §6「关联键 `x-request-id`」/ ADR-0014）。本列上线前的历史行为 `null` */
+  requestId: string | null;
   severity: GatewayErrorSeverity;
   category: GatewayErrorCategory;
   /** 回给客户端的 HTTP 状态；客户端断开为 499（该值只存在于事件流，§10 未登记） */

@@ -22,6 +22,8 @@ import type { KeyConfig, PoolSnapshot } from './types.js';
 const GROUP: GroupContext = { groupId: 'grp_poll', name: '轮询回归', enabled: true, rpm: null, tpm: null, dailyQuota: null };
 const ROUNDS = 60;
 const MIN_SHARE = 0.1; // 验收 §九.1：每 key ≥10%
+/** 关联键（契约 §6 / ADR-0014）：引擎纯透传，此处给合法常量即可 */
+const REQUEST_ID = 'req-rotation-spec-01';
 
 function key(keyId: string, upstreamId: string, over: Partial<KeyConfig> = {}): KeyConfig {
   return {
@@ -66,7 +68,7 @@ async function pollDistribution(keys: KeyConfig[]): Promise<Map<string, number>>
 
   const hits = new Map<string, number>();
   for (let i = 0; i < ROUNDS; i += 1) {
-    const r = await engine.chatCompletions({ group: GROUP, model: 'gpt-4o-mini', body: { messages: [] }, stream: false });
+    const r = await engine.chatCompletions({ group: GROUP, model: 'gpt-4o-mini', body: { messages: [] }, stream: false, requestId: REQUEST_ID });
     if (r.kind !== 'json') throw new Error(`轮询场景不应出现错误响应：${JSON.stringify('kind' in r ? r.kind : r)}`);
     hits.set(r.keyId, (hits.get(r.keyId) ?? 0) + 1);
   }

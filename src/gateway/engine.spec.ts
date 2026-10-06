@@ -29,6 +29,13 @@ const decoder = new TextDecoder();
 
 const GROUP: GroupContext = { groupId: 'grp_1', name: '测试组', enabled: true, rpm: null, tpm: null, dailyQuota: null };
 
+/**
+ * 关联键（契约 §6 / ADR-0014）。引擎对它是**纯透传**：不生成、不校验、只往上游请求头
+ * 和两条出口上带。这里没有 HTTP 层，所以给个合法常量就够了 ——
+ * 真正的"入站取值 → 回写响应头 → 下传引擎"四处同值，在 `error-events.spec.ts` 里断言。
+ */
+const REQUEST_ID = 'req-engine-spec-0001';
+
 function keyConfig(keyId: string, upstreamId = 'up1', over: Partial<KeyConfig> = {}): KeyConfig {
   return {
     keyId,
@@ -190,7 +197,7 @@ function runtimeOf(pool: KeyPoolInternal, keyId: string) {
 describe('无可用 key', () => {
   it('返回 503 NO_AVAILABLE_KEY（OpenAI 错误体），且不发出任何上游请求', async () => {
     const h = makeHarness({ keys: [], steps: [] });
-    const result = (await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false })) as Extract<
+    const result = (await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID })) as Extract<
       ForwardResult,
       { kind: 'error' }
     >;
@@ -256,7 +263,7 @@ describe('0 真实尝试的分型（ADR-0011：不再合流成 502 UPSTREAM_ERRO
     const pool = stubPool([{ keyId: 'k1', upstreamId: 'up1', category: 'balance', weight: 1 }, { keyId: 'k2', upstreamId: 'up1', category: 'balance', weight: 1 }], () => false);
     const h = engineOver(pool, target, []);
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
     assert.equal(result.kind, 'error');
     if (result.kind !== 'error') return;
 
@@ -274,7 +281,7 @@ describe('0 真实尝试的分型（ADR-0011：不再合流成 502 UPSTREAM_ERRO
     const pool = stubPool([{ keyId: 'k1', upstreamId: 'up1', category: 'balance', weight: 1 }], () => true);
     const h = engineOver(pool, () => null, []);
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
     assert.equal(result.kind, 'error');
     if (result.kind !== 'error') return;
 
@@ -292,7 +299,7 @@ describe('0 真实尝试的分型（ADR-0011：不再合流成 502 UPSTREAM_ERRO
     );
     const h = engineOver(pool, (keyId) => (keyId === 'k1' ? null : target(keyId)), []);
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
     assert.equal(result.kind, 'error');
     if (result.kind !== 'error') return;
     assert.equal(result.error.httpStatus, 503);
@@ -309,7 +316,7 @@ describe('0 真实尝试的分型（ADR-0011：不再合流成 502 UPSTREAM_ERRO
     });
     for (let i = 0; i < 4; i += 1) assert.equal(h.pool.beginAttempt('k2'), true); // k1 失败后 k2 饱和
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
     assert.equal(result.kind, 'error');
     if (result.kind !== 'error') return;
     assert.equal(h.calls.length, 1);
@@ -333,7 +340,7 @@ describe('首字节前换 key（验收 2 / 7）', () => {
       ],
     });
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
     assert.equal(result.kind, 'json');
     if (result.kind !== 'json') return;
 
@@ -358,7 +365,7 @@ describe('首字节前换 key（验收 2 / 7）', () => {
       ],
     });
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
     assert.equal(result.kind, 'json');
     if (result.kind !== 'json') return;
 
@@ -375,7 +382,7 @@ describe('首字节前换 key（验收 2 / 7）', () => {
       maxAttempts: 2,
     });
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
     assert.equal(result.kind, 'error');
     assert.equal(h.calls.length, 2);
     if (result.kind !== 'error') return;
@@ -394,7 +401,7 @@ describe('首字节前换 key（验收 2 / 7）', () => {
       crossUpstreamRetry: false,
     });
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
     assert.equal(result.kind, 'error');
     assert.equal(h.calls.length, 1, '不许跨上游重试');
   });
@@ -423,7 +430,7 @@ describe('首字节前换 key（验收 2 / 7）', () => {
       upstreamTimeoutMs: 1,
     });
 
-    const result = await engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    const result = await engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
     assert.equal(result.kind, 'error');
     if (result.kind !== 'error') return;
     assert.equal(result.error.httpStatus, 504);
@@ -440,7 +447,7 @@ describe('只有五类失败换 key', () => {
       steps: [() => jsonResponse(upstreamBody, 400), () => jsonResponse({ should: 'not be reached' })],
     });
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
     assert.equal(h.calls.length, 1, '客户端错不换 key');
     assert.equal(result.kind, 'json');
     if (result.kind !== 'json') return;
@@ -460,7 +467,7 @@ describe('只有五类失败换 key', () => {
       keys: [keyConfig('k1')],
       steps: [() => jsonResponse({ error: { message: 'model not found' } }, 404)],
     });
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'nope', body: chatBody('nope'), stream: false });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'nope', body: chatBody('nope'), stream: false, requestId: REQUEST_ID });
     assert.equal(result.kind, 'json');
     assert.equal(runtimeOf(h.pool, 'k1').consecutiveFails, 0);
   });
@@ -471,7 +478,7 @@ describe('只有五类失败换 key', () => {
       steps: [() => textResponse('slow down', 429, { 'retry-after': '120' })],
     });
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
     assert.equal(result.kind, 'error');
     const k1 = runtimeOf(h.pool, 'k1');
     assert.equal(k1.lastFailureReason, 'RATE_LIMITED');
@@ -480,7 +487,7 @@ describe('只有五类失败换 key', () => {
 
   it('402 归类 INSUFFICIENT_BALANCE（长冷却）', async () => {
     const h = makeHarness({ keys: [keyConfig('k1')], steps: [() => textResponse('no balance', 402)] });
-    await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
     assert.equal(runtimeOf(h.pool, 'k1').lastFailureReason, 'INSUFFICIENT_BALANCE');
     assert.equal((runtimeOf(h.pool, 'k1').cooldownUntil ?? 0) - clock, 30 * 60_000);
   });
@@ -493,7 +500,7 @@ describe('非流式结算', () => {
       steps: [() => jsonResponse({ id: 'x', choices: [{ message: { content: 'hi' } }], usage: { prompt_tokens: 11, completion_tokens: 22, total_tokens: 33 } })],
     });
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
     assert.equal(result.kind, 'json');
     if (result.kind !== 'json') return;
 
@@ -517,7 +524,7 @@ describe('非流式结算', () => {
       steps: [() => jsonResponse({ choices: [{ message: { role: 'assistant', content: '一段中文回复' } }] })],
     });
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
     assert.equal(result.kind, 'json');
     if (result.kind !== 'json') return;
     assert.equal(result.usage.isEstimated, true);
@@ -532,7 +539,7 @@ describe('非流式结算', () => {
       aliases: { 'gpt-4o-mini': 'deepseek-chat' },
     });
 
-    await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o-mini', body: chatBody('gpt-4o-mini'), stream: false });
+    await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o-mini', body: chatBody('gpt-4o-mini'), stream: false, requestId: REQUEST_ID });
 
     const init = h.calls[0]?.init;
     assert.ok(init !== undefined);
@@ -547,7 +554,7 @@ describe('非流式结算', () => {
       keys: [keyConfig('k1')],
       steps: [() => jsonResponse({ choices: [], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } })],
     });
-    await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
 
     assert.equal(h.calls[0]?.url, 'https://up1.example.com/v1/chat/completions');
     const headers = h.calls[0]?.init.headers as Record<string, string>;
@@ -560,7 +567,7 @@ describe('流式透传', () => {
     const sse = controlledSse();
     const h = makeHarness({ keys: [keyConfig('k1')], steps: [() => sse.response] });
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o', true), stream: true });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o', true), stream: true, requestId: REQUEST_ID });
     assert.equal(result.kind, 'stream');
     if (result.kind !== 'stream') return;
 
@@ -590,7 +597,7 @@ describe('流式透传', () => {
       steps: [() => breakingSse('data: {"choices":[{"delta":{"content":"半句"}}]}\n\n'), () => jsonResponse({ should: 'not be reached' })],
     });
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o', true), stream: true });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o', true), stream: true, requestId: REQUEST_ID });
     assert.equal(result.kind, 'stream');
     if (result.kind !== 'stream') return;
 
@@ -635,7 +642,7 @@ describe('流式透传', () => {
         ],
       });
 
-      const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o', true), stream: true });
+      const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o', true), stream: true, requestId: REQUEST_ID });
       assert.equal(result.kind, 'stream');
       if (result.kind !== 'stream') return;
 
@@ -662,7 +669,7 @@ describe('流式透传', () => {
     const sse = controlledSse();
     const h = makeHarness({ keys: [keyConfig('k1')], steps: [() => sse.response] });
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o', true), stream: true });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o', true), stream: true, requestId: REQUEST_ID });
     assert.equal(result.kind, 'stream');
     if (result.kind !== 'stream') return;
 
@@ -688,7 +695,7 @@ describe('流式透传', () => {
       steps: [() => textResponse('bad key', 401), () => sse.response],
     });
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o', true), stream: true });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o', true), stream: true, requestId: REQUEST_ID });
     assert.equal(result.kind, 'stream');
     if (result.kind !== 'stream') return;
 
@@ -711,7 +718,7 @@ describe('并发与运行态', () => {
 
     for (let i = 0; i < 4; i += 1) assert.equal(h.pool.beginAttempt('k1'), true);
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
     assert.equal(result.kind, 'json');
     if (result.kind !== 'json') return;
 
@@ -729,7 +736,7 @@ describe('并发与运行态', () => {
       steps: [() => jsonResponse({ choices: [], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } })],
     });
 
-    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
     assert.equal(result.kind, 'json');
     if (result.kind !== 'json') return;
 
@@ -762,7 +769,7 @@ describe('并发与运行态', () => {
       now,
     });
 
-    const pending = engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, signal: controller.signal });
+    const pending = engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID, signal: controller.signal });
     controller.abort();
     const result = await pending;
 

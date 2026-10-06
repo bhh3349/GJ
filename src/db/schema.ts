@@ -134,6 +134,7 @@ CREATE INDEX IF NOT EXISTS idx_models_enabled ON models(enabled);
 CREATE TABLE IF NOT EXISTS usage_logs (
   id                TEXT PRIMARY KEY,
   ts                TEXT NOT NULL,
+  request_id        TEXT,                      -- 关联键（契约 §6 / ADR-0014）；本列上线前的历史行为 NULL
   group_id          TEXT,
   model             TEXT,
   upstream_id       TEXT,
@@ -153,6 +154,9 @@ CREATE TABLE IF NOT EXISTS usage_logs (
 CREATE INDEX IF NOT EXISTS idx_logs_ts ON usage_logs(ts);
 CREATE INDEX IF NOT EXISTS idx_logs_group_ts ON usage_logs(group_id, ts);
 CREATE INDEX IF NOT EXISTS idx_logs_upstream_ts ON usage_logs(upstream_id, ts);
+
+-- request_id 的索引**不在这里**建：老库的 usage_logs 没有这列，exec(DDL) 又跑在补列之前，
+-- 写在这儿会让每台老库在启动时直接抛。两处索引统一在 migrate() 的补列之后建，见那里的注释。
 
 CREATE TABLE IF NOT EXISTS tasks (
   id             TEXT PRIMARY KEY,
@@ -198,6 +202,7 @@ CREATE TABLE IF NOT EXISTS change_log (
 CREATE TABLE IF NOT EXISTS gateway_error_events (
   id              TEXT PRIMARY KEY,
   ts              TEXT NOT NULL,               -- 网关侧时刻，落库不重打
+  request_id      TEXT,                        -- 关联键（契约 §6 / ADR-0014）；同一次调用与 usage_logs 同值
   severity        TEXT NOT NULL CHECK (severity IN ('warn','error')),
   category        TEXT NOT NULL,               -- 9 值分型，契约 §12.1
   status          INTEGER NOT NULL,            -- 回给客户端的状态；客户端断开为 499
@@ -269,6 +274,27 @@ export function migrate(db: SqliteDatabase): void {
       db.exec('ALTER TABLE gateway_keys DROP COLUMN deleted_at');
     })();
   }
+
+  // v1.1.1：关联键 request_id（ADR-0014）。两张表各一列，**纯加列**，SCHEMA_VERSION 不递增。
+  //
+  // 判据同样用"列在不在"：老库两表都没这列 → 补；新库建表时已带 → 跳过。重复跑无副作用。
+  // 注意这里与 ADR-0013 那批的区别：那批是**纯加表**（只改 CREATE TABLE 文本就够），
+  // 这一批是给**既有表加列** —— 只改文本对已经在跑的库没有任何作用，必须真发 ALTER。
+  db.transaction(() => {
+    for (const table of ['usage_logs', 'gateway_error_events'] as const) {
+      if (!hasColumn(db, table, 'request_id')) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN request_id TEXT`);
+      }
+    }
+    // 索引必须建在补列**之后**：老库上这条语句在列还不存在时执行会直接抛，把启动一起带走。
+    // 放在循环之后也顺带覆盖新库（新库两列已在 CREATE TABLE 里，走不到 ALTER 那支）。
+    //
+    // 只建 (request_id) 单列索引，不跟 ts：这一列基数近似唯一（一次调用一个值），
+    // 点查命中 1 行日志 + 0..n 条事件，拿到的行少到不需要 ts 再切；
+    // 而 upstream_id / key_id 那种低基数列必须带 ts，否则一个 key 会拖出全表。
+    db.exec('CREATE INDEX IF NOT EXISTS idx_logs_request_id ON usage_logs(request_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_err_request_id ON gateway_error_events(request_id)');
+  })();
 
   const current = db.pragma('user_version', { simple: true }) as number;
   if (current < SCHEMA_VERSION) {

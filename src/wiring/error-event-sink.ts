@@ -144,6 +144,9 @@ export function createErrorEventSink(options: ErrorEventSinkOptions): BufferedEr
     const keyId = entry.keyId === '' ? null : entry.keyId;
     return {
       ts: entry.at,
+      // 关联键（契约 §6 / ADR-0014）。空串归一化放在仓储侧 `toParams`（那里是本表唯一写入口，
+      // 规则只需要存在一次）——这里原样透传，网关侧的必填 `string` 不会被中途改成别的形状。
+      requestId: entry.requestId,
       severity: deriveSeverity(category),
       category,
       status: entry.status,

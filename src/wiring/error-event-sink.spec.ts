@@ -43,6 +43,7 @@ function countRows(db: Db): number {
 function entry(over: Partial<ErrorEventEntry> = {}): ErrorEventEntry {
   return {
     at: '2026-10-06T00:00:00.000Z',
+    requestId: 'req-test-0001',
     status: 502,
     gatewayCode: 'UPSTREAM_ERROR',
     failureReason: 'UPSTREAM_ERROR',
@@ -290,6 +291,7 @@ describe('仓储层兜底', () => {
     const db = setup();
     const cred = 'gw-' + 'B'.repeat(24);
     appendGatewayErrorEvent(db, {
+      requestId: null,
       severity: 'error',
       category: 'INTERNAL',
       status: 500,

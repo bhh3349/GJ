@@ -37,6 +37,7 @@ const ENTRY: UsageLogEntry = {
   groupId: '',
   keyId: '',
   upstreamId: '',
+  requestId: '',
   model: 'gpt-shutdown-probe',
   clientModel: 'gpt-shutdown-probe',
   endpoint: '/v1/chat/completions',

@@ -70,6 +70,9 @@ export function createUsageLogSink(options: UsageSinkOptions): UsageSink {
     const keyId = entry.keyId === '' ? null : entry.keyId;
     return {
       ts: entry.at,
+      // 关联键（契约 §6 / ADR-0014）：空串按"没有"落 null，与下面 groupId/keyId/upstreamId
+      // 同一条「空串 = 无」约定。正常路径下 `resolveRequestId` 不产出空串，这里只是兜底。
+      requestId: entry.requestId === '' ? null : entry.requestId,
       groupId: entry.groupId === '' ? null : entry.groupId,
       // 落库的是**客户端请求的模型名**：管理端日志页按它筛选，
       // 用户搜自己发出去的名字才搜得到；上游真实名只用于金额换算。

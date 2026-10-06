@@ -45,6 +45,7 @@ function setup(): Db {
 function input(over: Partial<GatewayErrorEventInput> = {}): GatewayErrorEventInput {
   return {
     ts: '2026-10-06T00:00:00.000Z',
+    requestId: null,
     severity: 'error',
     category: 'UPSTREAM_ERROR',
     status: 502,

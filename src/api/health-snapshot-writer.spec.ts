@@ -69,6 +69,7 @@ describe('writeOnce', () => {
     const db = setup();
     appendUsageLog(db, {
       ts: new Date().toISOString(),
+      requestId: null,
       groupId: null,
       model: 'gpt-probe',
       upstreamId: null,

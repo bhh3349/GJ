@@ -7,6 +7,10 @@
 //   3. 建网关 runtime（这一步会同步建快照并解密 key），最后才 listen。
 //      反过来的话，存在一个窗口期：端口已对外，key 池还是空的 —— 那个窗口里进来的请求
 //      会拿到 503 NO_AVAILABLE_KEY，看起来像"池子坏了"。
+//   4. 管理面（buildApp）建在 gateway runtime **之后**：`/api/observability/health` 的
+//      `events.dropped` 读的就是网关侧错误事件队列的累计丢弃数（契约 §12.2），
+//      只有 runtime 先存在才接得上。接不上的后果不是报错，而是那个字段恒为 0 —— 一个
+//      "看起来一直没丢过事件"的假读数，比报错难发现得多。
 //
 // 两个监听、一份库：
 //   - 网关面（config.hostGateway:portGateway）跑 `/v1/*`，对外；
@@ -33,13 +37,23 @@ async function main(): Promise<void> {
   bootstrapAdmin(db, process.env);
 
   const loginLimiter = new LoginRateLimiter();
-  const app = buildApp({ db, config, logger: true, loginLimiter });
 
   // 网关 runtime 自带内存快照 + 明文缓存；`stop()` 负责最后一次用量落库、最后一次
   // key 运行态镜像（ADR-0010）与清明文 —— 都在 db.close() 之前，否则 flush 会写到已关的连接上
   const gateway = createGatewayRuntime({ db, config, logger: true });
   await mountGatewayRoutes(gateway);
   gateway.start();
+
+  // 管理面：`droppedEvents` 接到网关侧的事件队列上（见文件头第 4 条）。
+  // 只传一个取值函数而不是 sink 本身：管理面只需要那一个**累计数**，
+  // 拿到 sink 就等于拿到了往事件流里写的能力 —— 观测面不该有写入口。
+  const app = buildApp({
+    db,
+    config,
+    logger: true,
+    loginLimiter,
+    droppedEvents: () => gateway.errors.dropped(),
+  });
 
   // 维护任务一律 try/catch 吞掉异常：清垃圾失败不该把整台服务带走，
   // 下一次 tick 还会再来一遍。

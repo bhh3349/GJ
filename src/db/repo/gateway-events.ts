@@ -24,6 +24,7 @@ export const CLIENT_ABORTED_STATUS = 499;
 interface EventRow {
   id: string;
   ts: string;
+  request_id: string | null;
   severity: string;
   category: string;
   status: number;
@@ -46,6 +47,7 @@ function toDto(r: EventRow): GatewayErrorEventDto {
   return {
     id: r.id,
     ts: r.ts,
+    requestId: r.request_id,
     severity: r.severity as GatewayErrorSeverity,
     category: r.category as GatewayErrorCategory,
     status: r.status,
@@ -72,6 +74,11 @@ function toDto(r: EventRow): GatewayErrorEventDto {
 export interface GatewayErrorEventInput {
   /** 缺省取当前时刻。网关侧应显式传**网关侧时刻**，落库不重打 */
   ts?: string | undefined;
+  /**
+   * 关联键（契约 §6 / ADR-0014）。**必填**，与同一次调用的 `usage_logs.request_id` 同值。
+   * 空串按"没有"落 `NULL`（见 `toParams`），不要用空串表达"尚未接线"。
+   */
+  requestId: string | null;
   severity: GatewayErrorSeverity;
   category: GatewayErrorCategory;
   status: number;
@@ -92,15 +99,18 @@ export interface GatewayErrorEventInput {
 }
 
 const INSERT_SQL = `INSERT INTO gateway_error_events (
-  id, ts, severity, category, status, gateway_code, failure_reason, endpoint, model,
+  id, ts, request_id, severity, category, status, gateway_code, failure_reason, endpoint, model,
   upstream_id, key_id, key_masked, stream, upstream_status, attempts, candidates, latency_ms, message
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
 /** 入参 → 落库参数（含脱敏与掩码兜底）。批量写入与单条写入共用，防止两条路径口径分叉。 */
 function toParams(input: GatewayErrorEventInput): unknown[] {
   return [
     newId('errorEvent'),
     input.ts ?? nowIso(),
+    // 空串一律落 NULL。这里是本表**唯一写入口**，所以这条规则只需要存在一次：
+    // 库里不存空串 —— 空串看着像"有值"，会污染 `IS NULL` 的历史语义（见 ADR-0014 §4）。
+    input.requestId === '' ? null : input.requestId,
     input.severity,
     input.category,
     input.status,
@@ -150,6 +160,8 @@ export interface ListEventsQuery {
   upstreamId?: string | undefined;
   keyId?: string | undefined;
   model?: string | undefined;
+  /** 关联键精确匹配（契约 §6 / ADR-0014） */
+  requestId?: string | undefined;
   page: number;
   pageSize: number;
 }
@@ -187,6 +199,10 @@ function eventWhere(query: ListEventsQuery): { clause: string; params: unknown[]
   if (query.model !== undefined) {
     where.push('model = ?');
     params.push(query.model);
+  }
+  if (query.requestId !== undefined) {
+    where.push('request_id = ?');
+    params.push(query.requestId);
   }
 
   return { clause: where.length > 0 ? `WHERE ${where.join(' AND ')}` : '', params };

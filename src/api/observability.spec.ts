@@ -129,6 +129,7 @@ function bearer(token: string, extra: Record<string, string> = {}): Record<strin
 function event(over: Partial<GatewayErrorEventInput> = {}): GatewayErrorEventInput {
   return {
     ts: new Date(Date.now() - 60_000).toISOString(),
+    requestId: null,
     severity: 'error',
     category: 'UPSTREAM_ERROR',
     status: 502,

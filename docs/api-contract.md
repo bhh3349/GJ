@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.1.0**
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.1.1**
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -19,6 +19,8 @@
 > **v1.1.0（2026-10-06，M6-B 接口阶段）**：新增 **§12 运维观测** —— ①网关**错误事件**结构化 schema（`GatewayErrorEvent`，落表 `gateway_error_events`）；②**健康指标**口径与 **60s 健康快照**（落表 `gateway_health_snapshots`）；③**四个只读查询端点** `/api/observability/*`（结构化 JSON、机器可读、支持时间窗 + 分型 + 分页过滤）；④**只读维护令牌** `READONLY_TOKEN`（独立于管理员会话、与 `ADMIN_TOKEN` 互斥、作用域仅 `/api/observability/*` 的 GET）。**新增 4 端点 / 2 表 / 1 令牌；无字段改名、无字段删除、无类型变更、`ERROR_CODES` 零新增、§10 网关错误码表零新增** —— 事件里的 `category` / `severity` 是**事件分类维度**（给机器分组用），不是错误码，不进 `ERROR_CODES`。版本号由补遗序列（v1.0.1–v1.0.5）升为 **v1.1.0**：本节开的是一个**新面**（新命名空间 + 新鉴权主体），与前面几版"文本对齐实现"不是同一档次。动机与影响见 ADR-0013。
 >
 > **勘误（2026-10-06，不升版）**：§12.1 的 `keyMasked` 一栏原写「无"那一把 key"可言时为 `null`」，与实现不符 —— sink 侧一律写 `****`（4 位掩码的退化形态，与 `usage_logs.key_masked` 同约定）；"没有哪把具体 key"这个事实由 `keyId` 为 `null` 承担，不由 `keyMasked` 为 `null` 承担。纯文本对齐实现：无字段改名、无类型变更、无端点增删。同批把 `docs/adr/0013` §7 的端口签名块按已落地的 `ErrorEventEntry` 订正（初稿的 `GatewayErrorEventInput` / `ts` / `model` 与实现不符）。§12 其余内容不变。
+
+> **v1.1.1（2026-10-06，M6-B 接口阶段收口）**：补上**关联键 `x-request-id` 全链路透传**（冻结约束里早已写死、全仓尚未实现的那条缺口，PM 裁决"现在补、不留第二阶段"）。① §6 `GET /api/logs` 与 §12.1 `GatewayErrorEvent` 各新增**只读**字段 `requestId`（同键同值，`usage_logs` / `gateway_error_events` 各补一列），并新增同键精确匹配筛选位 `requestId`；② §6 新增「关联键 `x-request-id`」小节：入站缺失/非法/超长即重生成（白名单 `^[A-Za-z0-9._-]{8,64}$`）、响应头必回写、原样透传上游、落两表同值；③ §10 写明每个 `/v1/*` 请求都带该头（唯一的头侧新增要求）。**无字段改名、无字段删除、无类型变更、`ERROR_CODES` 零新增、§10 错误码表零新增** —— `requestId` 是**数据字段**（给"错误事件 ↔ 用量明细" join 用），不是错误码、不进 `ERROR_CODES`。动机与影响见 ADR-0014。
 
 ---
 
@@ -607,7 +609,7 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
 - `costCents` 保留（金额口径见上方「`costCents` 金额口径」）。**本轮不下线、不新增计费**。
 
 ### `GET /api/logs` — 调用记录
-`?from=&to=&groupId=&model=&status=&upstreamId=&keyId=&page=&pageSize=&includeDeleted=`（默认不查已软删资源；`includeDeleted=true` 时按 id 过滤仍可命中已软删的 upstream/key/group）
+`?from=&to=&groupId=&model=&status=&upstreamId=&keyId=&requestId=&page=&pageSize=&includeDeleted=`（默认不查已软删资源；`includeDeleted=true` 时按 id 过滤仍可命中已软删的 upstream/key/group；`requestId` 见下方「关联键」）
 
 ```json
 {
@@ -615,6 +617,7 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
     {
       "id": "log_88a1",
       "ts": "2026-10-06T09:11:58.000Z",
+      "requestId": "3f9a1c2e-7d4b-4a11-9c88-2b6f0e5d1a77",
       "groupId": "grp_2b91",
       "model": "deepseek-chat",
       "upstreamId": "up_7f3a",
@@ -631,6 +634,23 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
 }
 ```
 `keyMasked` 只 4 位。**日志里永远没有 key 明文、没有请求体明文里的 Authorization。**
+
+#### 关联键 `x-request-id`（全链路，v1.1.1 / ADR-0014）
+
+同一个客户端请求的**唯一关联键**。它把一次 `/v1/*` 调用在 `usage_logs`、`gateway_error_events` 与上游侧日志之间串成一条线——第二阶段的 AI 助手「读日志 → 定位问题」靠它，不靠时间窗 + 模型名猜。
+
+| 环节 | 规则 |
+|---|---|
+| 取值 | 请求进入时读 `x-request-id`；**缺失、非法或超长**一律重新生成。合法格式：`^[A-Za-z0-9._-]{8,64}$`（白名单字符，保证它能安全进响应头、进查询串、进日志文本） |
+| 回写 | 无论入站有没有，响应头**一定**带 `x-request-id` = 最终生效的那个值。调用方按回执排障，不靠猜 |
+| 透传 | 同一个值**原样**透传上游，上游自己的日志能对上 |
+| 落库 | `usage_logs.request_id` 与 `gateway_error_events.request_id` 各一列、同键同值。两表都可查：`GET /api/logs?requestId=`、`GET /api/observability/errors?requestId=` |
+| 热路径 | 生成/校验/回写全是 O(1) 内存操作，**不新增任何同步 DB 写**（§9） |
+
+- 入站值**不信任、也不报错**：只做格式白名单校验，不过就重新生成。一个坏 ID 不该让调用方的请求失败（对比 §0.4 的 400 只用于"参数不合法会导致结果不可信"）。
+- 非法判定含**超长与非法字符**：把任意长的入站串原样回写，等于替调用方污染响应头与日志列。
+- `request_id` ≠ `id`：`id` 是**记录行**的主键（一行日志一个），`request_id` 是**调用**的键——一次调用 = 1 行 `usage_logs` + 0..n 条 `gateway_error_events`。0 次真实尝试的终态（429 池饱和 / 503 密文不可解，见 §10）同样带 `requestId`，它们是**最需要定位**的那几条。
+- 历史行（本列上线前写入的）为 `NULL`，与前端的 `null` 渲染一致：**`null` 表示"当时还没有这个字段"，不表示"这次调用没有 ID"**。
 
 ### `GET /api/audit` — 审计（最小集）
 覆盖：**登录 / 登出 / 所有写操作**。
@@ -757,6 +777,7 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
 | `GET /internal/snapshot` | 本机观测 |
 
 - 错误体：`{ "error": { "message": "...", "type": "...", "code": "..." } }`。
+- 每个 `/v1/*` 请求都带 `x-request-id`：入站值合法则沿用、否则重新生成，并在**响应头**回写最终值；同一值原样透传上游，并落 `usage_logs` / `gateway_error_events` 的 `request_id` 列（口径见 §6「关联键」）。该头是本节的**唯一新增要求**，不动错误码表、不动错误体。
 
 **`/v1/*` 错误码登记表**（改动需同步 `src/gateway/errors.ts` 的 `GATEWAY_ERROR_CODES`）
 
@@ -811,6 +832,7 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
 |---|---|---|---|
 | `id` | string | ❌ | `err_` 前缀，不透明 |
 | `ts` | ISO8601 UTC | ❌ | 事件发生时刻，**网关侧时刻**，落库不重打 |
+| `requestId` | string \| null | ✅ | **关联键**（§6「关联键 `x-request-id`」）：与同一请求的 `usage_logs.request_id` 同值。池饱和 / 密文不可解这类 **0 次真实尝试**的终态同样带值——它们最需要定位。本列上线前的历史行为 `null` |
 | `severity` | `"warn"` \| `"error"` | ❌ | 由 `category` 决定（见下表），不由 HTTP 状态现推 |
 | `category` | 枚举 9 值 | ❌ | **事件分型**，见下表 |
 | `status` | int | ❌ | 最终回给客户端的 HTTP 状态；客户端断开写 `499`（该值只存在于事件流） |
@@ -921,12 +943,13 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
 |---|---|---|
 | `GET` | `/api/observability/health` | 健康指标（实时算，不读快照表） |
 | `GET` | `/api/observability/health/snapshots?from=&to=&page=&pageSize=` | 历史快照，`ts DESC, id DESC`；默认最近 **6h** |
-| `GET` | `/api/observability/errors?from=&to=&category=&severity=&upstreamId=&keyId=&model=&page=&pageSize=` | 错误事件查询，`ts DESC, id DESC`；默认最近 **1h** |
+| `GET` | `/api/observability/errors?from=&to=&category=&severity=&upstreamId=&keyId=&model=&requestId=&page=&pageSize=` | 错误事件查询，`ts DESC, id DESC`；默认最近 **1h** |
 | `GET` | `/api/observability/errors/:id` | 单条事件详情；未知 id → `404 NOT_FOUND` |
 
 - `from` / `to`：带时区 ISO8601（§0.2）。省略 `to` = 现在；`from`/`to` 全省略 = 该端点的默认窗口；跨度上限 **30 天**，超限 `400 INVALID_PARAM`（`details.field="from"`）。
 - `category` 支持**逗号分隔多值**（最多 9 个），任一不在 §12.1 枚举内 → `400 INVALID_PARAM`（`details.field="category"`）。
 - `severity`：单值，`warn` \| `error`。
+- `upstreamId` / `keyId` / `model` / `requestId`：单值精确匹配（`requestId` 见 §6「关联键」）。
 - 响应在 §0.3 分页信封之上**追加** `range: { from, to }`，回显**实际**生效的窗口（同 §6 回显降档后 `bucket` 的惯例：前端按回显渲染，不自算）。
 - 全部端点**只读**，无副作用、不写审计。
 
@@ -941,4 +964,4 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
 
 ---
 
-*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`。*
+*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`。*

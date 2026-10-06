@@ -23,6 +23,8 @@ interface LogsQuery {
   status?: number;
   upstreamId?: string;
   keyId?: string;
+  /** 关联键精确匹配（契约 §6「关联键 `x-request-id`」/ ADR-0014） */
+  requestId?: string;
   includeDeleted: boolean;
   page: number;
   pageSize: number;
@@ -46,6 +48,7 @@ export function registerMiscRoutes(app: FastifyInstance, ctx: ApiContext): void 
             status: { type: 'integer', minimum: 100, maximum: 599 },
             upstreamId: { type: 'string', maxLength: 64 },
             keyId: { type: 'string', maxLength: 64 },
+            requestId: { type: 'string', minLength: 8, maxLength: 64 },
             includeDeleted: includeDeletedProp,
           },
         },
@@ -69,6 +72,7 @@ export function registerMiscRoutes(app: FastifyInstance, ctx: ApiContext): void 
         status: req.query.status,
         upstreamId: req.query.upstreamId,
         keyId: req.query.keyId,
+        requestId: req.query.requestId,
         includeDeleted: req.query.includeDeleted,
         page: req.query.page,
         pageSize: req.query.pageSize,

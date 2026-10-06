@@ -97,6 +97,7 @@ function entry(over: Partial<UsageLogEntry> = {}): UsageLogEntry {
     attempts: 1,
     failureReason: null,
     at: '2026-10-06T12:00:00.000Z',
+    requestId: 'req-test-0001',
     ...over,
   };
 }

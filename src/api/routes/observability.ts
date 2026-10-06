@@ -63,6 +63,8 @@ interface ListQuery {
   upstreamId?: string;
   keyId?: string;
   model?: string;
+  /** 关联键精确匹配（契约 §6「关联键 `x-request-id`」/ ADR-0014） */
+  requestId?: string;
   page?: number;
   pageSize?: number;
 }
@@ -207,6 +209,7 @@ export function registerObservabilityRoutes(app: FastifyInstance, ctx: ApiContex
             upstreamId: { type: 'string', maxLength: 64 },
             keyId: { type: 'string', maxLength: 64 },
             model: { type: 'string', maxLength: 200 },
+            requestId: { type: 'string', minLength: 8, maxLength: 64 },
             ...pageProps,
           },
         },
@@ -222,6 +225,7 @@ export function registerObservabilityRoutes(app: FastifyInstance, ctx: ApiContex
         upstreamId: req.query.upstreamId,
         keyId: req.query.keyId,
         model: req.query.model,
+        requestId: req.query.requestId,
         page: req.query.page ?? 1,
         pageSize: req.query.pageSize ?? 20,
       });

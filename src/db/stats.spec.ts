@@ -40,6 +40,7 @@ function log(ts: string, model: string, tokens: Partial<UsageLogInput> & { promp
   const completionTokens = tokens.completionTokens ?? 0;
   return {
     ts,
+    requestId: null,
     groupId: null,
     model,
     upstreamId: null,

@@ -7,15 +7,26 @@
  *      再断就只能发 SSE 错误 + [DONE]，绝不重放（重放 = 客户端看到重复内容）。
  *   2. **只有五类失败换 key**：见 classify.ts。400/404/422 原样透传，不换、不计失败。
  *   3. **热路径零同步 DB 写**：本文件不 import 任何 db/api 模块；密钥走内存端口，
- *      日志走 `UsageLogSink.record()`（只入队，不 await）。
+ *      用量与错误事件走各自的 sink（`record()` 只入队，不 await）。
  *   4. **并发位必须 finally 释放**：成功/失败/客户端断开三条路径都要 `endAttempt`，
  *      漏一条会让 key 永久卡在满并发（表现为「池子还有 key 但选不出来」）。
  */
 
+import { REQUEST_ID_HEADER } from '../util/request-id.js';
 import type { KeyPoolInternal } from './key-pool.js';
 import { classifyUpstreamStatus, parseRetryAfter } from './classify.js';
 import { GatewayError, GATEWAY_ERROR_CODES, noAvailableKeyError, openAIError, poolMisconfiguredError, poolSaturatedError, upstreamError } from './errors.js';
-import type { GroupContext, ModelCatalog, ModelDescriptor, SecretResolver, UpstreamTarget, UsageLogEntry, UsageLogSink } from './ports.js';
+import type {
+  ErrorEventEntry,
+  ErrorEventSink,
+  GroupContext,
+  ModelCatalog,
+  ModelDescriptor,
+  SecretResolver,
+  UpstreamTarget,
+  UsageLogEntry,
+  UsageLogSink,
+} from './ports.js';
 import type { FailureReason, TokenUsage } from './types.js';
 import { createStreamUsageTracker, resolveUsage } from './usage.js';
 
@@ -27,6 +38,14 @@ export interface EngineOptions {
   secrets: SecretResolver;
   models: ModelCatalog;
   logs?: UsageLogSink;
+  /**
+   * 错误事件出口（契约 §12.1 / ADR-0013 §7）。
+   *
+   * 与 `logs` 的分工：用量是**每请求一条**，这里只在**失败终态**产一条。
+   * 只报事实（状态码 + §10 码值 + 尝试/候选数），分型与严重级由实现侧派生 ——
+   * 本文件不认识 category 这个概念，也就不会与契约漂移。
+   */
+  errors?: ErrorEventSink;
   fetchImpl?: FetchLike;
   now?: () => number;
   /** 单次调用最大尝试次数（含首次），默认 3；上限仍受候选 key 数约束 */
@@ -64,6 +83,14 @@ export interface ForwardRequest {
   model: string;
   body: Record<string, unknown>;
   stream: boolean;
+  /**
+   * 关联键（契约 §6 / ADR-0014）。**必填**：路由层在入站处 `resolveRequestId` 得到最终值，
+   * 引擎把它原样透传上游、并写进 `usage_logs` 与 `gateway_error_events` 两处出口。
+   *
+   * 引擎**不自己生成、也不校验**这个值（那是 `src/util/request-id.ts` 的唯一职责）——
+   * 这里只做一个搬运工，否则同一个请求会在两个地方各得一个 id。
+   */
+  requestId: string;
   signal?: AbortSignal;
 }
 
@@ -110,6 +137,7 @@ const decoder = new TextDecoder();
 
 export function createGatewayEngine(options: EngineOptions): GatewayEngine {
   const { pool, secrets, models, logs } = options;
+  const errors = options.errors;
   const doFetch: FetchLike = options.fetchImpl ?? ((input, init) => fetch(input, init));
   const now = options.now ?? Date.now;
   const maxAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
@@ -139,6 +167,73 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
     } catch {
       /* 记账钩子抛异常不得影响已完成的响应 */
     }
+  }
+
+  /**
+   * 失败事件的事实集合（契约 §12.1）。**缺省即「不知道」，不为了填满字段而编造** ——
+   * `upstreamStatus: null`（一次都没打到上游）与 `0` 是两件事，`keyId: ''`（没有某把 key
+   * 可言）与「有 key 但认不出哪把」也是两件事。
+   */
+  interface ErrorFacts {
+    failureReason?: FailureReason | null;
+    keyId?: string;
+    upstreamId?: string;
+    upstreamStatus?: number | null;
+    attempts?: number;
+    candidates?: number | null;
+  }
+
+  /**
+   * 产出一条错误事件。**唯一的产出点**，各失败终态只填事实。
+   *
+   * `status` / `gatewayCode` / `message` 取的是**同一份回给客户端的响应体**，
+   * 不是另算一遍 —— 事件与响应因此天然一致，不会出现"客户端看到 502、事件里记 504"。
+   *
+   * 客户端断开的 499 刻意传 `gatewayCode: null`：§10 里没有这个码（它只存在于事件流），
+   * 实现侧据状态码归入 `CLIENT_ABORTED`。编一个码出来会让调用方去 §10 表里找它。
+   */
+  function reportError(
+    req: ForwardRequest,
+    started: number,
+    outcome: { status: number; gatewayCode: string | null; message: string | null },
+    facts: ErrorFacts = {},
+  ): void {
+    if (errors === undefined) return;
+    const ts = now();
+    try {
+      const entry: ErrorEventEntry = {
+        at: new Date(ts).toISOString(),
+        status: outcome.status,
+        gatewayCode: outcome.gatewayCode,
+        failureReason: facts.failureReason ?? null,
+        endpoint: req.endpoint,
+        clientModel: req.model,
+        keyId: facts.keyId ?? '',
+        upstreamId: facts.upstreamId ?? '',
+        stream: req.stream,
+        upstreamStatus: facts.upstreamStatus ?? null,
+        attempts: facts.attempts ?? 0,
+        candidates: facts.candidates ?? null,
+        latencyMs: Math.max(0, ts - started),
+        // 关联键与同一次请求的 usage_logs 行同值（契约 §6）：0 次真实尝试的两条终态
+        // 上游侧毫无痕迹，这个键是唯一能把事件和那次调用对上的东西（ADR-0014 §3）。
+        requestId: req.requestId,
+        message: outcome.message,
+      };
+      errors.record(entry); // 只入队（端口契约：O(1)、不抛、不同步落库）
+    } catch {
+      /* 观测出口坏了不得连累转发 —— 与 emit/recordLog 同处置 */
+    }
+  }
+
+  /** `GatewayError` 形态的便捷重载：状态码/码值/文案全部取自即将回给客户端的那一份 */
+  function reportGatewayError(req: ForwardRequest, started: number, error: GatewayError, facts: ErrorFacts = {}): void {
+    reportError(
+      req,
+      started,
+      { status: error.httpStatus, gatewayCode: error.body.error.code, message: error.body.error.message },
+      facts,
+    );
   }
 
   function logAttempt(
@@ -171,6 +266,7 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
       latencyMs: now() - info.started,
       attempts: info.attempts,
       failureReason: info.failureReason,
+      requestId: req.requestId,
       at: new Date(now()).toISOString(),
     });
   }
@@ -179,7 +275,12 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
     const started = now();
     const candidates = await pool.getAvailableKeys(req.model);
     if (candidates.length === 0) {
-      return { kind: 'error', error: noAvailableKeyError(req.model), attempts: 0 };
+      const error = noAvailableKeyError(req.model);
+      // `attempts=0` + `candidates=0`：池里一把候选都没有（模型没建档 / 全被禁用）。
+      // 与下面的「候选存在但密文全解不出」**同一个 503**，但归因完全不同 —— 这两个数字
+      // 就是值班区分它们的地方（契约 §12.1），所以必须是真数出来的，不能是习惯性填的 0。
+      reportGatewayError(req, started, error, { attempts: 0, candidates: 0 });
+      return { kind: 'error', error, attempts: 0 };
     }
 
     const upstreamBody: Record<string, unknown> = { ...req.body, model: models.resolveUpstreamModel(req.model) };
@@ -225,7 +326,7 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
       try {
         response = await doFetch(joinUrl(target.baseUrl, req.upstreamPath), {
           method: 'POST',
-          headers: buildUpstreamHeaders(target),
+          headers: buildUpstreamHeaders(target, req.requestId),
           body: JSON.stringify(upstreamBody),
           signal: link.signal,
         });
@@ -237,11 +338,16 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
         if (req.signal?.aborted === true && !timedOut) {
           // 客户端自己断开 —— 不计失败、不换 key（换了也没人收）
           emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'skipped' });
-          return {
-            kind: 'error',
-            error: new GatewayError(499, GATEWAY_ERROR_CODES.UPSTREAM_ERROR, 'client closed request', 'api_error'),
-            attempts,
-          };
+          const aborted = new GatewayError(499, GATEWAY_ERROR_CODES.UPSTREAM_ERROR, 'client closed request', 'api_error');
+          // 记 keyId 是「当时正在打哪把」，不是「哪把坏了」：failureReason 留 null，
+          // 别让一次用户按 ESC 在事件流里读成一次 key 故障。
+          reportError(
+            req,
+            started,
+            { status: 499, gatewayCode: null, message: 'client closed request' },
+            { keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempts, candidates: candidates.length },
+          );
+          return { kind: 'error', error: aborted, attempts };
         }
 
         pool.reportFailure(candidate.keyId, 'NETWORK');
@@ -261,7 +367,12 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
 
         const reason = classifyUpstreamStatus(response.status);
         if (reason === null) {
-          // 客户端错（400/404/422…）：原样透传，不换 key、不计 key 失败
+          // 客户端错（400/404/422…）：原样透传，不换 key、不计 key 失败。
+          //
+          // **刻意不产错误事件**：网关这边一切正常（选路、转发、回传都成功了），
+          // 诊断信息是上游自己给的那份，原样在响应里。硬要记一条，就得为 4xx 编一个
+          // §10 里不存在的码（表里没有 422 这一行），编出来的码会污染事件流
+          // "码值 → 分型"的映射 —— 这是留给契约方决定的缺口，不在网关侧自行补位。
           emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'success', status: response.status, ttfbMs });
           logAttempt(req, {
             keyId: candidate.keyId,
@@ -320,6 +431,8 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
           started,
           ttfbMs,
           attempts,
+          candidates: candidates.length,
+          upstreamStatus: response.status,
         });
         emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'success', status: response.status, ttfbMs });
         return { kind: 'stream', status: 200, body, keyId: candidate.keyId, upstreamId: candidate.upstreamId, ttfbMs, attempts };
@@ -364,11 +477,17 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
       if (skippedSaturated > 0 && skippedUnresolvable === 0) {
         // 池饱和：所有候选并发槽位全满。上游没有任何故障，让客户端带 Retry-After 短退避。
         logAttempt(req, { keyId: '', upstreamId: '', statusCode: 429, usage: null, ttfbMs: now() - started, attempts, failureReason: null, started });
-        return { kind: 'error', error: poolSaturatedError(attemptableCandidates), attempts };
+        const error = poolSaturatedError(attemptableCandidates);
+        reportGatewayError(req, started, error, { attempts, candidates: candidates.length });
+        return { kind: 'error', error, attempts };
       }
       // 密文缺失/解析不到（可能叠加饱和）：配置侧异常，值班去查密文，不给客户端退避信号
       logAttempt(req, { keyId: '', upstreamId: '', statusCode: 503, usage: null, ttfbMs: now() - started, attempts, failureReason: null, started });
-      return { kind: 'error', error: poolMisconfiguredError(skippedUnresolvable, skippedSaturated), attempts };
+      const error = poolMisconfiguredError(skippedUnresolvable, skippedSaturated);
+      // 归因全在这两个数上：`attempts=0` + `candidates>0` 一眼指向配置/密文，
+      // 不用再去翻日志里那行「pool misconfigured」找线索（契约 §12.1）。
+      reportGatewayError(req, started, error, { attempts, candidates: candidates.length });
+      return { kind: 'error', error, attempts };
     }
 
     const detail =
@@ -380,6 +499,15 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
       lastTimedOut && lastReason === 'NETWORK'
         ? new GatewayError(504, GATEWAY_ERROR_CODES.UPSTREAM_TIMEOUT, `all ${attempts} attempt(s) timed out`, 'api_error')
         : upstreamError(`all ${attempts} attempt(s) failed: ${detail}`);
+    // 全试完了还是失败：没有"那把 key"可言（外键留空），但**最后一次**失败原因必须留下来 ——
+    // 排障时「502 里藏着 401」完全是另一种处置，靠 attempts + failureReason + upstreamStatus
+    // 三个数把三层口径都钉住（§12.1 那张"不可互相反推"的表就是为这一条写的）。
+    reportGatewayError(req, started, error, {
+      failureReason: lastReason,
+      attempts,
+      candidates: candidates.length,
+      upstreamStatus: lastStatus > 0 ? lastStatus : null,
+    });
     return { kind: 'error', error, attempts };
   }
 
@@ -396,6 +524,9 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
     started: number;
     ttfbMs: number;
     attempts: number;
+    candidates: number;
+    /** 上游在流中断前给出的状态（正常是 200）——「说好了 200 然后掉线」这件事本身是线索 */
+    upstreamStatus: number;
   }): ReadableStream<Uint8Array> {
     const tracker = createStreamUsageTracker();
     const reader = ctx.upstream.getReader();
@@ -431,12 +562,35 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
       if (kind === 'client-abort') {
         // 客户端断开：不计失败、不进冷却（否则用户一按 ESC 就把 key 打进冷却），只留痕
         streamLog(499, null, null);
+        // 高频正常现象，不是故障（§12.1 给它单独分型、severity=warn）。
+        // 与上面的 499 同一处置：`gatewayCode: null`，实现侧据状态码归入 CLIENT_ABORTED。
+        reportError(
+          ctx.req,
+          ctx.started,
+          { status: 499, gatewayCode: null, message: 'client closed request' },
+          { keyId: ctx.keyId, upstreamId: ctx.upstreamId, attempts: ctx.attempts, candidates: ctx.candidates },
+        );
         return;
       }
 
       // 流中途上游断：已写出首字节，不可换 key，按契约发错误帧收尾
       if (ctx.req.signal?.aborted !== true) pool.reportFailure(ctx.keyId, 'NETWORK');
       streamLog(502, null, 'NETWORK');
+      // 状态码与 usage_logs 保持一致（这里也是 502）：同一次故障在两个存储里
+      // 报出两个状态，排障时最难解释的就是这种不一致。
+      reportError(
+        ctx.req,
+        ctx.started,
+        { status: 502, gatewayCode: GATEWAY_ERROR_CODES.UPSTREAM_ERROR, message: 'upstream stream interrupted' },
+        {
+          failureReason: 'NETWORK',
+          keyId: ctx.keyId,
+          upstreamId: ctx.upstreamId,
+          upstreamStatus: ctx.upstreamStatus,
+          attempts: ctx.attempts,
+          candidates: ctx.candidates,
+        },
+      );
     };
 
     return new ReadableStream<Uint8Array>({
@@ -533,10 +687,14 @@ function linkedAbort(
   };
 }
 
-function buildUpstreamHeaders(target: UpstreamTarget): Record<string, string> {
+function buildUpstreamHeaders(target: UpstreamTarget, requestId: string): Record<string, string> {
   return {
     'content-type': 'application/json',
     accept: 'application/json, text/event-stream',
+    // 关联键原样透传上游（契约 §6）：上游自己的日志因此能和我们这两张表对上。
+    // 能原样发出去是因为它**已经过白名单校验**（`resolveRequestId`）——
+    // 任意 header 值直接透传是注入面，这里透传的是唯一一处集中校验过的值。
+    [REQUEST_ID_HEADER]: requestId,
     // ⚠️ key 明文全进程只出现在这一行；进日志/错误体一律禁止
     authorization: `Bearer ${target.apiKey}`,
   };

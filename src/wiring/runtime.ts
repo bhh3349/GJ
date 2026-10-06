@@ -28,6 +28,8 @@ import type { FetchLike } from '../gateway/engine.js';
 import { createGatewayStack } from '../gateway/stack.js';
 import type { GatewayStack } from '../gateway/stack.js';
 import { createDbGatewayAuth } from './auth.js';
+import { createErrorEventSink } from './error-event-sink.js';
+import type { BufferedErrorEventSink } from './error-event-sink.js';
 import { createKeyRuntimeFlusher } from './key-runtime-flusher.js';
 import type { KeyRuntimeFlusher } from './key-runtime-flusher.js';
 import { createGatewayStore } from './store.js';
@@ -57,6 +59,11 @@ export interface GatewayRuntime {
   stack: GatewayStack;
   store: GatewayStore;
   sink: UsageSink;
+  /**
+   * 错误事件出口（契约 §12.1 / ADR-0013）。`dropped()` 要经 `buildApp` 的 `droppedEvents`
+   * 接进 `/api/observability/health`，所以这里必须把实例**暴露出来**而不是藏在闭包里。
+   */
+  errors: BufferedErrorEventSink;
   /**
    * `key_runtime` 运行态镜像（ADR-0010）。管理端的 `?health=` 与健康灯读的就是它写的表 ——
    * 没有它，契约 §3 的四个字段恒为 healthy/0，看板上是假数据。
@@ -98,11 +105,28 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions): GatewayRun
     },
   });
 
+  // 错误事件出口（契约 §12.1）。掩码同样由 store 反查 —— 网关侧**拿不到掩码**，
+  // 也就无从把明文传进来（"不许传明文"从约定变成了类型上就传不进来）。
+  const errors = createErrorEventSink({
+    db,
+    maskOf: (keyId) => store.maskOf(keyId),
+    onError: (err, dropped) => {
+      app.log.error({ err, dropped }, '错误事件落库失败');
+    },
+    onOverflow: (dropped) => {
+      // 丢事件不许静默（契约 §12.1）：一个会悄悄丢观测数据的观测系统比没有更误导。
+      // 累计值由 `dropped()` 经 /api/observability/health 的 `events.dropped` 暴露；
+      // 这条日志给的是"什么时候开始丢的"，两者都要有。
+      app.log.warn({ dropped }, '错误事件队列溢出，已丢弃最旧的一批');
+    },
+  });
+
   const stack = createGatewayStack({
     secrets: store.secrets,
     models: store.catalog,
     auth: createDbGatewayAuth(db),
     logs: sink,
+    errors,
     maxAttempts: config.maxAttempts,
     poolOptions: {
       defaultMaxConcurrency: config.maxConcurrencyPerKey,
@@ -143,9 +167,12 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions): GatewayRun
     }
     // 顺序有意义：
     //   1. 先落用量（队列里最后一批是真实流量，丢了就是对账缺口）；
-    //   2. 再把最后一版运行态镜像写进 key_runtime（否则管理端停在上一拍，健康灯看着像卡住）；
-    //   3. 最后丢明文 —— 前两步都还在用池/库，明文缓存得活到最后。
+    //   2. 再落错误事件（同样是"在飞的那一批"，而且它的保留期比用量长，丢了不可回填）；
+    //   3. 再把最后一版运行态镜像写进 key_runtime（否则管理端停在上一拍，健康灯看着像卡住）；
+    //   4. 最后丢明文 —— 前三步都还在用池/库，明文缓存得活到最后。
+    // 四步都是同步 SQLite 写，必须全部排在 `shutdown.ts` 的 `db.close()` 之前（已冻结）。
     sink.close();
+    errors.close();
     mirror.close();
     store.secrets.clear();
     return Promise.resolve();
@@ -156,6 +183,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions): GatewayRun
     stack,
     store,
     sink,
+    errors,
     mirror,
 
     start(): void {

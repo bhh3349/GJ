@@ -27,6 +27,9 @@ import type { KeyConfig, PoolSnapshot } from './types.js';
 
 const GROUP: GroupContext = { groupId: 'grp_fault', name: '故障演练', enabled: true, rpm: null, tpm: null, dailyQuota: null };
 
+/** 关联键（契约 §6 / ADR-0014）：引擎纯透传，此处给合法常量即可 */
+const REQUEST_ID = 'req-fault-spec-0001';
+
 let clock = 1_700_000_000_000;
 const now = (): number => clock;
 
@@ -86,7 +89,7 @@ function runtimeOf(pool: KeyPoolInternal, keyId: string) {
   return rt;
 }
 
-const chat = (engine: ReturnType<typeof createGatewayEngine>) => engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: { messages: [] }, stream: false });
+const chat = (engine: ReturnType<typeof createGatewayEngine>) => engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: { messages: [] }, stream: false, requestId: REQUEST_ID });
 
 /** 百分位（linear interpolation） */
 function percentile(sorted: number[], p: number): number {

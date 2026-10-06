@@ -88,6 +88,13 @@ export interface UsageLogEntry {
   attempts: number;
   /** 失败原因（成功为 null） */
   failureReason: string | null;
+  /**
+   * 关联键（契约 §6「关联键 `x-request-id`」/ ADR-0014）。**必填**。
+   *
+   * 值来自同一次请求：入站头合法则沿用，否则在入站处重新生成（`src/util/request-id.ts`）。
+   * 必填是刻意的 —— 漏传在编译期就报错，而不是上线后静默写一列 NULL。
+   */
+  requestId: string;
   at: string; // ISO8601 UTC
 }
 
@@ -129,6 +136,13 @@ export interface ErrorEventEntry {
   /** 本次候选 key 数；不适用传 null */
   candidates: number | null;
   latencyMs: number | null;
+  /**
+   * 关联键（契约 §6 / ADR-0014）。**必填**，与同一请求的 `usage_logs.request_id` 同值。
+   *
+   * 0 次真实尝试的两条终态（`429` 池饱和 / `503` 密文不可解，ADR-0011）**同样要传** ——
+   * 那两条上游侧没有任何痕迹，这个键是唯一能把它们和产生它的那次调用对上的东西。
+   */
+  requestId: string;
   /**
    * 人类可读归因，可含上游原文。**实现侧负责脱敏与截断**（契约 §12.1），
    * 网关侧不要先自己抹 —— 两处都抹并不更安全，但两处规则不一致就会漏。

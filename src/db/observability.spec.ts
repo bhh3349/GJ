@@ -52,6 +52,7 @@ function setup(): { db: Db; dbPath: string } {
 function log(ts: string, latencyMs: number | null, status = 200): UsageLogInput {
   return {
     ts,
+    requestId: null,
     groupId: null,
     model: 'gpt-probe',
     upstreamId: null,
@@ -202,6 +203,7 @@ describe('computeHealthMetrics', () => {
     const { db } = setup();
     const base = {
       ts: agoIso(1000),
+      requestId: null,
       gatewayCode: 'UPSTREAM_ERROR',
       failureReason: 'UPSTREAM_ERROR',
       endpoint: '/v1/chat/completions',

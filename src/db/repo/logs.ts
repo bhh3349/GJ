@@ -11,6 +11,7 @@ import { newId } from '../ids.js';
 interface LogRow {
   id: string;
   ts: string;
+  request_id: string | null;
   group_id: string | null;
   model: string | null;
   upstream_id: string | null;
@@ -30,6 +31,7 @@ function toDto(r: LogRow): LogDto {
   return {
     id: r.id,
     ts: r.ts,
+    requestId: r.request_id,
     groupId: r.group_id,
     model: r.model,
     upstreamId: r.upstream_id,
@@ -51,6 +53,12 @@ function toDto(r: LogRow): LogDto {
 
 export interface UsageLogInput {
   ts?: string | undefined;
+  /**
+   * 关联键（契约 §6 / ADR-0014）。**必填**：写入方一定知道这个值（端口签名里也是必填），
+   * 让它必须显式写出来，比留个可选项、事后发现一列全是 NULL 便宜得多。
+   * 唯一合法的"没有"是 `null`（历史行 / 非网关来源），不是空串。
+   */
+  requestId: string | null;
   groupId: string | null;
   model: string | null;
   upstreamId: string | null;
@@ -78,13 +86,14 @@ export function appendUsageLog(db: Db, log: UsageLogInput): string {
   const id = newId('log');
   db.prepare(
     `INSERT INTO usage_logs (
-       id, ts, group_id, model, upstream_id, key_id, key_masked, status, error_code,
+       id, ts, request_id, group_id, model, upstream_id, key_id, key_masked, status, error_code,
        prompt_tokens, completion_tokens, total_tokens, is_estimated,
        latency_ms, ttfb_ms, stream, cost_cents
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     log.ts ?? nowIso(),
+    log.requestId,
     log.groupId,
     log.model,
     log.upstreamId,
@@ -112,6 +121,8 @@ export interface ListLogsQuery {
   status?: number | undefined;
   upstreamId?: string | undefined;
   keyId?: string | undefined;
+  /** 关联键精确匹配。见契约 §6：一次调用 → 1 行日志 + 0..n 条错误事件，两边同值 */
+  requestId?: string | undefined;
   includeDeleted: boolean;
   page: number;
   pageSize: number;
@@ -153,6 +164,10 @@ export function listLogs(db: Db, query: ListLogsQuery): Page<LogDto> {
     if (!query.includeDeleted) {
       where.push('key_id IN (SELECT id FROM upstream_keys WHERE deleted_at IS NULL)');
     }
+  }
+  if (query.requestId !== undefined) {
+    where.push('request_id = ?');
+    params.push(query.requestId);
   }
 
   const clause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';

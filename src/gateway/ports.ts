@@ -12,6 +12,8 @@
  * 只允许进 Authorization 头；禁止进日志、错误体、异常 message、任何落盘路径。
  */
 
+import type { FailureReason } from './types.js';
+
 /** 上游调用所需的全部材料（明文仅供本次出站请求使用） */
 export interface UpstreamTarget {
   upstreamId: string;
@@ -87,4 +89,49 @@ export interface UsageLogEntry {
   /** 失败原因（成功为 null） */
   failureReason: string | null;
   at: string; // ISO8601 UTC
+}
+
+/**
+ * 网关错误事件出口（契约 §12.1 / ADR-0013 §7）。签名由 ADR-0013 冻结。
+ *
+ * 与 `UsageLogSink` 的差别：用量是**每请求一条**，错误事件只在这条请求**失败**时产生，
+ * 所以它是稀疏的 —— 但热路径纪律一模一样：`record()` 只入队，不落库、不 await。
+ *
+ * `category`（分型）与 `severity` **刻意不由网关传**：它们由实现侧按契约 §12.1 的映射表
+ * 从 `gatewayCode` + `status` 派生。映射只有一个实现处，网关不需要理解分型概念，
+ * 也就不会与契约漂移 —— 这是本端口最省事也最不容易出错的一点。
+ */
+export interface ErrorEventSink {
+  record(entry: ErrorEventEntry): void;
+}
+
+export interface ErrorEventEntry {
+  /** ISO8601 UTC，**网关侧时刻**；落库不重打时间 */
+  at: string;
+  /** 回给客户端的 HTTP 状态；客户端中途断开写 499（只存在于事件流，契约 §12.1） */
+  status: number;
+  /** 契约 §10 的码；网关自身未预期异常传 null → 实现侧归入 INTERNAL */
+  gatewayCode: string | null;
+  /** 与 key_runtime.last_failure_reason 同一套枚举；未触达上游传 null */
+  failureReason: FailureReason | null;
+  endpoint: string;
+  /** 客户端请求的模型名；无模型概念（如 /v1/models）传 null */
+  clientModel: string | null;
+  /** 空串 = 「没有某把具体 key」可言（与 UsageLogEntry 同约定），实现侧转 null */
+  keyId: string;
+  /** 空串 = 同上 */
+  upstreamId: string;
+  stream: boolean;
+  /** 上游返回的原始状态码；一次都没打到上游传 null */
+  upstreamStatus: number | null;
+  /** **真实**上游尝试次数；0 = 一次都没发出去（配置/密文侧问题的判据） */
+  attempts: number;
+  /** 本次候选 key 数；不适用传 null */
+  candidates: number | null;
+  latencyMs: number | null;
+  /**
+   * 人类可读归因，可含上游原文。**实现侧负责脱敏与截断**（契约 §12.1），
+   * 网关侧不要先自己抹 —— 两处都抹并不更安全，但两处规则不一致就会漏。
+   */
+  message: string | null;
 }

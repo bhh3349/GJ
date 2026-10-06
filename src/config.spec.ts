@@ -85,6 +85,56 @@ describe('COOLDOWN_LADDER_SECONDS', () => {
   });
 });
 
+describe('READONLY_TOKEN（契约 §12.4 / ADR-0013）', () => {
+  it('缺省 / 空串 / 纯空白 → null（= 关闭，v1.0 语义原样）', () => {
+    assert.equal(loadConfig(env()).readonlyToken, null);
+    assert.equal(loadConfig(env({ READONLY_TOKEN: '' })).readonlyToken, null);
+    assert.equal(loadConfig(env({ READONLY_TOKEN: '   ' })).readonlyToken, null);
+  });
+
+  it('配了就原样带出（两侧空白去掉），与 ADMIN_TOKEN 互不隶属', () => {
+    assert.equal(loadConfig(env({ READONLY_TOKEN: ' ro-1 ' })).readonlyToken, 'ro-1');
+    const both = loadConfig(env({ ADMIN_TOKEN: 'ci-1', READONLY_TOKEN: 'ro-1' }));
+    assert.equal(both.adminToken, 'ci-1');
+    assert.equal(both.readonlyToken, 'ro-1');
+  });
+
+  /**
+   * 这条是本项存在的全部意义：两把令牌同值 = 隔离归零。
+   * 刻意选**拒绝启动**而不是"以管理员为准"——静默取其一，部署者会以为
+   * "观测令牌已经和会话隔离了"，而拿到观测令牌的人其实就是管理员。
+   * 与 MASTER_KEY 缺失即拒绝启动同款纪律：安全配置的错误不能降级成运行期行为差异。
+   */
+  it('与 ADMIN_TOKEN 同值 → 拒绝启动（不是静默取其一）', () => {
+    assert.throws(
+      () => loadConfig(env({ ADMIN_TOKEN: 'same-1', READONLY_TOKEN: 'same-1' })),
+      /READONLY_TOKEN/,
+    );
+    // 去空白之后才比较：`'same-1 '` 与 `'same-1'` 是同一把，不能因为空格绕过
+    assert.throws(() => loadConfig(env({ ADMIN_TOKEN: 'same-1', READONLY_TOKEN: ' same-1 ' })), /READONLY_TOKEN/);
+    // 只配一把时不触发（另一把是 null，谈不上"同值"）
+    assert.equal(loadConfig(env({ READONLY_TOKEN: 'same-1' })).readonlyToken, 'same-1');
+  });
+});
+
+describe('HEALTH_SNAPSHOT_RETENTION_DAYS', () => {
+  it('缺省 90 天（快照 60s 一条，量级远小于日志，给得比日志宽）', () => {
+    assert.equal(loadConfig(env()).healthSnapshotRetentionDays, 90);
+    assert.equal(loadConfig(env({ HEALTH_SNAPSHOT_RETENTION_DAYS: '' })).healthSnapshotRetentionDays, 90);
+    assert.equal(loadConfig(env({ HEALTH_SNAPSHOT_RETENTION_DAYS: '7' })).healthSnapshotRetentionDays, 7);
+  });
+
+  /**
+   * 0/负数会被读成"每次写入立刻清空历史"，而历史序列正是这个功能唯一的产品；
+   * 症状是"快照表一直是空的"，看不出是配置打错。按 positiveIntFromEnv 拒绝启动。
+   */
+  it('0 / 负数 / 非十进制字面量 → 拒绝启动（0 会让历史恒为空）', () => {
+    assert.throws(() => loadConfig(env({ HEALTH_SNAPSHOT_RETENTION_DAYS: '0' })), /HEALTH_SNAPSHOT_RETENTION_DAYS/);
+    assert.throws(() => loadConfig(env({ HEALTH_SNAPSHOT_RETENTION_DAYS: '-3' })), /HEALTH_SNAPSHOT_RETENTION_DAYS/);
+    assert.throws(() => loadConfig(env({ HEALTH_SNAPSHOT_RETENTION_DAYS: '1e2' })), /HEALTH_SNAPSHOT_RETENTION_DAYS/);
+  });
+});
+
 describe('其余项仍然 fail-fast', () => {
   it('MAX_CONCURRENCY_PER_KEY=0 拒绝启动（会让池子恒"已满"）', () => {
     assert.throws(() => loadConfig(env({ MAX_CONCURRENCY_PER_KEY: '0' })), /MAX_CONCURRENCY_PER_KEY/);

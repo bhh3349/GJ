@@ -14,6 +14,8 @@ const ID_PREFIX = {
   task: 'task',
   log: 'log',
   audit: 'aud',
+  errorEvent: 'err',
+  healthSnapshot: 'hs',
 } as const;
 
 export type IdKind = keyof typeof ID_PREFIX;

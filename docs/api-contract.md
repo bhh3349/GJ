@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.1.0**
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -15,6 +15,8 @@
 > **补遗 v1.0.4（2026-10-06）**：§10 错误码表按 **ADR-0011** 扩充两处**触发条件**（码值 / HTTP / `type` 全部不变）：① `RATE_LIMITED`(429) 增加「**网关池饱和**」触发路径（候选非空、0 次真实尝试、全候选并发已满），与用户组 RPM / TPM 超限共用码值；② `NO_AVAILABLE_KEY`(503) 增加「**候选存在但密文解不出**」的配置异常路径。同时写明 **429 一律带 `Retry-After`**，并明确「0 次真实尝试」**不得报 502**、不计入任何 key 的健康计数。无字段改名、无类型变更、无端点增删，`GATEWAY_ERROR_CODES` 无新增值。
 
 > **补遗 v1.0.5（2026-10-06）**：M6-A「余额查询与展示」契约落地。① §2 Upstream 对象新增**只读**字段 `balancePreset`（内置 preset 命中情况，未命中为 `null`）；② §2/§3 新增两个**自测端点** `POST /api/upstreams/:id/balance-template/test`、`POST /api/keys/:id/test-balance`，共用一个 `BalanceTestResult` 响应体，**同步执行、绝不写库**；③ §2 新增「余额查询解析顺序与失败引导」小节，定义三段解析顺序（用户模板 → 内置 preset → `skipped`）、`hintCode` / `hint` 两个**非破坏**引导字段（**不进 `ERROR_CODES`、不影响 HTTP 状态**）；④ §6 `/api/stats/usage` 每个点补 `promptTokens` / `completionTokens` / `estimatedTokens` 三个非破坏字段（token 维度，不带钱）。无字段改名、无字段删除、无类型变更、`ERROR_CODES` 零新增，`balanceQuery` 模板契约**未改动**。动机与影响见 ADR-0012。
+
+> **v1.1.0（2026-10-06，M6-B 接口阶段）**：新增 **§12 运维观测** —— ①网关**错误事件**结构化 schema（`GatewayErrorEvent`，落表 `gateway_error_events`）；②**健康指标**口径与 **60s 健康快照**（落表 `gateway_health_snapshots`）；③**四个只读查询端点** `/api/observability/*`（结构化 JSON、机器可读、支持时间窗 + 分型 + 分页过滤）；④**只读维护令牌** `READONLY_TOKEN`（独立于管理员会话、与 `ADMIN_TOKEN` 互斥、作用域仅 `/api/observability/*` 的 GET）。**新增 4 端点 / 2 表 / 1 令牌；无字段改名、无字段删除、无类型变更、`ERROR_CODES` 零新增、§10 网关错误码表零新增** —— 事件里的 `category` / `severity` 是**事件分类维度**（给机器分组用），不是错误码，不进 `ERROR_CODES`。版本号由补遗序列（v1.0.1–v1.0.5）升为 **v1.1.0**：本节开的是一个**新面**（新命名空间 + 新鉴权主体），与前面几版"文本对齐实现"不是同一档次。动机与影响见 ADR-0013。
 
 ---
 
@@ -74,6 +76,7 @@
 - `/api/*` **除 `POST /api/auth/login` 外全量鉴权**，无白名单例外。
 - 写请求（`POST/PUT/PATCH/DELETE`）CSRF 校验顺序固定：`Origin` → `Sec-Fetch-Site`（缺失则跳过）→ `X-Requested-With`。不过则 403 `CSRF_REJECTED`。
 - `ADMIN_TOKEN` 仅作 CI 机器令牌，走 `Authorization: Bearer <ADMIN_TOKEN>`，**不参与浏览器流程**，默认关闭。
+- `READONLY_TOKEN`（v1.1.0 新增）是**只读维护令牌**：同一套 `Authorization: Bearer` 形式，但**作用域只有 `GET /api/observability/*`**，落在别的路径或用了写方法一律 `403 FORBIDDEN`。它**不等于**管理员会话、也不等于 `ADMIN_TOKEN`；未配置即关闭；两者配成同一个值会在启动时被拒。详见 §12.4。
 
 ---
 
@@ -788,4 +791,152 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
 
 ---
 
-*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。*
+## 12. 运维观测 `/api/observability/*`（v1.1.0）
+
+本节是**只读观测面**的唯一事实源：网关把「错误事件」与「健康指标快照」落结构化存储，管理面提供机器可读的查询接口。服务的两个消费者是**排障的人**与**内嵌 AI 助手**（第二阶段，只读分析 + 给建议）。三条纪律贯穿全节：
+
+1. **只读** —— 本节所有端点不接受任何写方法；观测面不产生副作用。
+2. **鉴权** —— 除管理员会话外，可配一把**独立只读维护令牌**（§12.4），作用域仅本节。
+3. **脱敏** —— 落盘前抹掉一切 key 明文；事件里只有 `keyId` 与 `****后4位`。
+
+### 12.1 错误事件 `GatewayErrorEvent`
+
+**定义**：网关处理 `/v1/*` 时，**一次被拒或一次失败**产生一条事件。成功请求不产生事件（成功量在 §6 `usage_logs` 里）。
+
+落表 `gateway_error_events`（纯加表，`SCHEMA_VERSION` 不变）。
+
+| 字段 | 类型 | 可空 | 说明 |
+|---|---|---|---|
+| `id` | string | ❌ | `err_` 前缀，不透明 |
+| `ts` | ISO8601 UTC | ❌ | 事件发生时刻，**网关侧时刻**，落库不重打 |
+| `severity` | `"warn"` \| `"error"` | ❌ | 由 `category` 决定（见下表），不由 HTTP 状态现推 |
+| `category` | 枚举 9 值 | ❌ | **事件分型**，见下表 |
+| `status` | int | ❌ | 最终回给客户端的 HTTP 状态；客户端断开写 `499`（该值只存在于事件流） |
+| `gatewayCode` | string \| null | ✅ | §10 `GATEWAY_ERROR_CODES` 里的码 |
+| `failureReason` | 5 类枚举 \| null | ✅ | 与 §3 `lastFailureReason` **同一套枚举**；未触达上游为 `null` |
+| `endpoint` | string | ❌ | 如 `/v1/chat/completions` |
+| `model` | string \| null | ✅ | **客户端请求的模型名**（非凭据），与 §6 日志同口径 |
+| `upstreamId` | string \| null | ✅ | 抹名引用：只记 id，不记 baseUrl / 上游名 |
+| `keyId` | string \| null | ✅ | 抹名引用：只记 id |
+| `keyMasked` | string \| null | ✅ | `****后4位`，**永不出现明文**；无"那一把 key"可言时为 `null` |
+| `stream` | bool | ❌ | |
+| `upstreamStatus` | int \| null | ✅ | 上游返回的原始状态码；一次都没打到上游为 `null` |
+| `attempts` | int | ❌ | **真实**上游尝试次数（`0` = 一次都没发出去） |
+| `candidates` | int \| null | ✅ | 本次候选 key 数（`NO_AVAILABLE_KEY` 时为 `0`） |
+| `latencyMs` | int \| null | ✅ | 自请求进入到产事件的耗时 |
+| `message` | string \| null | ✅ | 人类可读归因。**落盘前脱敏 + 截断 512 字符** |
+
+#### `category` 分型表（唯一判据）
+
+| `category` | `severity` | HTTP | 对应 §10 码 | 排障含义 |
+|---|---|---|---|---|
+| `CLIENT_REQUEST` | `warn` | 400 / 404 / 501 | `INVALID_REQUEST` / `NOT_FOUND` / `UNSUPPORTED_ENDPOINT` | 调用方写错，**不是网关问题** |
+| `AUTH_FAILED` | `warn` | 401 | `INVALID_API_KEY` | 网关 key 缺失 / 未知 / 已吊销 |
+| `RATE_LIMITED` | `warn` | 429 | `RATE_LIMITED`（含池饱和，ADR-0011） | 退避后可重试 |
+| `QUOTA_EXCEEDED` | `warn` | 429 | `QUOTA_EXCEEDED` | 用户组日配额用尽 |
+| `NO_AVAILABLE_KEY` | `error` | 503 | `NO_AVAILABLE_KEY` | 查池子与模型档案（候选为空的**或**密文解不出的） |
+| `UPSTREAM_ERROR` | `error` | 502 | `UPSTREAM_ERROR` | 候选存在但用尽 → 查上游 |
+| `UPSTREAM_TIMEOUT` | `error` | 504 | `UPSTREAM_TIMEOUT` | 上游首字节超时 |
+| `CLIENT_ABORTED` | `warn` | 499（内部） | 引擎内部 `499` | 调用方中途断开；**仅存在于事件流**，真实响应里没有这个状态，§10 也未登记 |
+| `INTERNAL` | `error` | 500 | 网关自身未预期异常 | 网关自己的问题 |
+
+`severity` 的分界是**归因侧**，不是"HTTP 是不是 >= 500"：429 与 502 都是失败，但一个在调用方/配额侧（`warn`）、一个在系统侧（`error`）。助手与值班按 `severity` 先分诊、再按 `category` 定位。
+
+#### 三层口径不可互相替代（下游最容易搞错的一处）
+
+| 字段 | 是什么 | 谁在用 |
+|---|---|---|
+| `category` | **事件分型**（9 值，本节定义） | 机器聚合、助手分诊 |
+| `gatewayCode` | **面向调用方**的错误码（§10 表） | 客户端按它分支 |
+| `failureReason` | **计入 key 失败**的 5 类（决定冷却） | 池健康、冷却阶梯 |
+
+一次 `UPSTREAM_ERROR` 事件里三者可能分别是 `UPSTREAM_ERROR` / `UPSTREAM_ERROR` / `AUTH_INVALID`（三把候选 key 全 401、用尽后报 502）—— 这是**正确**的，不是数据不一致。反过来说：**任何一方都别指望用另一个字段反推**。
+
+#### 写入纪律
+
+- 网关侧只做**入队**（O(1) 内存操作），落库由定时批量完成 —— **热路径零同步 DB 写**（§9）。
+- 队列有上限；溢出时丢**最旧**的一批并计数，累计丢弃数由 `/api/observability/health` 的 `events.dropped` 暴露。**丢事件不许静默**。
+- **落盘前脱敏**：`keyMasked` 只有 4 位；`message` 过 scrub（`Bearer <token>` / `sk-…` / `gw-…` 形状一律替换成 `****`）并截断 512 字符。明文 key 不进事件、不进日志、不进错误体。
+- 保留期与 `usage_logs` 同口径（`LOG_RETENTION_DAYS`，默认 30 天）。
+
+### 12.2 健康指标 `GET /api/observability/health`
+
+`?window=60s|5m|1h`（默认 `5m`，上限 24h，与 §6 `/api/stats/overview` 同一条解析规则，回显归一化后的原字符串）。
+
+```json
+{
+  "generatedAt": "2026-10-06T09:12:00.000Z",
+  "window": "5m",
+  "uptimeSec": 86412,
+  "startedAt": "2026-10-05T09:11:48.000Z",
+  "traffic": {
+    "qps": 3.42,
+    "successRate": 0.9941,
+    "requests": 1024,
+    "errors": 6,
+    "tokens": { "prompt": 120000, "completion": 34000, "total": 154000 },
+    "latencyMs": { "p50": 640, "p99": 5120, "samples": 1018 }
+  },
+  "keys": {
+    "total": 8, "healthy": 6, "cooling": 1, "disabled": 1,
+    "items": [
+      { "keyId": "key_9c21", "maskedKey": "****a1b2", "upstreamId": "up_7f3a", "health": "healthy", "cooldownUntil": null, "consecutiveFailures": 0 }
+    ]
+  },
+  "db": { "ok": true, "schemaVersion": 2, "fileSizeBytes": 2883584, "walSizeBytes": 40960, "queryMs": 1 },
+  "events": {
+    "total": 12,
+    "dropped": 0,
+    "byCategory": [
+      { "category": "UPSTREAM_ERROR", "severity": "error", "count": 4, "lastAt": "2026-10-06T09:11:02.000Z" }
+    ]
+  }
+}
+```
+
+| 字段 | 口径 |
+|---|---|
+| `uptimeSec` / `startedAt` | 服务进程已运行时长（`process.uptime()`）。网关面与管理面在同一进程内，所以这一条即"服务启动了多久" |
+| `traffic.*` | 与 §6 `overview` **同一份 SQL、同一口径**；`requests=0` 时 `successRate=1` 是约定而非断言，前端仍必须显示"无流量" |
+| `traffic.latencyMs` | `usage_logs.latency_ms` 的**最近秩**分位（nearest-rank，不做插值）：`p50` 取第 `ceil(0.5n)` 小、`p99` 取第 `ceil(0.99n)` 小的样本。`samples` 是参与计算的样本数；`samples=0` 时两个分位是 `null`（**不是 0**） |
+| `keys.*` | 与 §3 Key 的 `health` / `cooldownUntil` / `consecutiveFailures` 同源（`key_runtime` 表，新鲜度 ≤1s，ADR-0010） |
+| `db.ok` | **真跑一次** `SELECT 1` 的结果，不是"连接对象还在"。`queryMs` 是这次探测的耗时 |
+| `db.fileSizeBytes` / `walSizeBytes` | 取不到为 `null`（如 `:memory:` 库）。**不返回库文件路径** —— 路径是部署细节，不进 API |
+| `events.total` | 窗口内事件条数 |
+| `events.byCategory` | 只列**出现过**的分型，**不补 0**。与 §6 时间轴补 0 不同：这里没有"时间轴完整性"约束，补 0 只会让响应变长、并掩盖"从没发生过" |
+| `events.dropped` | 进程启动以来因队列溢出 / 落库失败**累计丢弃**的事件条数（不是窗口内） |
+
+#### 健康快照（`gateway_health_snapshots`）
+
+每 **60s** 落一条：`ts` / `windowSec` / `qps` / `successRate` / `requests` / `errors` / `p50Ms` / `p99Ms` / `keyTotal` / `keyHealthy` / `keyCooling` / `keyDisabled` / `dbOk` / `errorCount`。
+
+- 快照是**当时算出来的历史**，不允许事后重算：`usage_logs` 会被保留期裁掉，重算会得到另一种历史 —— 那正是"看起来合理的假数据"。
+- 写入发生在管理进程内、单写者、**不在 `/v1/*` 热路径**上（§5）。
+
+### 12.3 端点
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/observability/health` | 健康指标（实时算，不读快照表） |
+| `GET` | `/api/observability/health/snapshots?from=&to=&page=&pageSize=` | 历史快照，`ts DESC, id DESC`；默认最近 **6h** |
+| `GET` | `/api/observability/errors?from=&to=&category=&severity=&upstreamId=&keyId=&model=&page=&pageSize=` | 错误事件查询，`ts DESC, id DESC`；默认最近 **1h** |
+| `GET` | `/api/observability/errors/:id` | 单条事件详情；未知 id → `404 NOT_FOUND` |
+
+- `from` / `to`：带时区 ISO8601（§0.2）。省略 `to` = 现在；`from`/`to` 全省略 = 该端点的默认窗口；跨度上限 **30 天**，超限 `400 INVALID_PARAM`（`details.field="from"`）。
+- `category` 支持**逗号分隔多值**（最多 9 个），任一不在 §12.1 枚举内 → `400 INVALID_PARAM`（`details.field="category"`）。
+- `severity`：单值，`warn` \| `error`。
+- 响应在 §0.3 分页信封之上**追加** `range: { from, to }`，回显**实际**生效的窗口（同 §6 回显降档后 `bucket` 的惯例：前端按回显渲染，不自算）。
+- 全部端点**只读**，无副作用、不写审计。
+
+### 12.4 只读维护令牌
+
+- 配置：`READONLY_TOKEN`（env）。空 = **关闭**（默认）。与 `ADMIN_TOKEN` 配成同一个值 → **启动即拒绝**，理由见下。
+- 用法：`Authorization: Bearer <READONLY_TOKEN>`。命中后主体为 `readonly`。
+- **作用域：仅 `GET /api/observability/*`**。落在别的路径 → `403 FORBIDDEN`；任何写方法 → `403 FORBIDDEN`。不做"是 GET 就放行整个管理面"的宽口径 —— 观测令牌能读的只有观测面。
+- 令牌**不进任何响应体、不进日志**。轮换 = 改 env 后重启（本版不做热轮换，"可随时换值"即满足轮换需求）。
+- 隔离为什么是硬约束：这把令牌的持有者是内置助手/值班脚本，它的泄露不该等于管理员会话泄露；反之管理员会话也不该被降格成观测令牌。**两把令牌同值 = 隔离归零**，所以宁可启动失败，也不静默接受一份看起来配好了、实际没有隔离的配置。
+- 未带令牌时一切照旧：`/api/*` 仍由会话 Cookie 把关（§0.5），本节端点对管理员会话**同样开放**（画师的控制台与助手共用同一份响应体）。
+
+---
+
+*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`。*

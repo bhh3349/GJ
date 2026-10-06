@@ -202,6 +202,37 @@ export function listKeyHealth(
   }));
 }
 
+/**
+ * 观测面（契约 §12.2）用的 key 健康明细。比 `listKeyHealth` 多一个 `consecutiveFailures`。
+ *
+ * 又是一个「形状不同就另开一个函数」的例子（同 `listLiveKeyStates` 的理由）：
+ * `/api/stats/overview` 的 keyHealth 项已冻结成 5 个字段，
+ * 给它加可选字段会让人以为是"同一个东西的可选形态"，而这两份契约是各自冻结的。
+ * WHERE 与 SELECT_BASE 与另外两处逐字一致 —— 同一批 key 的三个视角，
+ * 任何一处漏掉软删过滤，仪表盘就会多出几盏"看不见的 key"。
+ */
+export function listKeyHealthDetail(db: Db): {
+  keyId: string;
+  maskedKey: string;
+  upstreamId: string;
+  health: KeyHealth;
+  cooldownUntil: string | null;
+  consecutiveFailures: number;
+}[] {
+  const rows = db
+    .prepare(`${SELECT_BASE} WHERE k.deleted_at IS NULL ORDER BY k.created_at, k.id`)
+    .all() as KeyRow[];
+  const ctx = nowContext();
+  return rows.map((r) => ({
+    keyId: r.id,
+    maskedKey: r.masked_key,
+    upstreamId: r.upstream_id,
+    health: deriveHealth(r, ctx.nowMs),
+    cooldownUntil: r.rt_cooldown,
+    consecutiveFailures: r.rt_fails ?? 0,
+  }));
+}
+
 export interface LiveKeyState {
   keyId: string;
   maskedKey: string;

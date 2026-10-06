@@ -243,3 +243,141 @@ export interface SessionDto {
   username: string;
   expiresAt: string;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 契约 §12 运维观测（v1.1.0）
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 契约 §12.1 错误事件**分型**（9 值）。
+ *
+ * 这是本模块最容易踩的坑，所以写在类型注释里：它**不是错误码**。
+ * 面向调用方的码在 §10 `GATEWAY_ERROR_CODES`（`gatewayCode` 字段），
+ * 计入 key 失败的 5 类在 `FailureReasonCode`（`failureReason` 字段）。
+ * 三者可以不同且都正确 —— 见契约 §12.1「三层口径不可互相替代」。
+ */
+export type GatewayErrorCategory =
+  | 'CLIENT_REQUEST'
+  | 'AUTH_FAILED'
+  | 'RATE_LIMITED'
+  | 'QUOTA_EXCEEDED'
+  | 'NO_AVAILABLE_KEY'
+  | 'UPSTREAM_ERROR'
+  | 'UPSTREAM_TIMEOUT'
+  | 'CLIENT_ABORTED'
+  | 'INTERNAL';
+
+export type GatewayErrorSeverity = 'warn' | 'error';
+
+/** 契约 §12.1 网关错误事件 */
+export interface GatewayErrorEventDto {
+  id: string;
+  ts: string;
+  severity: GatewayErrorSeverity;
+  category: GatewayErrorCategory;
+  /** 回给客户端的 HTTP 状态；客户端断开为 499（该值只存在于事件流，§10 未登记） */
+  status: number;
+  gatewayCode: string | null;
+  failureReason: FailureReasonCode | null;
+  endpoint: string;
+  model: string | null;
+  upstreamId: string | null;
+  keyId: string | null;
+  /** 永远只有 ****后4位；`null` = 这次失败与某把具体 key 无关 */
+  keyMasked: string | null;
+  stream: boolean;
+  upstreamStatus: number | null;
+  /** 真实上游尝试次数；`0` = 一次都没发出去（配置/密文侧问题的判据） */
+  attempts: number;
+  candidates: number | null;
+  latencyMs: number | null;
+  /** 已 scrub + 截断 512 字符 */
+  message: string | null;
+}
+
+/** 契约 §12.2 延迟分位。`samples=0` 时两个分位是 `null`（未知 != 0）。 */
+export interface LatencyPercentilesDto {
+  p50: number | null;
+  p99: number | null;
+  samples: number;
+}
+
+/** 契约 §12.2 窗口流量指标。与 §6 `overview` 同一份 SQL、同一口径。 */
+export interface HealthTrafficDto {
+  qps: number;
+  successRate: number;
+  requests: number;
+  errors: number;
+  tokens: { prompt: number; completion: number; total: number };
+  latencyMs: LatencyPercentilesDto;
+}
+
+/** 契约 §12.2 key 健康总览 */
+export interface HealthKeysDto {
+  total: number;
+  healthy: number;
+  cooling: number;
+  disabled: number;
+  items: {
+    keyId: string;
+    maskedKey: string;
+    upstreamId: string;
+    health: KeyHealth;
+    cooldownUntil: string | null;
+    consecutiveFailures: number;
+  }[];
+}
+
+/** 契约 §12.2 DB 状态。**不返回库文件路径** —— 那是部署细节。 */
+export interface HealthDbDto {
+  /** 真跑一次 `SELECT 1` 的结果，不是"连接对象还在" */
+  ok: boolean;
+  schemaVersion: number;
+  fileSizeBytes: number | null;
+  walSizeBytes: number | null;
+  queryMs: number;
+}
+
+/** 契约 §12.2 错误分型计数。**不补 0**：只列出现过的分型。 */
+export interface HealthEventCategoryDto {
+  category: GatewayErrorCategory;
+  severity: GatewayErrorSeverity;
+  count: number;
+  lastAt: string;
+}
+
+export interface HealthEventsDto {
+  total: number;
+  /** 进程启动以来**累计**丢弃的事件条数（不是窗口内） */
+  dropped: number;
+  byCategory: HealthEventCategoryDto[];
+}
+
+/** 契约 §12.2 `GET /api/observability/health` */
+export interface HealthMetricsDto {
+  generatedAt: string;
+  /** 归一化后回显；前端按它渲染，不自算 */
+  window: string;
+  uptimeSec: number;
+  startedAt: string;
+  traffic: HealthTrafficDto;
+  keys: HealthKeysDto;
+  db: HealthDbDto;
+  events: HealthEventsDto;
+}
+
+/** 契约 §12.2 / §12.3 历史健康快照。落当时算出来的结果，不事后重算。 */
+export interface HealthSnapshotDto {
+  id: string;
+  ts: string;
+  windowSec: number;
+  qps: number;
+  successRate: number;
+  requests: number;
+  errors: number;
+  p50Ms: number | null;
+  p99Ms: number | null;
+  keys: { total: number; healthy: number; cooling: number; disabled: number };
+  dbOk: boolean;
+  errorCount: number;
+}

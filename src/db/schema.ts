@@ -10,6 +10,9 @@
 //      且它只含 4 位明文，落盘无风险。
 //   5. key_runtime 与 upstream_keys 分表：前者是**网关进程运行态**，管理端只读（契约 §9）。
 //      分开是为了让"管理端写 key"与"网关写健康态"不争用同一行的写锁 —— 热路径零等待。
+//   6. gateway_error_events / gateway_health_snapshots（v1.1.0 观测面，契约 §12）同样是**显式列**，
+//      不设自由 JSON 列。脱敏因此是构造性的：key_masked 这一列物理上放不下明文，
+//      而不是"序列化时记得替换一下"。见 ADR-0013。
 
 import type { Database as SqliteDatabase } from 'better-sqlite3';
 
@@ -186,6 +189,57 @@ CREATE TABLE IF NOT EXISTS change_log (
   revision  INTEGER,
   at        TEXT NOT NULL
 );
+
+-- 观测面（契约 §12 / ADR-0013）。纯加表，SCHEMA_VERSION 不递增。
+--
+-- category 刻意**不加 CHECK 约束**：分型枚举是契约的东西，契约里加一个值不该需要一次建表迁移
+-- （SQLite 改 CHECK 要重写表）。越界值在写入侧由 TS 联合类型与派发函数挡住 —— 编译期就拦住了，
+-- 比运行期报错早一步。其余字段的 CHECK 都只约束"不可能正确"的值（如 severity 两值）。
+CREATE TABLE IF NOT EXISTS gateway_error_events (
+  id              TEXT PRIMARY KEY,
+  ts              TEXT NOT NULL,               -- 网关侧时刻，落库不重打
+  severity        TEXT NOT NULL CHECK (severity IN ('warn','error')),
+  category        TEXT NOT NULL,               -- 9 值分型，契约 §12.1
+  status          INTEGER NOT NULL,            -- 回给客户端的状态；客户端断开为 499
+  gateway_code    TEXT,                        -- §10 的码；网关自身异常为 NULL
+  failure_reason  TEXT,                        -- 与 key_runtime.last_failure_reason 同一套枚举
+  endpoint        TEXT NOT NULL,
+  model           TEXT,
+  upstream_id     TEXT,                        -- 抹名引用：只 id，不存 baseUrl / 上游名
+  key_id          TEXT,                        -- 抹名引用
+  key_masked      TEXT,                        -- 永远只有 ****后4位（adr-0006 同一条纪律）
+  stream          INTEGER NOT NULL DEFAULT 0,
+  upstream_status INTEGER,                     -- 上游原始状态码；没打到上游为 NULL
+  attempts        INTEGER NOT NULL DEFAULT 0,  -- 真实上游尝试次数；0 = 一次都没发出去
+  candidates      INTEGER,
+  latency_ms      INTEGER,
+  message         TEXT                         -- 落盘前已 scrub + 截断 512 字符
+);
+CREATE INDEX IF NOT EXISTS idx_err_ts ON gateway_error_events(ts);
+CREATE INDEX IF NOT EXISTS idx_err_category_ts ON gateway_error_events(category, ts);
+CREATE INDEX IF NOT EXISTS idx_err_upstream_ts ON gateway_error_events(upstream_id, ts);
+CREATE INDEX IF NOT EXISTS idx_err_key_ts ON gateway_error_events(key_id, ts);
+
+-- 60s 一条的**历史**健康快照。刻意不存"原始样本"，只存当时算出来的结果：
+-- usage_logs 会被保留期裁掉，事后重算会得到另一种历史 —— 那正是最难识别的假数据。
+CREATE TABLE IF NOT EXISTS gateway_health_snapshots (
+  id           TEXT PRIMARY KEY,
+  ts           TEXT NOT NULL,
+  window_sec   INTEGER NOT NULL,
+  qps          REAL NOT NULL,
+  success_rate REAL NOT NULL,
+  requests     INTEGER NOT NULL,
+  errors       INTEGER NOT NULL,
+  p50_ms       INTEGER,                        -- NULL = 窗口内无样本（未知 != 0）
+  p99_ms       INTEGER,
+  key_total    INTEGER NOT NULL,
+  key_healthy  INTEGER NOT NULL,
+  key_cooling  INTEGER NOT NULL,
+  key_disabled INTEGER NOT NULL,
+  db_ok        INTEGER NOT NULL,               -- 0/1，出参转 bool
+  error_count  INTEGER NOT NULL                -- 窗口内错误事件条数（含非上游类的）
+);
+CREATE INDEX IF NOT EXISTS idx_health_snap_ts ON gateway_health_snapshots(ts);
 `;
 
 /** 列是否存在。删列是"只做一次"的搬迁，靠它判幂等 —— 版本号只当记账用。 */

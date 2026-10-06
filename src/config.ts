@@ -22,7 +22,14 @@ export interface AppConfig {
   allowedOrigins: string[];
   /** CI 机器令牌；为空表示关闭（契约 §0.5） */
   adminToken: string | null;
+  /**
+   * 只读维护令牌（契约 §12.4 / ADR-0013）。为空表示关闭（默认）。
+   * 作用域**仅** `GET /api/observability/*`；与 `adminToken` 配成同一个值会被拒绝启动。
+   */
+  readonlyToken: string | null;
   logRetentionDays: number;
+  /** 健康快照保留天数；快照量级远小于日志（60s 一条），默认给 90 天 */
+  healthSnapshotRetentionDays: number;
   /** 单次调用的最大尝试次数（含首次）；默认 3（冻结常量） */
   maxAttempts: number;
   /** 每把上游 key 的并发上限；默认 4（冻结常量） */
@@ -140,6 +147,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     .filter((s) => s !== '');
 
   const adminToken = (env['ADMIN_TOKEN'] ?? '').trim();
+  const readonlyToken = (env['READONLY_TOKEN'] ?? '').trim();
+
+  /**
+   * 两把令牌同值 = 隔离归零（契约 §12.4 / ADR-0013）。
+   *
+   * 这里刻意选择**拒绝启动**而不是"以管理员为准"：没有第三种正确行为。
+   * 静默取其一，会让部署者以为"观测令牌已经和会话隔离了"，实际拿到观测令牌的人
+   * 就是管理员；而报错会在启动那一秒就让人看见，代价最小。
+   * 与 MASTER_KEY 缺失即拒绝启动同款纪律 —— 安全配置的错误不能降级成运行期行为差异。
+   */
+  if (readonlyToken !== '' && adminToken !== '' && readonlyToken === adminToken) {
+    throw new Error(
+      'READONLY_TOKEN 不能与 ADMIN_TOKEN 相同：只读维护令牌与管理面机器令牌必须是两个值（契约 §12.4）',
+    );
+  }
 
   return {
     // 缺 MASTER_KEY 或长度不对会在这里抛 CryptoConfigError，进程起不来 —— 这是有意的
@@ -155,7 +177,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     trustProxy: boolFromEnv(env, 'TRUST_PROXY', false),
     allowedOrigins: origins,
     adminToken: adminToken === '' ? null : adminToken,
+    readonlyToken: readonlyToken === '' ? null : readonlyToken,
     logRetentionDays: intFromEnv(env, 'LOG_RETENTION_DAYS', 30),
+    healthSnapshotRetentionDays: positiveIntFromEnv(env, 'HEALTH_SNAPSHOT_RETENTION_DAYS', 90),
     maxAttempts: positiveIntFromEnv(env, 'MAX_ATTEMPTS', 3),
     maxConcurrencyPerKey: positiveIntFromEnv(env, 'MAX_CONCURRENCY_PER_KEY', 4),
     cooldownLadderSeconds: cooldownLadderFromEnv(env),

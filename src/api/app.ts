@@ -21,6 +21,7 @@ import type { AppConfig } from '../config.js';
 import type { Db } from '../db/database.js';
 import { LoginRateLimiter, requireSession, type SessionInfo } from './auth.js';
 import { ApiError } from './errors.js';
+import { createHealthSnapshotWriter } from './health-snapshot-writer.js';
 import { isWriteMethod, sessionCookieValue, verifyCsrf } from './http.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerGroupRoutes } from './routes/groups.js';
@@ -28,6 +29,7 @@ import { registerKeyRoutes } from './routes/keys.js';
 import { createLiveHub, registerLiveRoutes, type LiveHub } from './routes/live.js';
 import { registerMiscRoutes } from './routes/misc.js';
 import { registerModelRoutes } from './routes/models.js';
+import { registerObservabilityRoutes } from './routes/observability.js';
 import { registerStatsRoutes } from './routes/stats.js';
 import { registerUpstreamRoutes } from './routes/upstreams.js';
 
@@ -48,11 +50,28 @@ export interface ApiContext {
   db: Db;
   config: AppConfig;
   loginLimiter: LoginRateLimiter;
+  /** 服务启动时刻。`uptimeSec` 用它，**不用** `Date.now() - process.uptime()` 现推（会随调用漂移） */
+  startedAt: Date;
+  /** 错误事件累计丢弃数（契约 §12.2 `events.dropped`）。sink 未接入时恒 0 */
+  droppedEvents: () => number;
 }
 
 /** 唯一免鉴权路径（契约 §0.5）。用 method+path 精确匹配，不用前缀。 */
 function isPublic(method: string, path: string): boolean {
   return method === 'POST' && path === '/api/auth/login';
+}
+
+/**
+ * 只读维护令牌的作用域（契约 §12.4 / ADR-0013）。
+ *
+ * 刻意用**前缀 + 方法双判**，而不是"只判方法"或"只判路径"：
+ *   - 只判方法，等于观测令牌能读整个管理面（上游列表、key 列表、审计日志……）；
+ *   - 只判路径，等于写方法也能进（虽然本节目前只有 GET，但那是路由的现状，不是约束）。
+ * 作用域判定放在闸门里而不是各路由里 —— 这样将来往观测面加一条新路由，
+ * 不可能出现"忘了判作用域"这种漏法。
+ */
+function inReadonlyScope(method: string, path: string): boolean {
+  return method === 'GET' && path.startsWith('/api/observability/');
 }
 
 /**
@@ -104,6 +123,33 @@ export interface BuildAppOptions {
    * 断言退化成"赌这个用例跑得比定时器快"。
    */
   liveAutoTick?: boolean;
+  /**
+   * 服务启动时刻（契约 §12.2 `uptimeSec` / `startedAt`）。缺省取本函数被调用的那一刻。
+   *
+   * 由调用方显式注入是为了**快照序列的一致性**：`uptimeSec` 会写进每一条 60s 快照，
+   * 如果管理面路由和快照写入器各自 `new Date()`，同一份 uptime 曲线会在两个时刻起算，
+   * 差几毫秒 —— 平时看不出来，重启后比对两条序列时会像"有段时间对不上"。
+   */
+  startedAt?: Date;
+  /**
+   * 错误事件累计丢弃数（契约 §12.2 `events.dropped`）。
+   *
+   * sink 由 `src/wiring/` 建（它要拿到 key 的掩码）并注入到这里；未接入时缺省恒 0 ——
+   * 那是**事实**（这个进程确实一条都没丢），不是占位假数据。
+   */
+  droppedEvents?: () => number;
+  /**
+   * 是否启动 60s 健康快照写入器（契约 §12.2 / ADR-0013 §5）。默认 `true`（线上行为）。
+   *
+   * 测试可注入 `false`：快照是**历史序列**，"建 app 时先写一条"会让每个用例的库里
+   * 天然多一行，断言就变成"算上那一行正好如何"。要测快照行为应当直接驱动
+   * `createHealthSnapshotWriter(...).writeOnce()`，而不是靠这条隐式副作用。
+   */
+  healthSnapshots?: boolean;
+  /** 快照节拍，仅测试用（默认 60s） */
+  healthSnapshotIntervalMs?: number;
+  /** 快照统计窗口，仅测试用（默认 300s） */
+  healthSnapshotWindowSeconds?: number;
 }
 
 export function buildApp(opts: BuildAppOptions): FastifyInstance {
@@ -115,10 +161,15 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     trustProxy: config.trustProxy,
   });
 
+  const startedAt = opts.startedAt ?? new Date();
+  const droppedEvents = opts.droppedEvents ?? (() => 0);
+
   const ctx: ApiContext = {
     db,
     config,
     loginLimiter: opts.loginLimiter ?? new LoginRateLimiter(),
+    startedAt,
+    droppedEvents,
   };
 
   app.decorateRequest('auth', null);
@@ -145,12 +196,29 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
 
     if (isPublic(req.method, path)) return;
 
-    // CI 机器令牌：只认 Bearer，不参与浏览器流程；未配置即为关闭
+    // 机器令牌：只认 Bearer，不参与浏览器流程。两把令牌互不隶属：
+    //   - ADMIN_TOKEN：管理面全权（CI 用）；
+    //   - READONLY_TOKEN：**只有** `GET /api/observability/*`，落在别处 403（契约 §12.4）。
+    // 任何一个未配置即为关闭；两个都关时，带 Bearer 头的请求照旧落到会话鉴权上
+    // （保持 v1.0 的既有行为，不让"多了一个可选配置"改变老部署的语义）。
     const authz = req.headers.authorization;
-    if (config.adminToken !== null && typeof authz === 'string' && authz.startsWith('Bearer ')) {
+    if ((config.adminToken !== null || config.readonlyToken !== null) && typeof authz === 'string' && authz.startsWith('Bearer ')) {
       const presented = authz.slice('Bearer '.length).trim();
-      if (presented !== '' && presented === config.adminToken) {
+      if (presented !== '' && config.adminToken !== null && presented === config.adminToken) {
         req.auth = { username: 'ci', expiresAt: new Date(Date.now() + 60_000).toISOString(), viaMachineToken: true };
+        return;
+      }
+      if (presented !== '' && config.readonlyToken !== null && presented === config.readonlyToken) {
+        // 令牌有效但越界：是 403 不是 401 —— 客户端换一个令牌就能解决，
+        // 而 401 会让它以为"这把令牌已经失效"，进而去重新申请一把（拿到的还是同一把）。
+        if (!inReadonlyScope(req.method, path)) {
+          throw new ApiError('FORBIDDEN', '只读维护令牌仅可用于 GET /api/observability/*');
+        }
+        req.auth = {
+          username: 'readonly',
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          viaMachineToken: true,
+        };
         return;
       }
       throw new ApiError('UNAUTHORIZED', '令牌无效');
@@ -209,6 +277,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   registerModelRoutes(app, ctx);
   registerStatsRoutes(app, ctx);
   registerMiscRoutes(app, ctx);
+  registerObservabilityRoutes(app, ctx);
 
   // 形状必须是这样：`register` 的回调被 avvio 排队，等前面排的 WS 插件**加载完**才执行；
   // 插件的 onRoute 钩子是在那一刻才装上的，早于它的路由它一个都看不见。
@@ -218,6 +287,28 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   app.register(async (instance) => {
     registerLiveRoutes(instance, ctx, liveHub);
   });
+
+  // 60s 健康快照（契约 §12.2 / ADR-0013 §5）。生命周期挂在 app 上而不是 server.ts 的
+  // 维护定时器数组里：冻结的关停顺序（src/wiring/shutdown.ts）保证 `app.close()` 早于
+  // `db.close()`，于是这里 stop() 掉就不会写到一个已经关掉的连接上 —— 顺序表一行都不用改。
+  //
+  // 为什么由**管理进程**持有这个定时器：`/v1/*` 是热路径，单写者模型下它连一次同步写
+  // 都不该有；快照是"后台周期性任务"，不该和请求抢写锁，而这边 60s 一次的写完全落在噪声里。
+  if (opts.healthSnapshots ?? true) {
+    const writer = createHealthSnapshotWriter({
+      db,
+      startedAt,
+      droppedEvents,
+      retentionDays: config.healthSnapshotRetentionDays,
+      onError: (err) => app.log.error({ err }, '健康快照写入失败'),
+      intervalMs: opts.healthSnapshotIntervalMs,
+      windowSeconds: opts.healthSnapshotWindowSeconds,
+    });
+    app.addHook('onClose', async () => {
+      writer.stop();
+    });
+    writer.start();
+  }
 
   return app;
 }

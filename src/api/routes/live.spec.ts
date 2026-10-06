@@ -86,7 +86,9 @@ function makeConfig(dbPath: string): AppConfig {
     // 空数组 = 仅同源。跨站用例必须在这个（默认）口径下被拒
     allowedOrigins: [],
     adminToken: null,
+    readonlyToken: null,
     logRetentionDays: 30,
+    healthSnapshotRetentionDays: 90,
     maxAttempts: 3,
     maxConcurrencyPerKey: 4,
     cooldownLadderSeconds: [0, 60, 300, 900, 1800],

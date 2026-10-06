@@ -10,6 +10,11 @@ export { createSecretResolver } from './secrets.js';
 export type { DbSecretResolver, SecretRow, SecretResolverOptions } from './secrets.js';
 export { createUsageLogSink } from './usage-sink.js';
 export type { UsageSink, UsageSinkOptions } from './usage-sink.js';
+export { createErrorEventSink, deriveCategory, deriveSeverity } from './error-event-sink.js';
+export type {
+  BufferedErrorEventSink,
+  ErrorEventSinkOptions,
+} from './error-event-sink.js';
 export { createKeyRuntimeFlusher } from './key-runtime-flusher.js';
 export type { KeyPoolView, KeyRuntimeFlusher, KeyRuntimeFlusherOptions } from './key-runtime-flusher.js';
 export { createGatewayRuntime, mountGatewayRoutes } from './runtime.js';

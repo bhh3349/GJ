@@ -21,6 +21,7 @@ import { createGroup } from '../db/repo/groups.js';
 import { createKey, deleteKey } from '../db/repo/keys.js';
 import { upsertModelFromSync, updateModel, getModel } from '../db/repo/models.js';
 import { createUpstream, updateUpstream } from '../db/repo/upstreams.js';
+import { createKeyPool } from '../gateway/key-pool.js';
 import { createGatewayStore } from './store.js';
 
 /* ------------------------------ 测试台 ------------------------------ */
@@ -70,6 +71,11 @@ function addUpstream(db: Db, name = 'up-a', baseUrl = 'https://a.example.com'): 
 }
 
 /* ------------------------------ 用例 ------------------------------ */
+
+/** 直接种一列 model_limits（§15.2 写路径尚未落地，测试必须绕开 createKey 自己写库） */
+function seedModelLimits(db: Db, keyId: string, csv: string | null): void {
+  db.prepare('UPDATE upstream_keys SET model_limits = ? WHERE id = ?').run(csv, keyId);
+}
 
 describe('快照构造', () => {
   it('上游 / key / 模型三样都进快照，且金额与余量按列映射', () => {
@@ -247,6 +253,46 @@ describe('明文缓存', () => {
     assert.equal(h.store.refresh(), true);
     assert.equal(h.store.keyCount(), 0);
     assert.equal(h.store.secrets.resolve(k.id), null);
+  });
+});
+
+describe('key 级模型白名单（§3 / §16.3 / v1.4.2）', () => {
+  it('CSV 原样入库行 → 快照解析成白名单 → getAvailableKeys 对白名单外模型不含该 key', async () => {
+    const h = setup();
+    const up = addUpstream(h.db);
+    const k = createKey(h.db, { upstreamId: up, key: probeSecret('whitelist'), category: 'balance' }, MASTER_KEY);
+    // 上游 CSV 带空格与空项：原样落盘（§15.7），解析侧归一
+    seedModelLimits(h.db, k.id, 'gpt-4o, , gpt-4o-mini');
+    h.store.refresh();
+
+    const key = h.store.poolSnapshot().keys[0];
+    assert.ok(key);
+    assert.deepEqual(key?.models, ['gpt-4o', 'gpt-4o-mini'], 'CSV 去空白丢空项，* 归 matchesModel() 解释');
+
+    // 契约 §16.3 点名的那例回归：白名单 ['gpt-4o','gpt-4o-mini'] 的 key 不得服务 'b'
+    const pool = createKeyPool({ now: () => Date.now() });
+    pool.applySnapshot(h.store.poolSnapshot());
+    const ids = (await pool.getAvailableKeys('b')).map((c) => c.keyId);
+    assert.ok(!ids.includes(k.id), '白名单外模型必须拿不到这把 key');
+    const onList = (await pool.getAvailableKeys('gpt-4o-mini')).map((c) => c.keyId);
+    assert.ok(onList.includes(k.id), '白名单内模型照常入选');
+  });
+
+  it("null / '' / 纯空白 → null（= 不限）——列无 CHECK，这层归一化承重", () => {
+    const h = setup();
+    const up = addUpstream(h.db);
+    const a = createKey(h.db, { upstreamId: up, key: probeSecret('w-null'), category: 'balance' }, MASTER_KEY);
+    const b = createKey(h.db, { upstreamId: up, key: probeSecret('w-empty'), category: 'balance' }, MASTER_KEY);
+    const c = createKey(h.db, { upstreamId: up, key: probeSecret('w-blank'), category: 'balance' }, MASTER_KEY);
+    seedModelLimits(h.db, a.id, null);
+    seedModelLimits(h.db, b.id, '');
+    seedModelLimits(h.db, c.id, '   ,   ');
+    h.store.refresh();
+
+    const byId = new Map(h.store.poolSnapshot().keys.map((k) => [k.keyId, k.models]));
+    assert.equal(byId.get(a.id), null);
+    assert.equal(byId.get(b.id), null, "库里不该有 ''，但真出现了读侧也必须挡住（写路径纪律不是存储不变量）");
+    assert.equal(byId.get(c.id), null);
   });
 });
 

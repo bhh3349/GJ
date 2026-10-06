@@ -45,6 +45,7 @@ interface KeyRow extends SecretRow {
   balance_cents: number | null;
   token_plan_remaining: number | null;
   token_plan_expires_at: string | null;
+  model_limits: string | null;
   masked_key: string;
 }
 
@@ -58,11 +59,24 @@ const UPSTREAMS_SQL = 'SELECT id, base_url, enabled FROM upstreams ORDER BY name
 
 const KEYS_SQL = `
 SELECT id, upstream_id, category, enabled, weight, balance_cents,
-       token_plan_remaining, token_plan_expires_at, masked_key, revision, secret
+       token_plan_remaining, token_plan_expires_at, model_limits, masked_key, revision, secret
 FROM upstream_keys
 WHERE deleted_at IS NULL
 ORDER BY created_at, id
 `;
+
+/**
+ * `model_limits` CSV（上游原样落盘，§15.7）→ `KeyConfig.models`。
+ * `null` / `''` / 纯空白 → `null`（= 不限，与 `[]` 同义 —— 契约 §3，不制造三态）。
+ * 该列**没有 CHECK 约束**，"不落 `''`"只是写路径纪律（管家口径），所以这层归一化是
+ * **承重的**，不是冗余：库里真出现 `''` 时，读侧必须自己挡住，而不是假设它不存在。
+ * `*` 原样透出 —— 通配语义归 `matchesModel()`（冻结件），这里不解释。
+ */
+function parseModelLimits(csv: string | null): readonly string[] | null {
+  if (csv === null) return null;
+  const items = csv.split(',').map((s) => s.trim()).filter((s) => s.length > 0);
+  return items.length === 0 ? null : items;
+}
 
 const MAX_CHANGES_SQL = 'SELECT COALESCE(MAX(seq), 0) AS seq FROM change_log';
 
@@ -148,8 +162,8 @@ export function createGatewayStore(options: GatewayStoreOptions): GatewayStore {
       category: k.category,
       status: k.enabled === 1 ? 'enabled' : 'disabled',
       weight: k.weight,
-      // 档案里没有 key→模型 的关联（模型归属上游，不归属 key），故按 upstream 继承
-      models: null,
+      // key 级模型白名单（§3 / §16.3）：库里 CSV 解析而来；null = 不限 → keyModels() 按 upstream 继承
+      models: parseModelLimits(k.model_limits),
       balanceCents: k.balance_cents,
       tokenPlanRemainingTokens: k.token_plan_remaining,
       tokenPlanExpiresAt: k.token_plan_expires_at,

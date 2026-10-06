@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS upstreams (
   name          TEXT NOT NULL UNIQUE,
   base_url      TEXT NOT NULL,
   enabled       INTEGER NOT NULL DEFAULT 1,
+  supplier      TEXT,                         -- 供应商能力位（本期唯一取值 'tierflow'）；NULL = 通用上游。能力位只看这一列，不猜 host（§2 / §15.6 / ADR-0018 决策 0）
   balance_query TEXT NOT NULL DEFAULT '{}',   -- JSON：{enabled,url,method,headers,body,parse,timeoutMs}
   revision      INTEGER NOT NULL DEFAULT 1,
   created_at    TEXT NOT NULL,
@@ -59,8 +60,10 @@ CREATE TABLE IF NOT EXISTS upstream_keys (
   masked_key          TEXT NOT NULL,
   secret              BLOB NOT NULL,          -- aes-256-gcm，见 src/db/crypto.ts
   category            TEXT NOT NULL CHECK (category IN ('balance','token-plan')),
+  unlimited           INTEGER NOT NULL DEFAULT 0,  -- 1 = 上游无限额度（unlimited_quota）。**此时 balance_cents 必须为 NULL**：上游给的 remain_quota 是无意义负数（如 -331119），落库就成了"已欠费"（§15.6 / ADR-0018 决策 8）
   enabled             INTEGER NOT NULL DEFAULT 1,
   weight              INTEGER NOT NULL DEFAULT 1,
+  model_limits        TEXT,                   -- 模型白名单 CSV（上游 model_limits，原样落盘，不解析）。NULL = 不限模型；空串/空 CSV 一律归一化为 NULL，**不落 ''**（§15.7 / ADR-0019 决策 2）
   balance_cents       INTEGER,                -- NULL = 未知（未知 != 0）
   balance_currency    TEXT,
   balance_updated_at  TEXT,
@@ -324,6 +327,33 @@ export function migrate(db: SqliteDatabase): void {
     // 而 upstream_id / key_id 那种低基数列必须带 ts，否则一个 key 会拖出全表。
     db.exec('CREATE INDEX IF NOT EXISTS idx_logs_request_id ON usage_logs(request_id)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_err_request_id ON gateway_error_events(request_id)');
+  })();
+
+  // v1.4.x：供应商能力位 + key 模型白名单（契约 §15.7，ADR-0018 / ADR-0019）。**纯加列**，SCHEMA_VERSION 不递增。
+  //
+  // 与 ADR-0013 那批（纯加表）的区别同 v1.1.1：这三列是加给**既有表**的。
+  // 只改上面的 DDL 文本对已经在跑的库**没有任何作用** —— `CREATE TABLE IF NOT EXISTS` 撞上
+  // 已存在的表是空操作，`upstreams` / `upstream_keys` 正是这种表：老库里它们早就存在，
+  // 于是"新列"永远进不来，而下一次 `SELECT model_limits` 才炸。必须真发 ALTER。
+  //
+  // 守卫必须是 hasColumn() 而非 user_version：ADD COLUMN **不幂等**，重复执行抛
+  // `duplicate column name`，而这段跑在每次 openDatabase() 里，会把开库一起带走。
+  // 判据也用"列在不在"而非"库新不新"：新库建表时已带这三列 → 跳过；老库没有 → 补。
+  // 同一句代码覆盖两种库，中间状态（用户版本号被写过但列没加）也不会永久漏迁。
+  db.transaction(() => {
+    const added: [table: string, column: string, decl: string][] = [
+      // 可空、无默认：老行 NULL = 不走供应商能力位，与加列前逐字一致（§15.6：不猜 host，只看这一列）。
+      ['upstreams', 'supplier', 'TEXT'],
+      // 有默认值：老行填 0 == "非无限额度"，正是我们要的语义（§15.6 / 决策 8）。
+      ['upstream_keys', 'unlimited', 'INTEGER NOT NULL DEFAULT 0'],
+      // 可空、无默认：老行 NULL == "不限模型"，与加列前逐字一致（§3：null 与 [] 同义，库里不出现 ''）。
+      ['upstream_keys', 'model_limits', 'TEXT'],
+    ];
+    for (const [table, column, decl] of added) {
+      if (!hasColumn(db, table, column)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+      }
+    }
   })();
 
   const current = db.pragma('user_version', { simple: true }) as number;

@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.1.2**
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.2.0**
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -23,6 +23,8 @@
 > **v1.1.1（2026-10-06，M6-B 接口阶段收口）**：补上**关联键 `x-request-id` 全链路透传**（冻结约束里早已写死、全仓尚未实现的那条缺口，PM 裁决"现在补、不留第二阶段"）。① §6 `GET /api/logs` 与 §12.1 `GatewayErrorEvent` 各新增**只读**字段 `requestId`（同键同值，`usage_logs` / `gateway_error_events` 各补一列），并新增同键精确匹配筛选位 `requestId`；② §6 新增「关联键 `x-request-id`」小节：入站缺失/非法/超长即重生成（白名单 `^[A-Za-z0-9._-]{8,64}$`）、响应头必回写、原样透传上游、落两表同值；③ §10 写明每个 `/v1/*` 请求都带该头（唯一的头侧新增要求）。**无字段改名、无字段删除、无类型变更、`ERROR_CODES` 零新增、§10 错误码表零新增** —— `requestId` 是**数据字段**（给"错误事件 ↔ 用量明细" join 用），不是错误码、不进 `ERROR_CODES`。动机与影响见 ADR-0014。
 
 > **补遗 v1.1.2（2026-10-06，M6-B 接口阶段收口）**：登记网关已在用但 §10 漏登的 **`GROUP_DISABLED`(403)**（key 有效、用户组被禁用，`type=authentication_error`），并把 §12.1 的 `AUTH_FAILED` 分型从「仅 401」扩为「401 / 403」、对应码从「仅 `INVALID_API_KEY`」扩为「`INVALID_API_KEY` / `GROUP_DISABLED`」——由此网关对 403 组禁用**开始产事件**（此前宁缺不产）。同时把四条产出边界写进 §12.1：仅 `/v1/*`、未过鉴权 `model=null`、上游 4xx 透传不产事件、Fastify 413/415 等不产事件。**无字段改名、无字段删除、无类型变更、`ERROR_CODES` 零新增、`category` 枚举 9 值不变**（`GROUP_DISABLED` 归入既有 `AUTH_FAILED`，不新增分型）。动机与影响见 ADR-0013「落地补遗」。
+
+> **v1.2.0（2026-10-06，M6-B 第二阶段）**：新增 **§13 内置 AI 助手聊天** —— ① `POST /api/assistant/chat`（SSE 流）端点；② SSE 帧契约（`delta` / `done` / `error` + 单调递增 `seq` + `done` 内联 `citations`，终止帧 `error.code` 复用 §10 码值）；③ 三重上限（`messages` 条数 24 / 单条 token 8000 / 总 token 16000 / 日志注入 50 条 × ≤24h，超限回 `done.truncated:true` 不静默截）；④ 鉴权走登录会话（§0.5），**不复用 `READONLY_TOKEN`**（§12.4 作用域之外自动 `403 FORBIDDEN`）；⑤ `GET /api/observability/health` 新增只读字段 `assistant`（助手独立计量：**计入 key 健康、不计入业务流量口径**）；⑥ SSE 失败终止帧 `error` 复用 **§10 码值**（`code` / `status` / 429 带 `retryAfterSec`）零新增枚举，`seq` 从 1 起、单请求内单调、重试重置；`truncated` 挂在 `done` 上（非独立帧）；`citations` 元素带可展示标签 `model` + `summary`；⑦ 助手与业务**同池同语义占上游并发槽位**、撞满即 429 `RATE_LIMITED`，断流走**同一条 signal 入口** abort 上游（引擎零新增分支）。**无字段改名、无字段删除、无类型变更、`ERROR_CODES` 零新增、§10 网关错误码表零新增、`SCHEMA_VERSION` 不变、零新表零迁移**（对话不落库、服务端无状态）。动机与影响见 ADR-0015。
 
 ---
 
@@ -83,6 +85,7 @@
 - 写请求（`POST/PUT/PATCH/DELETE`）CSRF 校验顺序固定：`Origin` → `Sec-Fetch-Site`（缺失则跳过）→ `X-Requested-With`。不过则 403 `CSRF_REJECTED`。
 - `ADMIN_TOKEN` 仅作 CI 机器令牌，走 `Authorization: Bearer <ADMIN_TOKEN>`，**不参与浏览器流程**，默认关闭。
 - `READONLY_TOKEN`（v1.1.0 新增）是**只读维护令牌**：同一套 `Authorization: Bearer` 形式，但**作用域只有 `GET /api/observability/*`**，落在别的路径或用了写方法一律 `403 FORBIDDEN`。它**不等于**管理员会话、也不等于 `ADMIN_TOKEN`；未配置即关闭；两者配成同一个值会在启动时被拒。详见 §12.4。
+- `POST /api/assistant/chat`（v1.2.0，§13）**只用登录会话鉴权**：`ADMIN_TOKEN` / `READONLY_TOKEN` 落在它上面都不算通过（`ADMIN_TOKEN` 因非会话仍被 `requireSession` 挡下、`READONLY_TOKEN` 因作用域外被 `403 FORBIDDEN` 挡下）。聊天**消耗模型额度**，所以既不降格成只读、也不交给 CI 机器令牌。
 
 ---
 
@@ -924,6 +927,11 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
     "byCategory": [
       { "category": "UPSTREAM_ERROR", "severity": "error", "count": 4, "lastAt": "2026-10-06T09:11:02.000Z" }
     ]
+  },
+  "assistant": {
+    "requests": 12,
+    "errors": 1,
+    "tokens": { "prompt": 8000, "completion": 2000, "total": 10000 }
   }
 }
 ```
@@ -939,6 +947,7 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
 | `events.total` | 窗口内事件条数 |
 | `events.byCategory` | 只列**出现过**的分型，**不补 0**。与 §6 时间轴补 0 不同：这里没有"时间轴完整性"约束，补 0 只会让响应变长、并掩盖"从没发生过" |
 | `events.dropped` | 进程启动以来因队列溢出 / 落库失败**累计丢弃**的事件条数（不是窗口内） |
+| `assistant.*`（v1.2.0，§13.4） | 内置助手的**独立计量**：`requests` = 助手调用总次数；`errors` = 以 `error` 终止帧结束的次数；`tokens` = 累计（上游 usage 或估算）。**进程内计数、重启归零、不落表**；与 `events.dropped` 同属"本进程"口径，不是窗口内量。**计入 key 健康（`keys.*`）、不计入 `traffic.*`**（不写 `usage_logs`，不污染业务 QPS / 成功率） |
 
 #### 健康快照（`gateway_health_snapshots`）
 
@@ -971,7 +980,146 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
 - 令牌**不进任何响应体、不进日志**。轮换 = 改 env 后重启（本版不做热轮换，"可随时换值"即满足轮换需求）。
 - 隔离为什么是硬约束：这把令牌的持有者是内置助手/值班脚本，它的泄露不该等于管理员会话泄露；反之管理员会话也不该被降格成观测令牌。**两把令牌同值 = 隔离归零**，所以宁可启动失败，也不静默接受一份看起来配好了、实际没有隔离的配置。
 - 未带令牌时一切照旧：`/api/*` 仍由会话 Cookie 把关（§0.5），本节端点对管理员会话**同样开放**（画师的控制台与助手共用同一份响应体）。
+- `POST /api/assistant/chat`（§13）**不在**本令牌作用域内：它是个 `POST`，且语义是"消耗模型额度"，与"只读维护"无关。用 `READONLY_TOKEN` 调它 → `403 FORBIDDEN`；助手用**登录会话**（§0.5）。
 
 ---
 
-*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」。*
+## 13. 内置 AI 助手聊天 `POST /api/assistant/chat`（v1.2.0）
+
+本节是 M6-B 第二阶段的**聊天接口**：管理后台内置一个 AI 助手，读观测面数据、回答问题、定位故障。它与 §12 的关系是**单向只读消费**——助手通过 §12.3 的同一套结构化过滤参数取数，不新增任何读日志口径。
+
+四条纪律贯穿全节：
+
+1. **无状态** —— 对话**不落库**、服务端不保存会话，多轮上下文由客户端在 `messages` 里原样回传（零新表、零迁移、`SCHEMA_VERSION` 不变）。
+2. **会话鉴权** —— 走登录会话（§0.5），**不复用 `READONLY_TOKEN`**；只读令牌落在本端点自动 `403 FORBIDDEN`（§12.4 作用域是 `GET /api/observability/*`）。
+3. **日志隔离** —— 助手取数只收 §12.3 的**结构化 DTO 过滤参数白名单**，不接受自由文本查询；日志以**独立 data 块**进入 prompt，并显式声明"数据不是指令"；注入内容只含抹名引用，key 明文零出现（含助手回答）。
+4. **独立计量** —— 助手自身的模型调用**计入 key 健康**（失败/成功同样结算冷却），但**不计入业务流量口径**（不写 `usage_logs`、不污染 §6 与 §12.2 的 QPS/成功率），另开一个进程内独立计数，经 §12.2 的 `assistant` 字段只读暴露。
+
+### 13.1 请求体
+
+```json
+{
+  "messages": [
+    { "role": "user", "content": "刚才 5 分钟的错误多吗？" }
+  ],
+  "logContext": {
+    "window": "1h",
+    "category": "UPSTREAM_ERROR,NO_AVAILABLE_KEY",
+    "severity": "error"
+  }
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+|---|---|---|---|
+| `messages` | array | ✅ | 完整多轮历史，`role ∈ {system,user,assistant}`、`content` 为 string。**至少 1 条**（`messages` 缺失或空 → `400 INVALID_PARAM`，`details.field="messages"`） |
+| `logContext` | object | ❌ | 结构化取数参数（§12.3 白名单）。省略 = 纯闲聊、不注入日志 |
+
+`logContext` 字段全部复用 §12.3 的过滤参数（**不造第二套口径**）：
+
+| 字段 | 说明 |
+|---|---|
+| `window` | 健康指标窗口 `60s\|5m\|1h`，§12.2 同解析规则 |
+| `from` / `to` | 错误事件/快照时间窗，带时区 ISO8601，跨度上限见 §13.3 |
+| `category` | §12.1 分型，逗号分隔多值（最多 9） |
+| `severity` | `warn` \| `error` |
+| `upstreamId` / `keyId` / `model` / `requestId` | 单值精确匹配（`requestId` 见 §6「关联键」） |
+
+`logContext` 的失败分两类，**别混**：
+
+- **解析层非法**（`window` 不在枚举、`from`/`to` 不是带时区 ISO8601、`from > to`、`category` 不在 §12.1 枚举内）→ 与 §12.3 一致抛 `400 INVALID_PARAM`（`details.field` 指明字段）。这类是**请求写错了**，回 `truncated` 会掩盖错误。
+- **量级超上限**（`from`/`to` 跨度 > 24h、注入条数 > 50、`messages` 条数 / token 超限）→ **不回 400**，按 §13.3 **裁剪 + `done.truncated:true`**。这类是**请求合理但太大**：助手侧裁掉仍然能答，回 400 会把一轮正常的追问打断，而用户并不知道服务端还有一道 24h 的注入口径。
+
+省略或全空 = 不注入日志。
+
+### 13.2 SSE 帧契约
+
+响应是 SSE 流，三种帧，**恰好一个终止帧**（`done` 或 `error`）后连接关闭。响应头必带：
+
+- `Content-Type: text/event-stream; charset=utf-8`
+- `Cache-Control: no-cache, no-transform`
+- `X-Accel-Buffering: no`
+
+```
+event: delta
+data: {"seq":1,"text":"最近 5 分钟…"}
+
+event: delta
+data: {"seq":2,"text":"…"}
+
+event: done
+data: {"seq":3,"truncated":false,"citations":[{"id":"err_9c21","ts":"2026-10-06T09:11:02.000Z","gatewayCode":"NO_AVAILABLE_KEY","category":"NO_AVAILABLE_KEY","severity":"error","model":"gpt-4o","summary":"no candidate dispatchable: 3 key(s) unresolvable"}]}
+```
+
+失败终止帧长这样（流已开、HTTP 状态已是 200，所以码值与状态只在 `data` 里）：
+
+```
+event: error
+data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，稍后重试","status":429,"retryAfterSec":1}
+```
+
+| 帧 | `event:` | `data:` | 说明 |
+|---|---|---|---|
+| 增量 | `delta` | `{seq, text}` | 模型输出增量 |
+| 终止（成功） | `done` | `{seq, truncated, citations}` | 唯一成功终止帧 |
+| 终止（失败） | `error` | `{seq, code, message, status, retryAfterSec}` | 唯一失败终止帧 |
+
+- `seq`：**单调递增**、**从 1 起**的 int，每帧加一（前端据此检测乱序/丢帧）。作用域是**单次请求**：用户点"重试"发的是一条新请求，`seq` **从 1 重新开始**（不是跨请求连续递增）。
+- `text` 可以是空串（心跳/首字节占位），前端**不据此**判断结束；结束只认终止帧。
+- **`truncated` 不是独立帧**，只是 `done` 上的一个 bool 字段（前端不需要为它加分支）。
+- `done.truncated`：**三重上限任一命中**即为 `true`（§13.3）。前端据此提示"上下文已被截断"。
+- `done.citations`：本次回答**注入的观测事件引用**（**服务端派生**，不是从模型输出里解析 id——那不可靠且会被幻觉污染）。MVP 只展示、不跳转；数组可为空。
+- `error.code`：**§10 网关码值**，复用既有码表，**零新增枚举**（`NO_AVAILABLE_KEY`(503) / `RATE_LIMITED`(429) / `QUOTA_EXCEEDED`(429) / `UPSTREAM_ERROR`(502) / `UPSTREAM_TIMEOUT`(504)）；`error.message` 是"说人话"的归因文案。
+- `error.status`：该码值在 §10 表里对应的 HTTP 状态（int）。**它不是本次响应的 HTTP 状态**（SSE 已开流，响应状态恒为 200），前端只在气泡里展示/分支用。
+- `error.retryAfterSec`：仅 429 两类（`RATE_LIMITED` / `QUOTA_EXCEEDED`）带，int 秒，与 §10「429 响应一律带 `Retry-After`」同口径；其它码值为 `null`。SSE 已开流后无法再写响应头，所以退避时间走帧内字段。
+- 内部调用撞 503 `NO_AVAILABLE_KEY` / 429 池饱和时**必须发 `error` 终止帧**，不得让前端等到超时。
+
+> **429 别糊成一种**（延续 §10 / §12.1 的分法）：池饱和（候选非空、0 次真实尝试、槽位全满）是 **429 `RATE_LIMITED`**，语义"稍后重试"；用户组日配额耗尽才是 **429 `QUOTA_EXCEEDED`**，语义"今天别来"。助手内部调用不走 `/v1/*` 的组级限流，所以它只会撞到前者；契约仍把两者分开写，是为了终止帧的码值语义与 §10 表逐字一致。
+
+#### citation 对象
+
+| 字段 | 类型 | 可空 | 说明 |
+|---|---|---|---|
+| `id` | string | ❌ | 错误事件 id（§12.3 `GET /api/observability/errors/:id` 可查） |
+| `ts` | ISO8601 UTC | ❌ | 事件发生时刻 |
+| `gatewayCode` | string | ✅ | §10 码值（事件可能没有，如 499 客户端断开 → `null`） |
+| `category` | string | ❌ | §12.1 分型 |
+| `severity` | string | ❌ | §12.1 `warn` \| `error` |
+| `model` | string | ✅ | 事件里的 `clientModel`；未过鉴权的请求恒为 `null`（§12.1 产出边界） |
+| `summary` | string | ❌ | **给前端渲染的短摘要**：取 §12.1 `message`（**已 scrub + 截断 512**），再截到 **120 字符**。这是 `citations` 能被"只展示不跳转"渲染出内容的最小可读标签 |
+
+- `summary` 与 `model` 是**脱敏后的既有字段**，不是新数据源：`summary` 直接来自事件行、已过 §12.1 的钥匙抹名与 `scrub`；**不含 key 明文**（含 4 位掩码以外的任何原文）。助手回答里外都不得出现 key 明文（§13 头注纪律 3）。
+- 引用顺序 = 事件在注入块里的出现顺序（`ts DESC`，与 §12.3 查询同序），前端按原序展示即可。
+
+### 13.3 三重上限（超限回 `done.truncated:true`，不静默截）
+
+| 上限 | 值 | 超限行为 |
+|---|---|---|
+| `messages` 条数 | **24** | 丢弃最旧，保留最近 24 条 |
+| 单条 token | **8000** | 截断该条 `content` |
+| 总 token | **16000** | 从最旧开始丢弃，直到不超 |
+| 日志注入条数 × 时间窗 | **50 条** × **≤24h** | 条数超 50 只留最近 50；`from`/`to` 跨度超 24h 收窄窗口 |
+
+- token 估算口径与 §0.2 / 网关 `estimatePromptTokens` **同一套**：ASCII 0.25 token/字符、非 ASCII（中日文等）1 token/字符，向上取整。**只作限额的确定性代理**，不影响计费。
+- 任一上限命中 → `done.truncated = true`。**绝不静默截断**：截了就必须让客户端知道。
+- **四条上限一律裁剪、一律 `truncated:true`，没有一条回 400**（含日志注入条数与窗口跨度；`400` 只留给 §13.1 的解析层非法）。前端据此提示"上下文已被截断 / 注入范围已收窄"，不静默。
+
+### 13.4 内部调用与计量
+
+- 助手调用**不走 `/v1/*` 公网鉴权**，而是同一进程内直接调 `gateway.engine`（同一 `Db` 句柄、同一 key 池）：选路、key 健康、冷却、失败计数与业务请求**同源**。
+- **计入 key 健康**：`reportFailure` / `reportSuccess` 与业务调用同路径，助手撞坏 key 同样进冷却。**对助手坏的 key，对业务同样是坏的**，所以照常报失败，不为助手开"免检"旁路。
+- **不计入业务流量口径**：不写 `usage_logs`，因此不出现在 §6 `overview`/`usage` 与 §12.2 `traffic.*` 的 QPS/成功率里。
+- **独立计数**（进程内、重启归零、不落表）：由 §12.2 的 `assistant` 字段只读暴露。
+- **助手占用上游并发槽位，与业务同池同语义**：内部调用不过 `/v1/*`，所以 **RPM / TPM / 日配额那层不拦助手** —— 这是有意的（助手不该被组级配额当成业务调用掐掉），代价是助手能一直吃 key 的并发槽位，**撞满即 429 池饱和（`RATE_LIMITED`，`retryAfterSec=1`）**。MVP **不为助手单独预留槽位**（同池最简），因此由 `assistant.*` 独立计数 + 本节这句口径，让值班能把"助手把槽位吃满"与"业务流量打满"分开归因：
+  - `keys.*`（健康/冷却/失败计数）**包含**助手的影响；
+  - `traffic.*` / §6 QPS / 成功率 / token 用量**不包含**助手。
+- **断流 = abort 上游，走同一条 signal 入口，不新增旁路**：助手链路自造一个 `AbortController`，其 `signal` 与业务请求一样进 `chatCompletions({ signal })`；客户端断开或用户点"取消"即 `abort()`，由引擎既有的 `linkedAbort` 合并上游超时、既有 499 处置（`CLIENT_ABORTED`，不计 key 失败）自然接上。**引擎侧零新增分支**；未接上这条 signal 的助手实现 = 白烧 token + 占住并发槽位，属缺陷。
+
+### 13.5 鉴权与作用域
+
+- 走登录会话（§0.5），**不用** `READONLY_TOKEN`。`Authorization: Bearer <READONLY_TOKEN>` 落在本端点 → **403 `FORBIDDEN`**（§12.4 作用域收窄在 `GET /api/observability/*`，本端点不新增任何白名单）。
+- 回归闸（照搬 §12.4 的形状）：未鉴权 → 401；带会话 → 200；两把令牌都未配置时带 Bearer → 照旧回落会话鉴权（v1.0 语义零变更）。
+
+---
+
+*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`。*

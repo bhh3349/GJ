@@ -134,6 +134,13 @@ IP 级 429  →  key₁ 被冷 60s  →  引擎换 key₂ 重试
   这样 Tier 2 换的是**值**不是**形状**，前端零改造。
 - **`cooldownUntil` 是 ISO8601 时间戳**，与 `key_health.cooldownUntil` 同名同形；
   解除时推同一帧、`cooldownUntil: null`；差分指纹必须带它（冷却会**自然到期**，那一刻没有任何写入动作）。
+- **投递语义 = 每 tick 差分帧，不是纯事件推**（v1.4.10 收口）：v1.4.8 写的「开始 / 变更 / 解除时
+  **立即**推」是从 `key_health` 抄的，而本决策第一条已经关掉了 REST 兜底 ⇒ 纯事件推会让
+  **刷新 / 重连拿不到"此刻正在冷却"**，把「全部 key 暂停路由」渲染成正常（最长 30min），
+  且反推被明令禁止、前端**无合规自纠手段**。故与 `key_health` 同列：`id: egress:${egressId}`、
+  `sig` 必带 `cooldownUntil`、新连接 `seen` 为空 ⇒ **首 tick 全量**。代价：最多晚 1 tick（1s）可见。
+  （同批订正一条证据：`key_health` 的基线来自它自己的差分帧首 tick，**不是** `metrics` 帧 ——
+  `live.ts` 的 `metrics` 帧不带 `keyHealth[]`。）
 - **零新增错误码、零新增 HTTP 状态。**
 
 **命名说明**：PM 的派单里写作 `egressCooldown` / `until`，本决策按本契约 §7 的既有口径
@@ -154,6 +161,7 @@ IP 级 429  →  key₁ 被冷 60s  →  引擎换 key₂ 重试
   `supplier_accounts.egress_id`）已进 `src/db/schema.ts`；**DTO 仍零改动**（`egress_id` 不进任何 DTO）。
 - **前端**（画师）：**v1.4.8 订正本行为"消费一条新帧"** —— 已不是"零影响"。
   消费 §7 `egress_cooldown`（决策 7），渲染「出口限流中，全部 key 暂停路由（至 `cooldownUntil`）」；
+  该帧是**每 tick 差分帧**，重连 / 刷新后**首 tick 即补基线**（v1.4.10），前端不必自建初始态；
   `SupplierAccount` / `result.items` 等其余字段仍零改动。
 
 ## 未决

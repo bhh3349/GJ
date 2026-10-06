@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.4.9**
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.4.10**
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -53,6 +53,8 @@
 > **v1.4.8（2026-10-07，出口级三条收口 —— 路由者 §16.7 两问的答复）**：① **裁定 §16.7 两处悬空件**（路由者原话"我不按文案猜、不在契约未定前接线"，这个纪律是对的）：**(一) 识别规则本期哪条都不启用** —— 把纯自证据路径登记为**世界 (c)**（同出口第 2 把不同 key 亦 429），代价写明（确认前第一把 key 仍被记过，受害者 27→1），启用需 (i) Bo 的原始响应到手按 (a)/(b) 落，或 (ii) PM/Bo **明示放行** (c)；**(二) 出口冷却适用 60s 地板** —— 把「尊重 `Retry-After`」读作「不短于它」，即 **出口冷却 = `max(Retry-After, 60s)`**，无该头则 60s 起、封顶 30min、阶梯同 key 级；此前的文字只写"尊重"没写地板，是**本契约漏写、不是实现偏差**，故路由者的实现保持不动。② **一条必须说穿的后果**：识别器默认关闭期间 **Tier 1 是"缝"不是"修"** —— 运行时行为与改动前**逐字节相同**，"IP 级 429 被轮换放大成 30min 全池故障"这条**自伤回路尚未被掐断**；公告与回执**不得**写成"自伤回路已掐断"。③ **新增 §7 实时通道帧 `egress_cooldown`**（`egressId` / `cooldownUntil` / `reason`）—— 出口冷却的**唯一读面**，**不新增 HTTP 端点、§14 端点侧不加字段**；`egressId` 定为**不透明字符串**（本期 = 出口 host，Tier 2 后 = `egress_proxies.id`），前端不得解析其内容，否则 Tier 2 一落地就变成一次前端改造。④ **§15.5 依据降级在源头收口**：表内那行"工作台 29 号跑下来未触发限流"改为**划删 + 指向 §16.7**（v1.4.4 只在本节 §16.7 写了降级，**§15.5 表内没改**，同一事实两处不一致——与 v1.4.7 修的 §16.5 是同一类残留）；§15.9 / §16.4 两处 0.6s 引用补出口级指引。⑤ **Tier 1.5 口径本期定死、数值占位**：§15.5 口径改为**「同一出口共用一条速率」**，作用域（刷新 / 建 key / 重登 / 探活 / 数据面）现在锁死，**数值等实测退避时长**。⑥ **Tier 2 订正本节旧文"若做"**：DDL 已进 `src/db/schema.ts`（`egress_proxies` + `supplier_accounts.egress_id` 可空），并写死三条绑定纪律 —— **绑定粒度 = 账号级非 key 级**、**每出口账号数上限 = 6（占位，待标定回填）**、**`egress_id` 不进任何 DTO**。**无字段改名、无字段删除、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2（Tier 2 那两张表/列在 v1.4.4 之后的 `001ae15` 已落）。**
 
 > **v1.4.9（2026-10-07，出口级读面本期状态的裁定 —— 画师「本期暴露不暴露」的答复）**：① **裁定：本期不暴露（对管理面不可观测），但形状已冻结。** 画师给的是一道二选一（暴露 → 给读面落点；不暴露 → 契约写死"不可观测、前端不得推断"）。**答案落在第二支**，但要说清它为什么不等于"漏"：读面**有**（§7 `egress_cooldown` 帧，v1.4.8 已冻结字段名与形状），**只是本期发不出来** —— 两个原因各自独立成立：**(一) 触发条件未启用**：该帧由出口冷却置起，而识别器默认 `neverEgressLimited`（恒 `false`，§16.7 裁定 ①）⇒ **冷却不会被置起**，帧无从来；**(二) 发帧实现未落**：`src/api/routes/live.ts` 零 egress 代码（`key_health` / `balance` / `task` 三条帧已落，这条没有）。② **三条硬约束进 §7**：**前端不得接线**（对着不来的帧写渲染 = 渲染一个不会发生的事件）、**不得把"未收到该帧"当作"出口健康"**（本期没有任何字段能证明出口正常，**缺省不是证据** —— 否则用户会把一片绿的面板当 bug 报给前端，而根因是契约没写这一句）、**不得从 `429` / `Retry-After` / 日志反推**（既有纪律，此处重申）。③ **接入点写死为接线层注入**：`src/api` 不可直连网关内部（AGENTS.md §8），出口状态须经 `src/server.ts` 注入，形状与 `ApiContext.assistant` 同一套（缺省 = 明确的"未接线"）；生产者是路由者 `src/gateway/egress.ts`，**管家侧发帧 + 路由者侧生产者，两侧都到位才有帧**。④ **给出可自检信号**（免去第四个人再问一遍）：发帧面 `git grep -c egress dev/api -- src/api/routes/live.ts`（今天 0）、触发面 `git grep -n neverEgressLimited dev/gateway-rotation -- src/gateway/`（今天有命中）。**同步进 §16.7 裁定 ①**（同一裁定的第二个后果，两处一致）。**无字段改名、无字段删除、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2 —— 本版纯文档，零代码。**
+
+> **v1.4.10（2026-10-07，`egress_cooldown` 帧**投递语义**收口 —— 画师「刷新 / 重连拿不到初始态」的答复）**：① **缺口成立，且是 v1.4.8 自己写出来的**：那句「开始 / 变更 / 解除时**立即**推（不等到下一帧）」是从 `key_health` 抄的 —— 而 `key_health` 有兜底、本帧没有（本帧被 §7 自己定为**唯一读面**且**不走 REST**）⇒ 照字面实现就是**纯事件推**，**刷新 / 重连拿不到"此刻正在冷却"**，前端会把「全部 key 暂停路由」渲染成正常（最长 30min），且它被禁止从 `429` / `Retry-After` / 日志反推，**没有任何合规自纠手段**。② **裁定：改为随 §7 每 tick 差分帧下发**（`id: egress:${egressId}`、`sig` 必带 `cooldownUntil`；每 tick 走 `buildTickFrames` / `pushIfChanged`），新客户端 `seen` 为空 ⇒ **首 tick 自然全量**，基线由此成立；冷却自然到期时 `sig` 变 ⇒ 照样推 `cooldownUntil: null`。与 `key_health` / `balance` / `task` **同列**，**零新增端点、零帧形状变更**；代价写明：冷却开始到可见**最多晚一个 tick（1s）**。③ **一条证据订正进 §7**：`key_health` 的基线**不是**由 `metrics` 帧承担（`live.ts` 的 `metrics` 帧只带数字与全量余额，**不带 `keyHealth[]`**；带 `keyHealth[]` 的是 REST 的 §6 `/api/stats/overview`），而是它与本帧同款的**差分帧首 tick 全量**；`balance` 的 REST 兜底在 `live.ts` 注释里写明 —— 记住错的那半边，下一个人会照样设计出没有基线的帧。④ **自检信号由两个增为三个**（新增**差分帧注册面** `git grep -c 'egress:' dev/api -- src/api/routes/live.ts`，今天 0）：只非 0 发帧面 = 帧发了但不带基线，**正是本次要堵的形状**。⑤ **本条不改变「本期不发射」**（v1.4.9 原样有效）：投递语义是**接线后**的行为，本期仍零 egress 代码、三条硬约束（不得接线 / 缺省不是证据 / 不得反推）一条不减。**无字段改名、无字段删除、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2 —— 纯文档，零代码。**
 
 ---
 
@@ -800,7 +802,8 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
 }
 ```
 
-**`egress_cooldown`** — 出口级冷却开始 / 变更 / 解除时**立即**推（不等到下一帧；契约 §16.7 Tier 1）
+**`egress_cooldown`** — 随 §7 **每 tick 差分帧**下发（1s 拍子；与 `key_health` / `balance` / `task`
+同列，**新连接首 tick 全量** —— 投递语义见下方「基线」，契约 §16.7 Tier 1）
 ```json
 {
   "type": "egress_cooldown",
@@ -824,6 +827,22 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
 - **差分指纹必须带 `cooldownUntil`**：冷却会**自然到期**，那一刻没有任何写入动作，只有时间流逝。
   指纹不带它，到期后前端会一直停在"出口限流中"—— 与 `key_health` 同一个坑，同一个解法。
 
+**基线（v1.4.10 收口）—— 本帧是差分帧，不是纯事件推。** v1.4.8 那句「开始 / 变更 / 解除时**立即**推
+（不等到下一帧）」是从 `key_health` 抄过来的，但 `key_health` 有兜底、本帧没有 ⇒ 照字面实现就是
+**纯事件推**，后果是**刷新 / 重连拿不到"此刻正在冷却"这个事实**：前端会把「全部 key 暂停路由」
+渲染成正常（最长 30min），而它被上面第一条纪律禁止从 `429` / `Retry-After` / 日志反推 ——
+**没有任何合规手段自纠**。所以落法是：与另三类帧同列，`id: egress:${egressId}`、
+`sig` 必带 `cooldownUntil`，每 tick 走 `buildTickFrames` / `pushIfChanged`；新客户端 `seen` 为空
+⇒ **首 tick 自然全量**，基线由此成立（冷却自然到期时 `sig` 变化，照样推 `cooldownUntil: null`）。
+
+同批一条**证据订正**（免得下一个人照错的半边设计基线）：`key_health` 的基线**不是**由 `metrics` 帧承担 ——
+`live.ts` 的 `metrics` 帧只带数字与全量余额，**不带 `keyHealth[]`**（带 `keyHealth[]` 的是 REST 的
+§6 `/api/stats/overview`）；它靠的正是与本帧同款的**差分帧首 tick 全量**。`balance` 的兜底则是
+REST 全量 `/api/stats/balance`（`live.ts` 注释里写明：通道只报"变化"）。**本帧两条都没有，所以必须自带基线。**
+
+代价写明：冷却开始到前端可见**最多晚一个 tick（1s）**。对仪表盘足够（冷却最短 60s），
+换来的是这条"唯一读面"**能自纠**。
+
 渲染口径：冷却期间显示「出口限流中，全部 key 暂停路由（至 `cooldownUntil`）」。**不新增 HTTP 端点、
 §14 端点侧不加字段** —— 出口状态不走 REST。
 
@@ -846,10 +865,15 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
   而不是转不完的圈）。生产者是网关的出口冷却表（路由者 `src/gateway/egress.ts`），
   **管家侧的发帧 + 路由者侧的生产者，两边都到位才有帧**。
 
-自检信号（两个都变号才算真接线，任一为 0 就是没接）：发帧面
-`git grep -c egress dev/api -- src/api/routes/live.ts`（今天 **0**）；触发面
+自检信号（三个都变号才算真接线，任一为 0 就是没接）：发帧面
+`git grep -c egress dev/api -- src/api/routes/live.ts`（今天 **0**）；**差分帧注册面**
+`git grep -c 'egress:' dev/api -- src/api/routes/live.ts`（今天 **0** —— 本条为 v1.4.10 新增：
+它不为 0 才说明基线机制落了地，只非 0 前者说明帧发了但不带基线）；触发面
 `git grep -n neverEgressLimited dev/gateway-rotation -- src/gateway/`（今天**有命中**，
 换成真识别器后才可能出帧）。
+
+**上面「本期状态」不因 v1.4.10 改变**：投递语义（基线）是**接线后**的行为，本期仍**零 egress 代码、
+帧仍不发射** —— 「不得接线 / 缺省不是证据 / 不得反推」三条硬约束原样有效。
 
 **`balance`** — 余额变动时推（验收 3 要求 Web 端 **5s 内**呈现）
 ```json
@@ -2144,6 +2168,11 @@ createdAt, updatedAt`。
 所以**本期出口级冷却对管理面不可观测**：管理面**不得**从 `429` / `Retry-After` / 日志反推，
 **也不得**把"未收到该帧"当作"出口健康"（缺省不是证据）。接入点与自检信号见 §7 该帧的「本期状态」。
 
+**v1.4.10 补：该帧的投递语义定为「随每 tick 差分帧下发、新连接首 tick 全量」**（§7「基线」）——
+**不做成纯事件推**：本帧是出口冷却的**唯一读面**且**不走 REST**，纯事件推会让刷新 / 重连拿不到
+"此刻正在冷却"，而反推又被明令禁止 ⇒ 前端无合规自纠手段。代价是最多晚 1 tick（1s）可见。
+这与 §7 的「本期不发射」**不冲突**：那是本期状态，这是接线后的行为。
+
 **② 出口冷却适用 60s 地板 —— 本裁定把「尊重 `Retry-After`」读作「不短于它」。**
 即 **出口冷却 = `max(Retry-After, 60s)`**；无该响应头则 60s 起、**封顶 30min**，阶梯与 key 级同源。
 路由者的实现（`egress.ts` 复用 `cooldown.ts` 的 RATE_LIMITED 口径）**据此保持不动**：
@@ -2153,4 +2182,4 @@ createdAt, updatedAt`。
 
 ---
 
-*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`；v1.2.1（§13.4「槽位撞满」二分口径：全候选满并发 `503 NO_AVAILABLE_KEY` / 竞态窗口 `429 RATE_LIMITED`，零新增枚举、零代码改动）为文本对齐；v1.2.2（§2 `DELETE /api/upstreams/:id` 从属资源处置：`force!=true` 拦 key 与模型并报 `{keyCount, modelCount}`、`force=true` 按依赖序物理删整棵子树，修订 §11 C4）见 `docs/adr/0016-delete-upstream-subtree.md`；v1.3.0（§14 余额同步：自动同步节奏与退避、NULL 口径、快照与 `asOf`、方向级漂移提示；同批撤销「单价 × 用量的本地扣减账本」方案）见 `docs/adr/0017-balance-sync-source-of-truth.md`；v1.4.0（§15 供应商账号面 + §16 TierFlow 数据面约束：账号作独立资源、批量新建 key 为唯一入池通路、账号级余额第四口径、套餐不建成 key、`upstream_keys.unlimited`、凭据会话一次性离线导入、`…Cents` 金额口径；`ERROR_CODES` 首次新增 1 个 `ACCOUNT_HAS_KEYS`）见 `docs/adr/0018-supplier-account-batch.md`；v1.4.1（§15.1 非破坏新增 `credentialSource`；§15.9 补凭据双路径定位、自动重登的触发与账号级互斥；§15.3 收口 `action` 枚举的生产者）见 `docs/adr/0018-supplier-account-batch.md` 决策 10；v1.4.2（§3 `KeyDto` 非破坏新增 `models` 模型白名单 + §5 `availableKeyIds` 补白名单条件 + §15.2 `keys` 入参可选 `models` + §15.7 加列 `upstream_keys.model_limits` + §16.1.1 悬空件登记 + §16.5 S1 字段对账）见 `docs/adr/0019-key-model-whitelist.md`；v1.4.3（§16.1.1 **执行主体改锚**：凭据由持有者运行时注入、可明示指定执行会话代跑，路由者只出探针与结论；新增 **§16.6 S4 验收锚定**含执行链三步与三项 S1 占位值表 —— 其中"数据面路径与协议"**明确不落 DTO**；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增**）见 `docs/adr/0018-supplier-account-batch.md` 决策 11；v1.4.4（§16.7 **出口级（IP 级）限流**：定性为第三层限流、取证"轮换放大"回路、归因纪律"IP 级 429 不计 key 健康 + 冷却上移到出口 + 冷却期内不换 key"、处置三档 Tier 1/1.5/2、识别规则按悬空件登记、§15.5 那条依据降级；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 对外行为零变更**）见 `docs/adr/0020-egress-ip-rate-limit.md`；v1.4.3 变更块为**补记**（冻版时正文与版本号已改、变更块漏写，仅补记录、无内容变更）；v1.4.5（§15.7 补 `unlimited=1 ⇒ balance_cents` 落 `NULL` 的**落库规则** + §16.3 该行改写与"白名单还差几处"的量词订正 + 同批落地 `src/db/schema.ts` 三列守卫 `ALTER` 与老库升版 spec + 补记 v1.4.3 变更块；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`SCHEMA_VERSION` 仍为 2**）为落地面收口；v1.4.6（§16.3 白名单口径**裁定**：路由者报回三条中 (a) 确认为既有登记的「4 处 + 1 spec」缺口、(b)(c) 按**非缺陷**关闭 —— 契约四处一致 `[]` ≡ `null` ≡ 不限、与冻结件 `matchesModel()` 同向；§15.2 待实测块**新增**一条「上游 `model_limits_enabled=true` + 空 CSV = 全禁还是不限」，实测前归一化仍为 `NULL`；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2**）；v1.4.7（§16.3 补**拓扑中立取件纪律** —— canonical 落点唯一、车道基线早于该批 `ALTER` 时按路径取件、不派生第二份 `schema.ts`；§16.5 两处文本订正：残留「网关侧还差一行」→ **4 处 + 1 个 spec**、「另两项不需要等任何人」限定为**契约层**；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2**）；v1.4.8（§16.7 两处悬空件**裁定** —— 识别规则**本期不启用**、登记世界 (c)（同一出口第 2 把不同 key 亦 429，代价：确认前第一把仍被记过）并写明「默认关闭期间 Tier 1 是**缝**不是**修**、自伤回路尚未掐断」；出口冷却 **= `max(Retry-After, 60s)`** 地板成文（此前只写"尊重"没写地板，是契约漏写）；**新增 §7 帧 `egress_cooldown`**（`egressId` 不透明字符串、`cooldownUntil` ISO8601、解除推 `null`）并同日写进 ADR-0020 决策 7；§15.5 依据降级落到**表内那一行本身**（此前只在本节写、表内仍是旧依据）、§15.9 / §16.4 两处 0.6s 引用补出口级指引；Tier 1.5「**同一出口共用一条速率**」口径定死、数值占位；Tier 2 订正旧文"若做"（DDL 已落）并写死**账号级绑定非 key 级** / **每出口账号数上限 6 占位** / **`egress_id` 不进任何 DTO**；**无字段改名、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2** —— 唯一的对外形状新增是那条 §7 帧）；v1.4.9（**§7 `egress_cooldown` 帧的「本期状态」裁定** —— 形状已冻结、**本期不发射**（识别器默认关闭 ⇒ 冷却不置起；发帧实现未落 ⇒ `live.ts` 零 egress 代码），故**本期出口级冷却对管理面不可观测**：前端**不得接线**、**不得把"未收到该帧"当作"出口健康"**（缺省不是证据）、不得反推；接入点写死为**接线层注入**（AGENTS.md §8，形状同 `ApiContext.assistant`），生产者归路由者 `src/gateway/egress.ts`；同裁定补进 §16.7 裁定 ① 并给出两条自检信号；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2 —— 纯文档，零代码**）。以上各版同属本契约的同一冻结面。（**版本索引订正 2026-10-07，不升版**：本索引此前在 v1.2.1 之后漏记 v1.2.2 / v1.3.0 两条，本次补齐 —— 仅索引行，无内容变更。）*
+*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`；v1.2.1（§13.4「槽位撞满」二分口径：全候选满并发 `503 NO_AVAILABLE_KEY` / 竞态窗口 `429 RATE_LIMITED`，零新增枚举、零代码改动）为文本对齐；v1.2.2（§2 `DELETE /api/upstreams/:id` 从属资源处置：`force!=true` 拦 key 与模型并报 `{keyCount, modelCount}`、`force=true` 按依赖序物理删整棵子树，修订 §11 C4）见 `docs/adr/0016-delete-upstream-subtree.md`；v1.3.0（§14 余额同步：自动同步节奏与退避、NULL 口径、快照与 `asOf`、方向级漂移提示；同批撤销「单价 × 用量的本地扣减账本」方案）见 `docs/adr/0017-balance-sync-source-of-truth.md`；v1.4.0（§15 供应商账号面 + §16 TierFlow 数据面约束：账号作独立资源、批量新建 key 为唯一入池通路、账号级余额第四口径、套餐不建成 key、`upstream_keys.unlimited`、凭据会话一次性离线导入、`…Cents` 金额口径；`ERROR_CODES` 首次新增 1 个 `ACCOUNT_HAS_KEYS`）见 `docs/adr/0018-supplier-account-batch.md`；v1.4.1（§15.1 非破坏新增 `credentialSource`；§15.9 补凭据双路径定位、自动重登的触发与账号级互斥；§15.3 收口 `action` 枚举的生产者）见 `docs/adr/0018-supplier-account-batch.md` 决策 10；v1.4.2（§3 `KeyDto` 非破坏新增 `models` 模型白名单 + §5 `availableKeyIds` 补白名单条件 + §15.2 `keys` 入参可选 `models` + §15.7 加列 `upstream_keys.model_limits` + §16.1.1 悬空件登记 + §16.5 S1 字段对账）见 `docs/adr/0019-key-model-whitelist.md`；v1.4.3（§16.1.1 **执行主体改锚**：凭据由持有者运行时注入、可明示指定执行会话代跑，路由者只出探针与结论；新增 **§16.6 S4 验收锚定**含执行链三步与三项 S1 占位值表 —— 其中"数据面路径与协议"**明确不落 DTO**；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增**）见 `docs/adr/0018-supplier-account-batch.md` 决策 11；v1.4.4（§16.7 **出口级（IP 级）限流**：定性为第三层限流、取证"轮换放大"回路、归因纪律"IP 级 429 不计 key 健康 + 冷却上移到出口 + 冷却期内不换 key"、处置三档 Tier 1/1.5/2、识别规则按悬空件登记、§15.5 那条依据降级；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 对外行为零变更**）见 `docs/adr/0020-egress-ip-rate-limit.md`；v1.4.3 变更块为**补记**（冻版时正文与版本号已改、变更块漏写，仅补记录、无内容变更）；v1.4.5（§15.7 补 `unlimited=1 ⇒ balance_cents` 落 `NULL` 的**落库规则** + §16.3 该行改写与"白名单还差几处"的量词订正 + 同批落地 `src/db/schema.ts` 三列守卫 `ALTER` 与老库升版 spec + 补记 v1.4.3 变更块；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`SCHEMA_VERSION` 仍为 2**）为落地面收口；v1.4.6（§16.3 白名单口径**裁定**：路由者报回三条中 (a) 确认为既有登记的「4 处 + 1 spec」缺口、(b)(c) 按**非缺陷**关闭 —— 契约四处一致 `[]` ≡ `null` ≡ 不限、与冻结件 `matchesModel()` 同向；§15.2 待实测块**新增**一条「上游 `model_limits_enabled=true` + 空 CSV = 全禁还是不限」，实测前归一化仍为 `NULL`；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2**）；v1.4.7（§16.3 补**拓扑中立取件纪律** —— canonical 落点唯一、车道基线早于该批 `ALTER` 时按路径取件、不派生第二份 `schema.ts`；§16.5 两处文本订正：残留「网关侧还差一行」→ **4 处 + 1 个 spec**、「另两项不需要等任何人」限定为**契约层**；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2**）；v1.4.8（§16.7 两处悬空件**裁定** —— 识别规则**本期不启用**、登记世界 (c)（同一出口第 2 把不同 key 亦 429，代价：确认前第一把仍被记过）并写明「默认关闭期间 Tier 1 是**缝**不是**修**、自伤回路尚未掐断」；出口冷却 **= `max(Retry-After, 60s)`** 地板成文（此前只写"尊重"没写地板，是契约漏写）；**新增 §7 帧 `egress_cooldown`**（`egressId` 不透明字符串、`cooldownUntil` ISO8601、解除推 `null`）并同日写进 ADR-0020 决策 7；§15.5 依据降级落到**表内那一行本身**（此前只在本节写、表内仍是旧依据）、§15.9 / §16.4 两处 0.6s 引用补出口级指引；Tier 1.5「**同一出口共用一条速率**」口径定死、数值占位；Tier 2 订正旧文"若做"（DDL 已落）并写死**账号级绑定非 key 级** / **每出口账号数上限 6 占位** / **`egress_id` 不进任何 DTO**；**无字段改名、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2** —— 唯一的对外形状新增是那条 §7 帧）；v1.4.9（**§7 `egress_cooldown` 帧的「本期状态」裁定** —— 形状已冻结、**本期不发射**（识别器默认关闭 ⇒ 冷却不置起；发帧实现未落 ⇒ `live.ts` 零 egress 代码），故**本期出口级冷却对管理面不可观测**：前端**不得接线**、**不得把"未收到该帧"当作"出口健康"**（缺省不是证据）、不得反推；接入点写死为**接线层注入**（AGENTS.md §8，形状同 `ApiContext.assistant`），生产者归路由者 `src/gateway/egress.ts`；同裁定补进 §16.7 裁定 ① 并给出两条自检信号；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2 —— 纯文档，零代码**）；v1.4.10（**§7 `egress_cooldown` 帧的投递语义收口** —— v1.4.8 那句「立即推（不等到下一帧）」是从 `key_health` 抄的，而本帧被 §7 自己定为唯一读面、**不走 REST** ⇒ 照字面实现即**纯事件推**：**刷新 / 重连拿不到"此刻正在冷却"**，前端只能把「全部 key 暂停路由」渲染成正常（最长 30min），且反推被禁 ⇒ **无合规自纠手段**；裁定改为**随每 tick 差分帧下发**（`id: egress:${egressId}`、`sig` 必带 `cooldownUntil`，新连接 `seen` 为空 ⇒ **首 tick 自然全量**），与 `key_health` / `balance` / `task` 同列，**零新增端点、零帧形状变更**，代价写明 **≤1 tick（1s）**；同批**证据订正**：`key_health` 的基线**不是** `metrics` 帧（`live.ts` 该帧不带 `keyHealth[]`）而是与其同款的差分帧首 tick 全量；自检信号由两个增为**三个**（新增差分帧注册面 `git grep -c 'egress:' dev/api -- src/api/routes/live.ts`）；**不改变 v1.4.9「本期不发射」的结论**；**无字段改名、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2 —— 纯文档，零代码**）。以上各版同属本契约的同一冻结面。（**版本索引订正 2026-10-07，不升版**：本索引此前在 v1.2.1 之后漏记 v1.2.2 / v1.3.0 两条，本次补齐 —— 仅索引行，无内容变更。）*

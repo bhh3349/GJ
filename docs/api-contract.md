@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.2.2**
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.3.0**
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -29,6 +29,8 @@
 > **v1.2.1（2026-10-07，M6-B 第二阶段收口）**：§13.4 把「槽位撞满」由一句简写（"撞满即 429 `RATE_LIMITED`"）改成**二分口径**：**全候选满并发**（`getAvailableKeys` 的 `isUsable` 已把满并发 key 过滤掉、候选集为空）是稳定出口 → **`503 NO_AVAILABLE_KEY`**；**429 `RATE_LIMITED`（"网关池饱和"）只出现在「选路返回 → `beginAttempt` 占位」的竞态窗口**，是偶发出口。给前端留一条硬要求：`429` 与 `503` 两条都要能落"稍后重试"分支。**§10 码表零新增、`ERROR_CODES` 零新增、无字段改名/删除/类型变更、帧契约与 `seq` 语义零变更** —— 本条是把 v1.2.0 的简写**订正为与实现一致**（§10 的「候选非空、0 次真实尝试、全候选并发已满」本来就是准的那一条），属文本对齐，不涉及两端代码改动。
 
 > **v1.2.2（2026-10-07，M6-B 第二阶段收口）**：修正 `DELETE /api/upstreams/:id` 的**从属资源处置**（§2 / §11 C4）。原文（C4 裁决）要求 `force=true` 时「级联**软删** key + 硬删上游行」，但 `upstream_keys.upstream_id` 与 `models.upstream_id` 都是 `REFERENCES upstreams(id)` 且连接开了 `foreign_keys=ON` —— **软删不解除行级外键**，上游下只要还有一行 key（哪怕 `deletedAt` 已置）或一行模型档案，`DELETE FROM upstreams` 就被 SQLite 拒掉：实测 `500 INTERNAL`（`SQLITE_CONSTRAINT_FOREIGNKEY`，前端「上游管理」页的删除按钮在这条路上是死的）。本版改为：① `force!=true` 时**key 与模型一起**拦，`409 UPSTREAM_HAS_KEYS`，`details: {keyCount, modelCount}` —— **`modelCount` 是纯新增只读字段**，老客户端只读 `keyCount` 照常工作；② `force=true` 时按依赖序**物理删除整棵子树**（`key_runtime` → `upstream_keys` → `models` → `upstreams`，单事务），响应仍是 `204`。**`ERROR_CODES` 零新增、端点零增删、无字段改名 / 删除 / 类型变更、Upstream 对象零变化、`SCHEMA_VERSION` 不变、零迁移**。动机与影响见 ADR-0016（**修订 §11 C4 的 key 处置**）。
+>
+> **v1.3.0（2026-10-07，M6-C）**：新增 **§14 余额同步** —— ①**自动同步**：每上游独立节奏、基准 **15 分钟 ± 10% 抖动**、失败**指数退避**（`min(base×2^n, 6h)`）、同上游**单飞**；`BALANCE_SYNC_MINUTES=0` 关闭（手动三端点语义**零变更**）；②**NULL 口径**：查不到就**一个字都不写**（保留上次查得值**与它真实的查得时刻**，从未查到则仍为 `null`），**绝不补 0、绝不估算、绝不用旧值刷新时间戳**；③**快照与 `asOf`**：新表 `balance_snapshots`（无外键 + 上游名快照，ADR-0016 删上游后历史仍可读），新增**只读**端点 `GET /api/stats/balance/sync`（同步状态 + 带 `asOf` 的余额序列 + 漂移提示）；④**漂移提示**（非破坏）：`BALANCE_SPENT_WITHOUT_TRAFFIC` / `BALANCE_UNCHANGED_WITH_TRAFFIC` 两码，**只 warn + 计数**，不进 `ERROR_CODES`、不拦请求、不改任何数 —— **本地没有单价，所以漂移只能是方向级提示，不能判钱**。**无字段改名、无字段删除、无类型变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`SCHEMA_VERSION` 不变、零迁移、零新鉴权**；`§6 余额三口径` / `§2 §3 手动刷新` / `src/gateway/` **全部零改动**。★ 同批撤销「单价 × 用量的本地扣减账本」方案（原 0017 草案），理由见 ADR-0017「被撤销的上一版」。动机与影响见 ADR-0017；同批顺手补上文末版本索引漏记的 v1.2.1 之后各版（P3）。
 
 ---
 
@@ -1147,4 +1149,118 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 
 ---
 
-*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`；v1.2.1（§13.4「槽位撞满」二分口径：全候选满并发 `503 NO_AVAILABLE_KEY` / 竞态窗口 `429 RATE_LIMITED`，零新增枚举、零代码改动）为文本对齐，同属本契约的同一冻结面。*
+## 14. 余额同步（v1.3.0）
+
+本节是 **M6-C**：**不新增任何"钱"的口径**，只把 M6-A 已经做完的余额查询做成「自动、有历史、能看出漂移」。三条纪律贯穿全节：
+
+1. **余额的唯一事实源 = 上游接口返回值**（模板 / preset 查得，或人手动录入）。本节**不做本地扣减、不引入单价、不派生"可用余额"** —— 两次查询之间余额一直在变，本地算出来的数必然在某些窗口里撒谎。
+2. **查不到就是查不到**：不写 `0`、不估算、不用旧值刷新时间戳（14.2）。
+3. **网关零改动**：本版在 `/v1/*` 请求路径上**零新增同步读写**（15 分钟一次的定时器 + 只读端点），TTFB 判据不受影响。
+
+### 14.1 触发与节奏
+
+| 触发 | 行为 |
+|---|---|
+| **自动同步**（本节新增） | 每上游独立节奏，基准间隔 **15 分钟**（`BALANCE_SYNC_MINUTES`，`0` = **关闭自动同步**）；每轮延迟在 **±10%** 内抖动 |
+| **手动刷新**（既有，零变更） | `POST /api/upstreams/:id/balance/refresh`、`POST /api/keys/:id/balance/refresh`、`POST /api/keys/balance/refresh` 全部保留，语义 / 形状 / 状态码逐字不变 |
+
+- **退避**：同一上游**连续失败** n 次后，下一次自动尝试延后 `min(base × 2^n, 6h)`（15m → 30m → 1h → 2h → 4h → 6h 封顶）；任何一次拿到值即归零。**手动刷新成功同样归零** —— 人已经证明能查通了，不该让他等 6 小时。
+- **「失败」的判定**：本轮该上游 `failed > 0 且 ok == 0`。`skipped`（该上游没配查询方式）**不推进退避**（没做的事不该被罚）；`unknown`（请求成功但取不到值）**算失败** —— 配置问题退到后面等人改，比每 15 分钟打一次上游强。
+- **单飞**：同一上游同一时刻只跑一次；上一轮未结束时本轮**跳过**该上游（不排队、不堆积）。
+- **重启归零**：退避与单飞状态在**进程内存**里，重启即清空（与 §3 `key_runtime` 的"重启后归零"同款既定降级，ADR-0010）；**快照与同步时刻落库，重启不丢**。
+- 关闭自动同步时不注册定时器（`auto.enabled=false`、`nextRunAt=null`），且**不影响**手动刷新与既有读数。
+
+### 14.2 同步写法（NULL 口径，强制）
+
+| 本次结果 | 写库 | `balanceUpdatedAt` |
+|---|---|---|
+| 查到值 | 覆写 `balance` / `balanceCurrency`，`balanceSource="template"` | **= 本次查得时刻** |
+| 不可达 / 超时 / 非 2xx（`failed`） | **一个字都不写** | **不变** |
+| 请求成功但取不到金额（`unknown`） | **一个字都不写** | **不变** |
+| 从未查到过（新 key / 手录后撤销） | 保持 `null` | `null` |
+
+- **绝不写 `0`**：`0` 是合法余额，与"未知"严格区分（§0.2）。
+- **绝不用旧值刷新时间戳**：查失败时 `balanceUpdatedAt` 保持不动 —— 它是"最近一次**真的查到**的时刻"；把它推到"现在"等于把陈旧读数伪装成实时读数，比不显示更坏。
+- `category="token-plan"` 的 key 同理（`tokenPlan.remainingTokens` 与其 `expiresAt`）。
+- `balanceSource` 枚举**不变**（仍只有 `"manual"` / `"template"`）；`hintCode` 四值**不变**。
+
+### 14.3 快照、`asOf` 与只读端点
+
+**快照 = 状态，不是动作**：一条快照记的是该上游**此刻**所有未软删 key 的余额状态 —— 它是"照下来的一张相"，不是"这次刷了多少把"的作业记录（后者在 `GET /api/tasks/:id`）。只在**覆盖整个上游**的同步后写（自动同步 / 上游刷新 / 批量刷新里该上游的那部分）；**单 key 手动刷新不写快照** —— 那时上游合计里只有一把 key 是新值、其余是旧值，记成"上游此刻的状态"会是一条半新半旧的假相。
+
+`GET /api/stats/balance/sync?upstreamId=&window=`
+
+| 参数 | 取值 | 必填 |
+|---|---|---|
+| `upstreamId` | 单值精确匹配 | ❌（缺省 = 全部上游） |
+| `window` | `Ns` / `Nm` / `Nh`，上限 24h，**默认 `6h`**（解析规则同 §6 `overview`，回显后端实际用的值） | ❌ |
+
+```json
+{
+  "auto": { "enabled": true, "intervalMinutes": 15, "jitterRatio": 0.1, "backoffCapMinutes": 360 },
+  "lastSyncedAt": "2026-10-07T02:15:03.114Z",
+  "lastTrigger": "auto",
+  "nextRunAt": "2026-10-07T02:30:41.902Z",
+  "window": { "from": "2026-10-06T20:15:00.000Z", "to": "2026-10-07T02:15:00.000Z" },
+  "upstreams": [
+    { "upstreamId": "up_7f3a", "name": "my88", "lastSyncedAt": "2026-10-07T02:15:03.114Z",
+      "consecutiveFailures": 0, "nextAttemptAt": "2026-10-07T02:30:41.902Z", "inFlight": false }
+  ],
+  "series": [
+    { "upstreamId": "up_7f3a", "label": "my88",
+      "points": [
+        { "t": "2026-10-07T02:15:03.114Z", "totalBalanceCents": 384800, "knownKeyCount": 4, "unknownKeyCount": 2, "tokenPlanKeyCount": 1 }
+      ] }
+  ],
+  "drift": {
+    "since": "2026-10-06T20:15:00.000Z",
+    "counts": { "BALANCE_SPENT_WITHOUT_TRAFFIC": 1, "BALANCE_UNCHANGED_WITH_TRAFFIC": 0 },
+    "alerts": [
+      { "code": "BALANCE_SPENT_WITHOUT_TRAFFIC", "upstreamId": "up_7f3a",
+        "from": "2026-10-07T01:00:00.000Z", "to": "2026-10-07T01:15:00.000Z", "usedTokens": 0 }
+    ]
+  }
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `auto` | 自动同步的**生效参数回显**（前端不得自算间隔 / 抖动 / 退避）。`enabled=false` 时 `nextRunAt=null` |
+| `lastSyncedAt` / `lastTrigger` | 最近一次同步**完成**的时刻与触发方（`"auto"` \| `"manual"`）—— **任意触发都算** |
+| `nextRunAt` | 自动同步下一次计划时刻（已含抖动）；关闭时为 `null` |
+| `upstreams[]` | 每上游运行态：`consecutiveFailures`（退避用）、`nextAttemptAt`（退避中非空，否则 `null`）、`inFlight` |
+| `series[].points[]` | **该上游的快照点本身，自带 `t`**。`totalBalanceCents` 为 `null` = 那一刻全未知（**不是 0**） |
+| `drift` | 窗口内的漂移提示（14.4）；`alerts` 按 `to` **倒序**，上限 20 条 |
+
+- **与 §6 的 `axis` 口径刻意不同，本节没有等长 `axis`**：同步节奏本身是**不规则的**（抖动 + 退避 + 关闭期），要造一条均匀轴就得发明不存在的点。前端按 `points[].t` 画时间序列；**不补点、更不补 0**。
+- **`asOf` 的两个层级别混**：key 级 = `balanceUpdatedAt`（该 key 最近一次真的查到）；上游级 = `series[].points[].t`。前端标注"数据新鲜度"用 **key 级**那个，趋势图用上游级。
+- 该端点**只读**：不改任何状态、**不触发任何查询**（要查去点三个手动端点）。鉴权走登录会话（§0.5），**不用** `READONLY_TOKEN` —— 带只读令牌打进来 → `403 FORBIDDEN`（§12.4 的作用域仍只有 `GET /api/observability/*`）。
+
+### 14.4 漂移提示（非破坏，只提示）
+
+**本地没有单价**：`usage_logs` 里只有 token，`balance` 里只有分，**两者没有可比量纲**。所以判据只用**方向 + 零 / 非零**，明确**不做量级比较、不判"对不对得上账"**。
+
+| 码 | 触发（相邻两次快照 + 同窗口 token 用量） | 含义 |
+|---|---|---|
+| `BALANCE_SPENT_WITHOUT_TRAFFIC` | 余额**下降** > 0，而同窗口本网关 token 用量 = **0** | 同一把 key 可能被别处直连在用，或上游改了口径 |
+| `BALANCE_UNCHANGED_WITH_TRAFFIC` | 余额**不变**（差额 = 0），而同窗口 token 用量 > 0 | 查得值可能是缓存 / 套餐口径，或查询端点已失效、一直在回陈旧值 |
+| （余额上升） | — | **不告警**：充值 / 上游按周期重置都正常 |
+| （任一端 `totalBalanceCents` 为 `null`） | — | **不判定**：未知与未知之间没有"差额"可言 |
+
+- 出口只有两个：一条 `warn` 日志（只记**码 + upstreamId + 窗口**，不记 key 明文，ADR-0006 同纪律）+ 进程内计数 `balance_drift_total{code}`（经本节端点只读暴露）。**不进 `ERROR_CODES`、不影响任何 HTTP 状态、不拦请求、不改任何数**。
+- 少于 2 条快照不做判定；阈值与灵敏度不进契约。
+
+### 14.5 与既有口面的关系
+
+- **`GET /api/stats/balance`（§6 余额三口径 / ADR-0003）零变更**：字段、形状、语义都不动。它答的是"现在有多少"，§14 答的是"这一路上怎么变的"。
+- **`PUT /api/keys/:id/balance`（手动录入）与三个手动刷新端点零变更**（§2 / §3）。
+- **`GET /api/stats/usage` 的 `costCents` 口径零变更**：仍是估算展示，本版**不把它升级成账**、不下线。
+- **`src/gateway/` 零改动**：`key_runtime` 镜像、准入三条闸门（RPM / TPM / 日配额）都不动。本版**不新增任何事前拦截** —— 拿一个可能已经过期的查得值去拒请求，等于把估算误差变成用户可见的 `429`。
+
+### 14.6 错误码、迁移与鉴权
+
+**零新增枚举**：`ERROR_CODES` 与 `GATEWAY_ERROR_CODES` 长度不变；两个漂移码是**提示码**（地位同 `hintCode`，不进 `ERROR_CODES`）。`window` 不可解析或超上限 → `400 INVALID_PARAM`（`details.field`）；`upstreamId` 查无此上游 → `200` + 该条为空（列表型过滤，不报 404）。`SCHEMA_VERSION` 不变（纯加表 + 纯进程内状态），**零迁移**。
+
+---
+
+*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`；v1.2.1（§13.4「槽位撞满」二分口径：全候选满并发 `503 NO_AVAILABLE_KEY` / 竞态窗口 `429 RATE_LIMITED`，零新增枚举、零代码改动）为文本对齐；v1.2.2（§2 `DELETE /api/upstreams/:id` 从属资源处置：`force!=true` 拦 key 与模型并报 `{keyCount, modelCount}`、`force=true` 按依赖序物理删整棵子树，修订 §11 C4）见 `docs/adr/0016-delete-upstream-subtree.md`；v1.3.0（§14 余额同步：自动同步节奏与退避、NULL 口径、快照与 `asOf`、方向级漂移提示；同批撤销「单价 × 用量的本地扣减账本」方案）见 `docs/adr/0017-balance-sync-source-of-truth.md`。以上各版同属本契约的同一冻结面。（**版本索引订正 2026-10-07，不升版**：本索引此前在 v1.2.1 之后漏记 v1.2.2 / v1.3.0 两条，本次补齐 —— 仅索引行，无内容变更。）*

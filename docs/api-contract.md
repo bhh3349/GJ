@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.3.0**
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.4.0**
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -31,6 +31,8 @@
 > **v1.2.2（2026-10-07，M6-B 第二阶段收口）**：修正 `DELETE /api/upstreams/:id` 的**从属资源处置**（§2 / §11 C4）。原文（C4 裁决）要求 `force=true` 时「级联**软删** key + 硬删上游行」，但 `upstream_keys.upstream_id` 与 `models.upstream_id` 都是 `REFERENCES upstreams(id)` 且连接开了 `foreign_keys=ON` —— **软删不解除行级外键**，上游下只要还有一行 key（哪怕 `deletedAt` 已置）或一行模型档案，`DELETE FROM upstreams` 就被 SQLite 拒掉：实测 `500 INTERNAL`（`SQLITE_CONSTRAINT_FOREIGNKEY`，前端「上游管理」页的删除按钮在这条路上是死的）。本版改为：① `force!=true` 时**key 与模型一起**拦，`409 UPSTREAM_HAS_KEYS`，`details: {keyCount, modelCount}` —— **`modelCount` 是纯新增只读字段**，老客户端只读 `keyCount` 照常工作；② `force=true` 时按依赖序**物理删除整棵子树**（`key_runtime` → `upstream_keys` → `models` → `upstreams`，单事务），响应仍是 `204`。**`ERROR_CODES` 零新增、端点零增删、无字段改名 / 删除 / 类型变更、Upstream 对象零变化、`SCHEMA_VERSION` 不变、零迁移**。动机与影响见 ADR-0016（**修订 §11 C4 的 key 处置**）。
 >
 > **v1.3.0（2026-10-07，M6-C）**：新增 **§14 余额同步** —— ①**自动同步**：每上游独立节奏、基准 **15 分钟 ± 10% 抖动**、失败**指数退避**（`min(base×2^n, 6h)`）、同上游**单飞**；`BALANCE_SYNC_MINUTES=0` 关闭（手动三端点语义**零变更**）；②**NULL 口径**：查不到就**一个字都不写**（保留上次查得值**与它真实的查得时刻**，从未查到则仍为 `null`），**绝不补 0、绝不估算、绝不用旧值刷新时间戳**；③**快照与 `asOf`**：新表 `balance_snapshots`（无外键 + 上游名快照，ADR-0016 删上游后历史仍可读），新增**只读**端点 `GET /api/stats/balance/sync`（同步状态 + 带 `asOf` 的余额序列 + 漂移提示）；④**漂移提示**（非破坏）：`BALANCE_SPENT_WITHOUT_TRAFFIC` / `BALANCE_UNCHANGED_WITH_TRAFFIC` 两码，**只 warn + 计数**，不进 `ERROR_CODES`、不拦请求、不改任何数 —— **本地没有单价，所以漂移只能是方向级提示，不能判钱**。**无字段改名、无字段删除、无类型变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`SCHEMA_VERSION` 不变、零迁移、零新鉴权**；`§6 余额三口径` / `§2 §3 手动刷新` / `src/gateway/` **全部零改动**。★ 同批撤销「单价 × 用量的本地扣减账本」方案（原 0017 草案），理由见 ADR-0017「被撤销的上一版」。动机与影响见 ADR-0017；同批顺手补上文末版本索引漏记的 v1.2.1 之后各版（P3）。
+
+> **v1.4.0（2026-10-07，M6-D 供应商账号面 / Bo 拍板冻结）**：新增 **§15 供应商账号面（TierFlow 专用）** 与 **§16 TierFlow 数据面接入约束**。① **账号是独立顶层资源**（`/api/supplier-accounts`，11 端点）——TierFlow 的管理凭据是「手机号 + 密码 + 会话 + uid」而**不是 sk-**，塞进 `upstream_keys` 会让网关把密码当 key 拿去转发（ADR-0018 决策 1）；② **批量新建 key 是唯一入池通路** —— 上游明文只出现一次、掩码不可逆，服务端取回后当场 aes-256-gcm 落库，**明文不经浏览器**，响应只回 `keyId` + `keyMasked`（决策 2）；③ **新增账号级余额口径（第四级）**：上游合计组成改为 `Σ账号 quota + Σ无账号归属 key balance`，防"一号多 key 把同一份钱数几遍"，**形状非破坏**（决策 3）；④ **套餐挂账号、不建成 key** —— 套餐余额是账号级的、套餐 key 只有掩码、且是 N 个不是 1 个，因此不引入 `category='token-plan'` 新行、不引入 `subscription_id`，前端表格两级（决策 7）；⑤ **新增 `upstream_keys.unlimited` 列** —— 无限额度 key 上游给的是 `remain_quota: -331119` 这种无意义负数，与 `balance_cents IS NULL`（已钉死为"未知"）同形会二选一错，加列后只改 `balanceUnknownKeyCount` 一处既有聚合（决策 8）；⑥ **凭据生命周期**（§15.9）：密码型走 HTTP 只进不回，**会话型只走操作员本机的一次性离线导入**（不经 HTTP、不进仓库/日志/聊天），入库即视为该文件作废；**只有会话没有密码的账号，会话过期后无法自动重登**，这是明示取舍；⑦ **金额口径**：本面货币字段一律 `…Cents`(int 分)，`quota_per_unit` 每次从上游读、**不写死**，`Math.round` 不截断；⑧ §2 非破坏新增 `supplier` / `accountCount` / `accountsBalance` / `accountsBalanceUnknownCount` / `keysBalance` / `unlimitedKeyCount` 六个字段与 `POST/PATCH /api/upstreams` 可选 `supplier`，§2 余额解析顺序由三段扩为**四段**（尾插账号型驱动，前两档判定逻辑不变），§3 `KeyDto` 非破坏新增 `unlimited`，§6 合计口径按 ③ 修订并补两条规则。**`ERROR_CODES` 新增 1 个**（`ACCOUNT_HAS_KEYS`(409)）—— 这是本契约自 v1.0 冻结以来**第一次**新增错误码枚举，故单列一笔；供应商自己的错误码（`LOGIN_INVALID_CREDENTIALS` 等）**不进** `ERROR_CODES`。**`SCHEMA_VERSION` 仍为 2**，但**必须真发 `ALTER`**（`CREATE TABLE IF NOT EXISTS` 对已存在的表是空操作，加列走 `migrate()` 里 `hasColumn()` 守卫的 `ALTER TABLE`，照 `request_id` 那批）。**`/v1/*` 零变更**（数据面约束见 §16，其中"数据面路径是否为 OpenAI 兼容"是**实测待钉项**）。动机与影响见 ADR-0018；§15 与路由者/画师上轮"套餐建成 `token-plan` key"的写法**相反**，裁决理由见 §15.8 第 8 问。原草案文件 `docs/契约草案-v1.4.0-供应商账号面.md` 已并入 §15 并删除。
 
 ---
 
@@ -78,6 +80,7 @@
 | `CONFLICT` | 409 | 唯一约束冲突（重名等） | 表单标红 |
 | `REVISION_MISMATCH` | 409 | 乐观锁版本不符（并发编辑） | 提示"已被他人修改"，拉最新 |
 | `UPSTREAM_HAS_KEYS` | 409 | 删上游但其下仍有从属资源（key / 模型档案），`details: {keyCount, modelCount}` | 弹二次确认，带 `force=true` 重发 |
+| `ACCOUNT_HAS_KEYS` | 409 | **v1.4.0 新增**。删 §15 账号但其名下有已入池 key，`details: {keyCount}` | 弹二次确认（文案要说清"连带 N 把 key 解绑"），带 `force=true` 重发 |
 | `UNPROCESSABLE` | 422 | 语义合法但业务拒绝 | 展示 message |
 | `TOO_MANY_ATTEMPTS` | 429 | 登录限速（5 次/分钟） | 倒计时禁用按钮 |
 | `INTERNAL` | 500 | 服务端异常 | 提示 + 可重试 |
@@ -129,11 +132,17 @@
   "name": "my88",
   "baseUrl": "https://api.my88.com",
   "enabled": true,
+  "supplier": null,
   "keyCount": 6,
   "enabledKeyCount": 5,
   "totalBalance": 128400,
   "balanceUnknownKeyCount": 2,
+  "unlimitedKeyCount": 0,
   "tokenPlanKeyCount": 1,
+  "accountCount": 0,
+  "accountsBalance": null,
+  "accountsBalanceUnknownCount": 0,
+  "keysBalance": 128400,
   "balanceQuery": {
     "enabled": true,
     "url": "https://api.my88.com/user/balance",
@@ -160,9 +169,15 @@
 
 | 字段 | 可空 | 说明 |
 |---|---|---|
-| `totalBalance` | ✅ `null` | 本上游 balance 类 key 的合计，**分**。全部未知时为 `null`（不是 0） |
-| `balanceUnknownKeyCount` | ❌ | 余额未知的 key 数。**未知 ≠ 0**，前端必须单独呈现 |
+| `supplier` | ✅ `null` | **只读语义、可写入**。`null` = 通用上游；`"tierflow"` = 走 §15 账号面。前端账号池分区的**唯一判据**（不解析 `baseUrl` 猜） |
+| `totalBalance` | ✅ `null` | 上游合计，**分**。全部未知时为 `null`（不是 0）。**组成**：`Σ账号 quota + Σ无账号归属的 balance 类 key`（v1.4.0 修订，见 §15.6 / ADR-0018 决策 3） |
+| `balanceUnknownKeyCount` | ❌ | 余额未知的 key 数。**未知 ≠ 0**，前端必须单独呈现。口径为 `category='balance' AND unlimited=0 AND balance_cents IS NULL`（v1.4.0） |
+| `unlimitedKeyCount` | ❌ | `balanceKeyCount` 中无限额度（`unlimited=1`）的条数，**是子集、不额外相加**，也不进"未知"计数（v1.4.0） |
 | `tokenPlanKeyCount` | ❌ | token-plan 类 key 数。这类**不进** `totalBalance` |
+| `accountCount` | ❌ | §15 账号数（通用上游恒为 `0`） |
+| `accountsBalance` | ✅ `null` | 账号级余额合计，**分**（通用上游恒为 `null`）。`null` = 无账号或全未知 |
+| `accountsBalanceUnknownCount` | ❌ | 账号级余额未知数（`NULL ≠ 0`，ADR-0003 同纪律） |
+| `keysBalance` | ✅ `null` | 本上游 `totalBalance` 里**由 key 贡献的那一半**，供前端拆解合计，**不是新增的一份钱** |
 | `balanceQuery.parse.unit` | ❌ | `"yuan"`(×100→分) / `"cents"`(原样) / `"dollar"`(×100→分)。**统一到分是后端的责任** |
 | `balanceQuery.enabled` | ❌ | `false` 表示该上游只能手动录入余额 |
 | `balancePreset` | ✅ `null` | **只读**。按 `baseUrl` 的 host 命中的内置查询 preset；未命中为 `null`。传了也不生效（可推导字段，非入参） |
@@ -175,9 +190,9 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/api/upstreams?q=&enabled=&page=&pageSize=` | 列表 |
-| `POST` | `/api/upstreams` | 建，body `{name, baseUrl, enabled?, balanceQuery?}` → `201` |
+| `POST` | `/api/upstreams` | 建，body `{name, baseUrl, enabled?, supplier?, balanceQuery?}` → `201` |
 | `GET` | `/api/upstreams/:id` | 详情 |
-| `PATCH` | `/api/upstreams/:id` | 改，body 任意子集 + `revision` |
+| `PATCH` | `/api/upstreams/:id` | 改，body 任意子集 + `revision`（含 `supplier?`，取值 `null \| "tierflow"`，省略 = 不改） |
 | `DELETE` | `/api/upstreams/:id?force=false` | 删。有 key **或模型档案**且 `force!=true` → `409 UPSTREAM_HAS_KEYS`，`details: {keyCount: 6, modelCount: 3}`；`force=true` 按依赖序删整棵子树 → `204`（见下） |
 | `POST` | `/api/upstreams/:id/balance/refresh` | 按模板查该上游全部 key 余额 → `202 {taskId}` |
 | `POST` | `/api/upstreams/:id/balance-template/test` | **自测**：用草稿模板真实打一次查询 → `200 BalanceTestResult`（见下） |
@@ -208,8 +223,15 @@
 ```
 ① 用户模板 enabled=true   → 现有模板引擎（上文 balanceQuery，本版零改动）
 ② host 命中内置 preset     → 内置执行器（见 balancePreset）
-③ 都没有                   → 不发请求，计入 skipped，并带 hintCode=BALANCE_QUERY_UNSUPPORTED
+③ 账号型驱动（★v1.4.0 新增）→ 上游 supplier="tierflow" 时按账号逐个查（§15），
+                             结果汇总成该上游的余额；本档只看 supplier，不看 baseUrl host
+④ 都没有                   → 不发请求，计入 skipped，并带 hintCode=BALANCE_QUERY_UNSUPPORTED
 ```
+
+- **③ 是尾插一档，前两档的判定逻辑与优先级逐字不变**：`supplier=null` 的上游永远走不到 ③，
+  通用上游的行为**零变更**。③ 与 ② 的区别是判据不同（② 看 host、③ 看声明字段），
+  不是新增一条猜测路径 —— **不猜，只看 `supplier`**（§15.6）。
+- tierflow.cn 不命中任何 preset、用户也没配模板，于是自然落 ③。
 
 **内置 preset 永不覆盖用户模板、永不落库**：库里只有用户自己的 `balanceQuery`，preset 是每次查询时现算的判定。
 本版注册表只有 `openai`（host = `api.openai.com`；`subscription − usage` 双请求相减，USD→分）。
@@ -305,6 +327,7 @@
   "label": "my88-主号-1",
   "maskedKey": "****a1b2",
   "category": "balance",
+  "unlimited": false,
   "enabled": true,
   "weight": 1,
   "balance": 12345,
@@ -329,7 +352,8 @@
 |---|---|---|
 | `maskedKey` | `"****a1b2"` | **后端唯一出口**。明文只在 `POST` 请求体里进，之后**任何**响应/日志/导出都不出现 |
 | `category` | `"balance"` \| `"token-plan"` | `token-plan` 时 `balance` 恒为 `null`，看 `tokenPlan` |
-| `balance` | `int`(分) \| `null` | `null` = **未知**（查不到或从未录入）。前端显示"未知"，不得显示 0 |
+| `unlimited` | `bool` | **v1.4.0 新增**。`true` = 上游侧无限额度（`unlimited_quota`），此时 `balance` 恒为 `null` 但**语义不是"未知"** —— 前端必须渲染「无限额度」徽标，不得渲染 `—` / "未知" / 任何负值。老 key 恒为 `false` |
+| `balance` | `int`(分) \| `null` | `null` = **未知**（查不到或从未录入）。前端显示"未知"，不得显示 0。`unlimited=true` 时 `null` 表示"无限"，要看 `unlimited` 才分得清（§15.6） |
 | `balanceSource` | `"manual"` \| `"template"` \| `null` | 数据来源，用于 UI 标注可信度 |
 | `tokenPlan` | 对象 \| `null` | `{ "remainingTokens": int, "expiresAt": ISO8601\|null }` |
 | `health` | `"healthy"` \| `"cooling"` \| `"disabled"` | **网关运行态**，管理端只读。`disabled` 优先于 `cooling` |
@@ -577,7 +601,9 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
     "totalBalance": 512300,
     "balanceKeyCount": 6,
     "balanceUnknownKeyCount": 3,
+    "unlimitedKeyCount": 0,
     "tokenPlanKeyCount": 2,
+    "accountsBalanceUnknownCount": 0,
     "currency": "CNY",
     "byUpstream": [
       {
@@ -596,11 +622,12 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
 }
 ```
 
-**三条不可违背的规则**（ADR-0003）：
-1. 合计**只统计 `category="balance"` 的 key**。token-plan 类不进金额。
-2. 全局合计 = 各上游合计之和。
+**四条不可违背的规则**（ADR-0003）：
+1. 合计**只统计 `category="balance"` 的 key**。token-plan 类不进金额。**v1.4.0 起**：§15 账号的余额是**账号级**的一格，**不再由它名下的 key 重复计入**（ADR-0018 决策 3）。
+2. 全局合计 = 各上游合计之和。**v1.4.0 起**：上游合计的组成是 `Σ账号 + Σ无账号归属 key`，形状不变。
 3. 任一层只要有未知项，`balanceUnknownKeyCount` 必须 > 0，前端必须单独呈现。**未知不得补 0 计入合计。**
 4. 已软删（`deletedAt` 非空）的 key **不进**任何合计与未知计数，历史日志外键保留。
+5. **v1.4.0 新增**：`unlimited` 类不计入未知（§15.6），套餐余额（`subscriptions[]`）**不进**本端点任何合计。
 
 ### `GET /api/stats/usage`
 覆盖画师 §三.5，**后端返回序列化好的时间轴，前端不二次聚合**。
@@ -1263,4 +1290,506 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 
 ---
 
-*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`；v1.2.1（§13.4「槽位撞满」二分口径：全候选满并发 `503 NO_AVAILABLE_KEY` / 竞态窗口 `429 RATE_LIMITED`，零新增枚举、零代码改动）为文本对齐；v1.2.2（§2 `DELETE /api/upstreams/:id` 从属资源处置：`force!=true` 拦 key 与模型并报 `{keyCount, modelCount}`、`force=true` 按依赖序物理删整棵子树，修订 §11 C4）见 `docs/adr/0016-delete-upstream-subtree.md`；v1.3.0（§14 余额同步：自动同步节奏与退避、NULL 口径、快照与 `asOf`、方向级漂移提示；同批撤销「单价 × 用量的本地扣减账本」方案）见 `docs/adr/0017-balance-sync-source-of-truth.md`。以上各版同属本契约的同一冻结面。（**版本索引订正 2026-10-07，不升版**：本索引此前在 v1.2.1 之后漏记 v1.2.2 / v1.3.0 两条，本次补齐 —— 仅索引行，无内容变更。）*
+## 15. 供应商账号面（TierFlow 专用，v1.4.0）
+
+本节只服务 **TierFlow**（`upstreams.supplier = "tierflow"`），是 Bo 指定的**个例**：
+它解决"一个上游下有几十个账号、每个账号各有一套管理凭据"，**不**抽象成通用多供应商框架。
+**本节已冻结**（2026-10-07，Bo 拍板）。原 `docs/契约草案-v1.4.0-供应商账号面.md` 已并入本节，草案文件不再存在。
+
+### 15.0 定位与边界
+
+- **通用上游零变更**：`supplier` 为 `null` 的上游，§2 / §3 / §6 / §14 的端点、字段、口径逐字不变。
+- **账号 ≠ key**：账号是**凭据容器**（手机号 + 密码 + 会话 + uid），一个账号下有 N 把 sk- key 与
+  M 个套餐。账号**不能**用 `/api/keys` 承载（那是网关的转发凭据）。
+- **账号面是并列的顶层资源**（`/api/supplier-accounts`），不织进 `/api/keys`、`/api/upstreams` 的既有分支。
+- **明文纪律同 ADR-0006**：账号密码与会话值**永不**出现在任何响应、日志、审计 detail、任务 result、
+  错误信息里。出口只有手机号掩码。会话生命周期见 §15.9。
+
+### 15.1 `SupplierAccount` 对象（全字段）
+
+```json
+{
+  "id": "acc_3f21a9c1b704",
+  "upstreamId": "up_7f3a",
+  "supplier": "tierflow",
+  "identifier": "162****4225",
+  "username": "user_j4iCrFEB",
+  "uid": "1234054733954",
+  "status": "active",
+  "statusMessage": null,
+  "balanceCents": 434,
+  "balanceUpdatedAt": "2026-10-07T02:15:03.114Z",
+  "keyCount": 1,
+  "unlimitedKeyCount": 1,
+  "maskedKeyCount": 1,
+  "subscriptions": [
+    {
+      "subNo": "SB1261003742775",
+      "planTitle": "轻享版",
+      "planSlug": "lite",
+      "amountTotalCents": 2990,
+      "amountUsedCents": 642,
+      "basicTokenTotal": 8000000,
+      "basicTokenUsed": 2666169,
+      "paidCents": 2990,
+      "status": "active",
+      "source": "registration",
+      "startAt": "2026-10-02T01:07:56.000Z",
+      "endAt": "2026-11-01T01:07:56.000Z",
+      "autoRenew": null,
+      "hasKey": true,
+      "keyMasked": "****vFnt",
+      "updatedAt": "2026-10-07T02:15:03.114Z"
+    }
+  ],
+  "hasSession": true,
+  "sessionExpiresAt": "2026-11-06T02:15:03.114Z",
+  "revision": 3,
+  "createdAt": "2026-10-07T01:00:00.000Z",
+  "updatedAt": "2026-10-07T02:15:03.114Z"
+}
+```
+
+| 字段 | 取值 | 说明 |
+|---|---|---|
+| `identifier` | `"162****4225"` \| `"u***@x.com"` | **掩码**。手机号保留后 4 位，邮箱保留域名。真值不出后端 |
+| `status` | `"active"` \| `"login_failed"` \| `"session_expired"` \| `"unknown"` | `active` = 会话在手且最近一次查询成功；`unknown` = 从未成功查询过 |
+| `statusMessage` | `string` \| `null` | 面向人的一句话。**只放供应商错误码或通用原因**，不含凭据 |
+| `balanceCents` | `int`(分) \| `null` | 账号余额。上游 `/api/user/self → quota` **由后端**按 `quota_per_unit` 换算成**分**。**`null` = 未知 ≠ 0**（ADR-0003 同一条纪律） |
+| `balanceUpdatedAt` | ISO8601 \| `null` | 最近一次**真的查到时**刻。查失败不动它（§14.2 同纪律） |
+| `keyCount` | int | 归属本账号、**已入池**（`upstream_keys` 未软删）的 key 数 |
+| `unlimitedKeyCount` | int | `keyCount` 中无限额度（`upstream_keys.unlimited = 1`）的条数。**是子集，不额外相加** |
+| `maskedKeyCount` | int | 只拿到掩码、**进不了池**的 key 数（对账用）。**不得与 `keyCount` 相加**成"key 总数" |
+| `subscriptions` | 数组（0..N） | 套餐摘要。**恒为数组**，无套餐为 `[]` —— 上游 `/api/subscription/self` 返回的是 `all_subscriptions: []`，单数对象表达不了它 |
+| `hasSession` | bool | 会话是否在手。**只回答有无**，会话值永不出后端 |
+| `sessionExpiresAt` | ISO8601 \| `null` | 会话到期时刻，供前端提示"需重登" |
+| `revision` | int | 乐观锁，写请求带 `revision`，不符 → `409 REVISION_MISMATCH` |
+
+**金额口径**：TierFlow 内部单位为 `quota`（`1 元 = 500000 quota`，`/api/status → config.quota_per_unit`）。
+**换算成"分"是后端的责任**，出口里**不出现 `quota` 原值**（唯一的例外是自测的 `parsed.quotaPerUnit`，
+它是**比例**不是金额）。换算基准 `quota_per_unit` 每次查询时**从上游读**、不写死 ——
+供应商改了换算比，我们的数不会跟着错。
+
+**出口命名铁律**：**本面任何货币字段一律以 `Cents` 结尾**，值恒为 int 分。这条是为了让"我手上这个数
+要不要 ÷500000 或 ×100"这个问题在字段名上就答完 —— 前端永远不做换算，也不该看见 `quota`
+（上游用 quota、`paid_money` 用**浮点元**、我们用**整数分**，三个单位同屏时肉眼分不出来）。
+
+**舍入**：`quota → 分` 一律 `Math.round(quota / quota_per_unit * 100)`，**不截断**
+（`14950000/500000 = 29.90 元 → 2990 分`；`2168881/500000 = 4.337762 元 → 434 分`；
+`3212302/500000 = 6.424604 元 → 642 分`）。上游 `paid_money: 29.9` 是**浮点元**，
+`29.9 * 100 = 2989.9999999999995` —— 必须 round，截断会系统性少算一分。
+
+### 15.2 端点
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/api/supplier-accounts?upstreamId=&status=&q=&page=&pageSize=` | 列表 |
+| `GET` | `/api/supplier-accounts/:id` | 详情 |
+| `POST` | `/api/supplier-accounts/import` | 批量导入并逐个登录 → `202 {taskId}` |
+| `POST` | `/api/supplier-accounts/refresh` | 刷余额（quota + 套餐） → `202 {taskId}` |
+| `POST` | `/api/supplier-accounts/:id/login` | 单账号重登 → `200 SupplierAccount` |
+| `POST` | `/api/supplier-accounts/:id/test` | 连接自测（真实打一次） → `200 SupplierTestResult` |
+| `POST` | `/api/supplier-accounts/keys` | 批量**新建** key 并入池 → `202 {taskId}` |
+| `POST` | `/api/supplier-accounts/keys/sync` | 同步已有 key（掩码）+ 套餐 → `202 {taskId}` |
+| `GET` | `/api/supplier-accounts/subscriptions?upstreamId=&page=&pageSize=` | 套餐列表 |
+| `GET` | `/api/supplier-accounts/export?upstreamId=` | CSV 导出（**对账表，见下**） → `text/csv` |
+| `DELETE` | `/api/supplier-accounts/:id?force=false` | 删除账号（见下） |
+
+#### `POST /api/supplier-accounts/import`
+
+```json
+{ "upstreamId": "up_7f3a", "text": "手机号,密码\n162****4225,********\n" }
+```
+
+- `text`：`手机号,密码` 行文本（粘贴或 CSV 文件名皆可）。容忍**表头行**、`+86` 前缀、空格/制表符/分号分隔。
+  解析失败的行**跳过并逐行报原因**，不整批失败。
+- 上游必须 `supplier="tierflow"`，否则 `422 UNPROCESSABLE`。
+- 已存在的 `identifier` **不重复建行**，执行"重登 + 刷新"，`action: "relogin"` 在逐行结果里标明。
+- **每号只试一次登录**（供应商风控），失败即记 `login_failed`。
+- **本端点只收密码型凭据**（`text` 管道）。会话型凭据**不走 HTTP**，见 §15.9。
+
+#### `POST /api/supplier-accounts/refresh`
+
+```json
+{ "upstreamId": "up_7f3a", "ids": ["acc_3f21"] }
+```
+
+`ids` 省略 = 全部账号。会话失效**自动用存档密码重登**；**无存档密码的账号不重登**，
+直接计 `failed` 并置 `status="session_expired"`（§15.9 有解释：只有会话、没有密码时无从重登）。
+节奏与礼貌参数见 §15.5。
+
+#### `POST /api/supplier-accounts/keys`
+
+```json
+{
+  "upstreamId": "up_7f3a",
+  "ids": ["acc_3f21a9c1b704"],
+  "count": 1,
+  "namePrefix": "tierflow",
+  "unlimited": true,
+  "quotaCents": null,
+  "label": null
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `ids` | 目标账号；省略 = 该上游全部 `active` 账号 |
+| `count` | 每账号建几把，`1..10`，超出 → `400 INVALID_PARAM` |
+| `namePrefix` | 上游侧 key 名 = `<namePrefix>-<identifier后4>-<序号>`，**不含凭据** |
+| `unlimited` | `true`（**默认**）→ 上游 `unlimited_quota: true` 且**入池行落 `upstream_keys.unlimited = 1`**；`false` → 必须给 `quotaCents`（int 分，由我们换算成上游 quota，前端不乘 500000） |
+| `label` | 入池后的 `upstream_keys.label`；省略则用上游侧 key 名 |
+
+**这是本节的目的所在**：明文只在创建响应出现一次，服务端**当场** `aes-256-gcm` 写入
+`upstream_keys`（走既有 `createKey` 路径：`masked_key` 派生列 + `revision` + `change_log`），
+响应与任务 result **只回 `maskedKey` 与 `keyId`**。网关 ≤1s 轮询后即可用于 `/v1/*`。
+
+**明文不经浏览器**：`sk-…` 由**我们的服务端**从上游创建响应里拿到、当场加密落库，
+任务 result 与任何 API 响应**只回 `keyId` 与 `keyMasked`**。
+
+> 与 §3 `POST /api/keys` 的差别是**方向**：§3 是"人从供应商控制台复制明文 → 交给服务端"，
+> 明文必然经过浏览器，所以我们有"只显示一次"的浮层。本节是服务端自己去上游取 ——
+> **浏览器全程不持有明文**，因此前端**不做**"一次性明文 + 强制复制"浮层，也就没有"用户没复制
+> 就丢了"这个失败模式。前端这一步只看到 `202 {taskId}` → 轮询 → 逐行 `keyMasked`，
+> 拿到的是**回执**（`keyMasked` + `tokenNo` + "凭据已托付网关，无需留存"），不是凭据本身。
+
+#### `GET /api/supplier-accounts/export`
+
+CSV，一行一账号，列为：
+`identifier(掩码), uid, status, statusMessage, balanceCents, balanceUpdatedAt,
+keyCount, unlimitedKeyCount, maskedKeyCount, subscriptionCount, subscriptionEndAt,
+createdAt, updatedAt`。
+
+- **不含密码、不含会话、不含任何 key 明文或掩码** —— 密码与会话不是"数据"，是凭据（ADR-0006）。
+- 因此**这份 CSV 不能用来重建账号**（重建需要密码）。它是**对账 / 审计表**，不是备份。
+  备份口径是**库文件级备份**（密文形态）。
+- **重建输入只认人工维护的「手机号+密码」清单**（§15.2 `import` 的 `text` 一栏粘贴，
+  不落盘、不落 `localStorage`、不回填表单）。这条与上一条必须同时写进导出按钮的说明里，
+  否则"导出 → 换台机器导入 → 27 个号全登不上"会是一个很难查的坑。
+
+#### `POST /api/supplier-accounts/keys/sync`
+
+拉取该账号在站点上的**全部 key（掩码）** + 套餐 + 套餐专属 key，与池内 `upstream_keys` 对账。
+
+**匹配口径：只按「后 4 位」**，不是"前 4 + 后 4"：
+
+- 我们的 `masked_key` 是 `maskKey()` 的产物 —— `****` + **后 4 位**，字典里没有前 4 位
+  （`src/db/crypto.ts`，`sk-…` 的 `-` 也算进 slice）。上游给的却是 `NcBZ**********WnWw`
+  这种"前 4 + 后 4"。**只有后 4 位是两边都有的**。
+- 比对前先把上游掩码**剥掉 `sk-` 前缀**：`/api/token/search` 的掩码不含 `sk-`，
+  而 `/api/subscription/self/token` 给的是 `sk-k58R**********vFnt` —— 不剥就永远匹配不上。
+- 后 4 位撞号（同一账号下多把 key 后 4 相同）→ **不更新任何行**，该行 `code: "KEY_MASK_AMBIGUOUS"`。
+  宁可少更新一次，也不要把余额写到另一把 key 上。
+
+命中的掩码只更新 `maskedKeyCount` 与账号状态；未命中的掩码**只记数** ——
+**不创建可用凭据**（掩码不可逆，见 ADR-0018 决策 2）。
+
+#### `DELETE /api/supplier-accounts/:id?force=`
+
+| `force` | 行为 |
+|---|---|
+| `!= true` | 该账号名下有**已入池的 key** → `409 ACCOUNT_HAS_KEYS`，`details: { keyCount: 1 }`。拦下时零副作用 |
+| `true` | 删账号行与套餐行；**池内 key 保留但解绑**（`account_id` 置 `NULL`）—— 它们可能正在被网关使用，删账号不等于停服务 |
+
+> 与 ADR-0016（删上游物理删整棵子树）取向不同，理由是：上游删了 key 必然不可达；**账号删了 key 仍然可用**。
+> ADR-0016 的口径**未变**，本节只是说明为什么账号面不套用它的理由。
+
+#### `SupplierTestResult`（连接自测）
+
+```json
+{
+  "ok": true,
+  "accountId": "acc_3f21a9c1b704",
+  "identifier": "162****4225",
+  "httpStatus": 200,
+  "durationMs": 812,
+  "loginAttempted": false,
+  "parsed": { "balanceCents": 434, "quotaPerUnit": 500000, "subscriptionCount": 1 },
+  "raw": { "success": true, "data": { "quota": 2168881 } },
+  "errorCode": null,
+  "hintCode": null,
+  "hint": null
+}
+```
+
+- **自测永不写库**（`balanceUpdatedAt` 不因此改变），与 §2 `BalanceTestResult` 同口径。
+- `parsed` 是**换算后**的结论（`balanceCents` 为分），`raw` 才是上游原样 —— 想要 quota 原值看 `raw`，
+  想在页面上显示金额看 `parsed.balanceCents`。**前端禁止读 `raw` 里的数字当金额渲染。**
+- `quotaPerUnit` 是**比例**（非金额），保留是为了诊断"换算比是不是被供应商改了"。
+- `raw` 已抹掉所有凭据出现并截断至 8KB；`loginAttempted=true` 表示本次为验证密码而真实登录过。
+- 业务性失败（不可达 / 供应商 `success:false`）一律 `200` + `ok:false`（诊断语义，同 §2）；
+  只有请求本身有问题才 4xx/5xx。
+
+### 15.3 批量任务 result（四个批量端点共用形状）
+
+```json
+{
+  "done": 27, "total": 27, "ok": 24, "failed": 3, "skipped": 0,
+  "itemsTotal": 27, "truncated": false,
+  "items": [
+    { "accountId": "acc_3f21a9c1b704", "identifier": "162****4225",
+      "action": "create", "ok": true, "code": null, "message": null,
+      "keyId": "key_9c21", "keyMasked": "****WnWw", "tokenNo": 1187 }
+  ],
+  "hintCode": null, "hint": null
+}
+```
+
+- `action`：`login` \| `relogin` \| `refresh` \| `create` \| `sync`。
+- `code`：供应商错误码原样（如 `LOGIN_INVALID_CREDENTIALS`）或本节错误码；`message` 一句人话。
+- **逐行结果不含任何凭据**（`keyMasked` 是掩码，`keyId` / `tokenNo` 是内部标识）。
+- 进度**只由真正干完的账号推进**（复用 `startTask` 的 `step()`），不做假进度条。
+
+**逐行结果落在 `result.items`，不新增 Task 字段、不新增 `GET /api/tasks/:id/items`。**
+理由三条，都与"它只在终态有意义"有关：
+
+1. 中途的行**还在变**：第 3 行的余额会被第 4 行的重登结果改写。前端拿到的半份结果下一帧就被推翻，
+   而 §7 的 `task` 帧是**按 `status|done/total|message` 差分的** —— 想把行推进去，就得把行并进
+   `sig`，于是每处理完一行就把整份列表重推一遍。
+2. `tasks.result` 已经是一个 JSON 列，本节的形状**本来就在里面**；为一个 1 分钟的中间态
+   另开端点，等于为一笔收据建一张表。
+3. 于是前端的时间线是：真实 `progress` 走条 → 终态一次性渲染逐行表。27 个账号一轮 ≈ 30~60s，
+   这期间的 UI 是进度条而不是滚动日志 —— **这点与工作台不同，是刻意的**。
+
+**上限与截断**：`items` 最多 **500** 行；超出时保留前 500 行、`truncated: true`，
+`itemsTotal` 给真实行数（用 `ok`/`failed`/`skipped` 三个计数仍可拿到完整汇总）。
+500 行的 result ≈ 75KB，是 `GET /api/tasks/:id` 单次响应的可接受上限；2000 行粘贴导入时
+前端必须显示"逐行明细已截断"提示，不能让用户以为只处理了 500 个。
+**本期不分页**：`items` 只出现在**终态**，头 500 行 + 真实总数足够定位问题；
+真要全量明细用 `export`（§15.2）。
+
+### 15.4 错误码增量
+
+`ERROR_CODES` **只新增一个**：
+
+| code | HTTP | 触发 |
+|---|---|---|
+| `ACCOUNT_HAS_KEYS` | 409 | `DELETE /api/supplier-accounts/:id` 未带 `force=true` 且名下有已入池 key |
+
+其余复用既有码：`INVALID_PARAM`(400)、`UNAUTHORIZED`(401)、`NOT_FOUND`(404)、
+`REVISION_MISMATCH`(409)、`UNPROCESSABLE`(422，上游不是账号型 / 无可用账号)。
+`KEY_MASK_AMBIGUOUS`（§15.2）与 `LOGIN_INVALID_CREDENTIALS` 等供应商错误码**不进** `ERROR_CODES`，
+只出现在 `items[].code` 与 `statusMessage` —— 它们是**上游的话**，不是我们的错误分类。
+
+### 15.5 节奏与礼貌（不是性能问题，是能不能长期跑的问题）
+
+| 项 | 值 | 依据 |
+|---|---|---|
+| 账号间间隔 | **0.6s** | 工作台 29 号跑下来未触发限流 |
+| 单账号请求数 | 刷新 = 2（`/api/user/self` + `/api/subscription/self`）；建 key = 2（创建 + 回查 `token_no`） | 少打一次是一次 |
+| 上游并发上限 | 复用 `REFRESH_CONCURRENCY` | 不新拍一个数，避免手动/自动漂成两个并发度 |
+| 登录重试 | **每号一次**，不重试 | 避免触发账号锁定 |
+| keyword 搜索 | 留空拉全量再本地过滤 | 供应商搜索不可靠（文档 §8.5） |
+| 删除上游 key | 无尾斜杠路径 | 带斜杠 307（文档 §8.4） |
+
+27 个账号一轮刷新 ≈ 1 分钟。故：**一律异步任务**，不阻塞 HTTP。
+
+### 15.6 与既有口面的关系（非破坏清单）
+
+**`supplier` 怎么设**：`POST /api/upstreams` 与 `PATCH /api/upstreams/:id` 接受可选 `supplier`
+（`null` \| `"tierflow"`，默认 `null`），走既有的 `revision` + `change_log` 写入路径。
+
+- **不另加 `accountPool: {enabled, provider}` 这类包装字段**：那会和 `supplier` 说同一件事，
+  两个字段早晚漂成不一致。前端判据就是 **`upstream.supplier === "tierflow"`** —— 一个事实一个字段。
+- 建/改上游表单里加**一个可选「供应商」下拉**（默认「通用」），只有这一处；
+  选定后该上游**详情页**才出现账号池分区。通用上游的表单其余部分逐字不变。
+- **host 判断留在后端**：前端不解析 `baseUrl` 猜供应商 —— 猜错会静默渲染出一个功能全 422 的分区。
+
+| 处 | 变更 | 性质 |
+|---|---|---|
+| §2 `Upstream` 对象 | 新增 `supplier`、`accountCount`、`accountsBalance`、`accountsBalanceUnknownCount`、`keysBalance`、`unlimitedKeyCount` | **非破坏新增** |
+| §2 `totalBalance` | 形状不变（`int \| null`）；**组成**改为 `Σ账号 quota + Σ无账号归属 key balance` | 组成修订，见 ADR-0018 决策 3 |
+| §2 `POST/PATCH /api/upstreams` | 请求体新增可选 `supplier`（省略 = `null`） | **非破坏新增** |
+| §2 `balanceUnknownKeyCount` | 口径改为 **`category='balance' AND unlimited=0 AND balance_cents IS NULL`** | 语义修订（见下） |
+| **§2 余额解析顺序**（该段在 §2，不在 §14） | 三段扩为四段（尾插**账号型驱动**一档） | 顺序兼容：前两档判定逻辑不变 |
+| §3 `KeyDto` | 新增 `unlimited: boolean` | **非破坏新增** |
+| §3 `POST /api/keys` | 请求体、响应形状**零变更**；新增行为的只是 `createKey` 多了个可选入参 `unlimited` | 零变更（调用方无感） |
+| §6 余额三口径 | 全局合计同规则；新增 `accountsBalanceUnknownCount`、`unlimitedKeyCount` | 非破坏新增 |
+| §6 `GET /api/stats/balance` | 形状不变 | 零变更 |
+| §14 自动同步 / 快照 / 漂移 / 退避 / 单飞 | **零改动**（账号合计天然落进 `total_balance_cents`） | 零变更 |
+| `/v1/*` | **零变更**（数据面另见 §16） | 零变更 |
+
+**`unlimited` 这一列为什么必须有**（不是"顺手加的"）：
+
+- `upstream_keys` 现在只有 `balance_cents`，`NULL` 的语义被钉死为"**未知**"。而 TierFlow 的
+  无限额度 key 上游给的是 `{unlimited_quota: true, remain_quota: -331119}` ——
+  `remain_quota` 是个**无意义的负数**。没有这一列，无限额度 key 和"还没查到余额的 key"
+  在库里长得一模一样，于是只能二选一：要么把 -331119 当余额渲染（错的），
+  要么把它算进"余额未知"（于是仪表盘永久报警"有 N 把 key 余额未知"，而那 N 把根本没有余额概念）。
+- 落法：`upstream_keys.unlimited INTEGER NOT NULL DEFAULT 0`。老库全部 `0`，
+  所以既有的 `balanceKeyCount` / `totalBalance` / **既有不变量**全都不变 ——
+  本次唯一动的既有聚合就是 `balanceUnknownKeyCount` 加一个条件。
+- **不变量**（要写成断言）：
+  - 未软删 key 满足 **`balanceKeyCount + tokenPlanKeyCount = keyCount`**（**既有不变量，保持不动**）
+  - 且 **`unlimitedKeyCount ≤ balanceKeyCount`**、**`balanceUnknownKeyCount ≤ balanceKeyCount`**
+  - 三者关系：`balanceKeyCount` 里，`unlimited` 是"无限额度"那一格，"未知"是"有余额概念但没查到"
+    那一格，**互不重叠** —— 所以无限额度 key **不会**把 `balanceUnknownKeyCount` 顶上去。
+- **刻意不做的事**：不加第三种 `category`、不把 `balanceKeyCount` 改成"排除 unlimited"。
+  那两种做法都会动到既有字段语义，而它们要解决的问题（"无限额度别报未知"）
+  用 `unlimitedKeyCount` 一个平行计数就够。
+- 前端渲染：无限额度 key 的 `balance` 是 `null`，但**必须**配 `unlimited: true` 徽标，
+  显示"无限额度"而**不是** `—` 或"未知"。**`unlimited` 优先于任何负值**：同一把 key 上两者
+  同时出现时显示无限额度徽标，不显示数字（不会出现"无限额度 −¥0.16"）。
+
+### 15.7 迁移与鉴权
+
+- `SCHEMA_VERSION` **不递增**，但**必须真发 `ALTER`**：
+  - `supplier_accounts` / `supplier_account_subscriptions` / `supplier_account_keys` 是**纯加表** ——
+    `CREATE TABLE IF NOT EXISTS` 每次开库直接生效，够了。
+  - `upstreams.supplier`、`upstream_keys.unlimited` 是**给既有表加列** ——
+    **只改 DDL 文本对已经在跑的库没有任何作用**，`CREATE TABLE IF NOT EXISTS` 遇到已存在的表是空操作。
+    必须走 `migrate()` 里 `hasColumn()` 守卫的 `ALTER TABLE … ADD COLUMN`，
+    照 `request_id` 那一批的先例（`src/db/schema.ts` v1.1.1 段）。
+  - 守卫**必须是 `hasColumn()` 而不是 `user_version`**：`ALTER TABLE ADD COLUMN` **不幂等**，
+    重复执行直接抛 `duplicate column name`，把启动一起带走。
+  - `upstreams.supplier` 可空无默认；`upstream_keys.unlimited INTEGER NOT NULL DEFAULT 0`
+    （有默认值，老行填 0，正是我们要的语义）。
+  - 用户版本号仍是 `2`：没有数据搬迁、没有重写表，只是补列补表 ——
+    与 v1.1.1 加 `request_id` 时同一条判断。
+- 鉴权：同 §0.5 登录会话，**不使用** `READONLY_TOKEN`（带只读令牌打进来 → `403 FORBIDDEN`）。
+- 审计：四个批量端点各写一条 `audit_log`（`action` = `supplier.import` / `supplier.refresh` /
+  `supplier.keys.create` / `supplier.keys.sync`），`detail` **只放计数**，不放 identifier 列表、
+  不放任何凭据。
+
+### 15.8 本期裁定速查（原画师六问 + 两处跨车道冲突的裁决）
+
+| # | 问题 | 结论 | 落在哪 |
+|---|---|---|---|
+| 1 | 逐行结果要不要 `Task.items[]` / 新端点 | **都不要**：留在 `result.items`，**终态才出现**，上限 500 + `truncated`/`itemsTotal`，本期不分页 | §15.3 |
+| 2 | 密码的出入口 | **只进不回**：请求体收，响应/日志/审计 detail/任务 result/错误 message/`raw` 一律没有。出口只有掩码 `identifier` | §15.0 / §15.2 `export` |
+| 3 | 明文 key 是否经浏览器中转 | **不经**。服务端自己去上游取、当场加密落库，只回 `keyId`+`keyMasked` → 前端做**回执浮层**，不做"一次性明文"浮层 | §15.2 `keys` |
+| 4 | 金额口径 | 换算在**后端**，`quota_per_unit` **每次从上游读**；本面货币字段一律 `…Cents`(int 分)，`Math.round` 不截断 | §15.1 |
+| 5 | `unlimited_quota:true` + `remain_quota:-331119` | `balance = null` + `unlimited: true` 徽标，**绝不**渲染负数；需新增 `upstream_keys.unlimited` 列 | §15.6 |
+| 6 | 套餐算不算 key | **不算**。套餐挂**账号**，不建 `category='token-plan'` 行 → 表格是**两级**（账号 → key），套餐是账号下的第二个分区 | 见下 |
+| 7 | 会话从哪来、怎么退场 | 会话型凭据**只走离线一次性导入**（不经 HTTP、不进仓库/日志/聊天），入库即视为该文件作废 | §15.9 |
+| 8 | 套餐能不能进池被网关"先烧" | **不能**。套餐 key 只拿得到掩码 → 本上游池内**没有** `token-plan` 行 | 见下 |
+
+**第 6 问展开（这条最容易被做成错的形状）**：
+
+不把套餐建成 key，三个理由：
+
+1. **余额粒度不对**。套餐余额是 `(amount_total - amount_used)`，是**账号级**的量；
+   `category='token-plan'` 的 key 行只有一个 `token_plan_remaining` 字段，装不下
+   `amount_total/amount_used/basic_token_*/paid_cents/有效期` 这一组，也不该装。
+2. **套餐 key 我们只拿得到掩码**。`GET /api/subscription/self/token?sub_no=` 返回
+   `{"key": "sk-k58R**********vFnt", "masked": true}` —— 建行等于造一把**不可用凭据**，
+   正是 ADR-0018 决策 2 拒绝的事。
+3. **它是 N 个，不是 1 个**。上游给的是 `all_subscriptions: []`，一个账号可叠多个套餐。
+
+所以：`SupplierAccount.subscriptions[]` 是账号下的**独立分区**，
+`upstream_keys` 里**没有** `subscription_id` 这种外键 —— 套餐与池内 key 之间只有
+"后 4 位掩码可能对上"这一条弱对账关系（§15.2 `keys/sync`）。
+
+**前端形状**：账号表格 **两级** —— 账号行 → 展开是「池内 key（N 把，有 `unlimited` 徽标）」
++「套餐（M 个，显示剩余额度与到期）」。**不要在 key 下面再挂套餐**，那会暗示
+"这把 key 属于这个套餐"，而事实是"这个账号买过这些套餐"。
+
+**第 8 问展开（跨车道冲突的裁决，2026-10-07）**：路由者与画师在上一轮都按
+"套餐 key 建 `category='token-plan'`、参与 ADR-0011 的「token-plan 优先于 balance」排序"写过影响面，
+**与第 6 问的结论相反**。本节按第 6 问落：**套餐不建 key**。由此产生三条必须一起生效的推论：
+
+- **本上游池内没有 `token-plan` 行**，所以 ADR-0011 的"先烧套餐再烧余额"对 TierFlow
+  **不适用** —— 池内只有 `category='balance'` 的行（含 `unlimited=1` 的无限额度行）。
+  排序口径本身**零改动**，只是本上游没有第一档的输入。
+- 套餐的"剩余"只在**账号面展示**（`subscriptions[]`），**不进** `totalBalance`、
+  **不进** §14 快照、**不进**任何网关准入判断。
+- 若将来 `/api/subscription/self/token/rotate` 经实测确认能取回明文，且 Bo 决定要"先烧套餐"，
+  那是**独立的一次契约变更**（新增 ADR + 改本节），不在本期范围内 ——
+  该端点在供应商文档里自己标的是「未实测」，不能拿它当既成事实写进契约。
+
+**第 2 问补充**：`uid` 是本对象里唯一**不掩码**的账号标识（它是内部数字 ID，不是凭据）。
+`username`（`user_j4iCrFEB`）与上游站点登录名同值，同样不掩码 —— 但**它不是登录凭据**，
+登录凭据是 `identifier`(手机号) + `password`，`password` 永不出口。
+
+### 15.9 凭据来源与会话生命周期（v1.4.0 新增）
+
+本节的账号凭据有**两条来源**，纪律同一条：**只进不回、用后即弃**。
+
+| 来源 | 载体 | 入口 | 能否自动重登 |
+|---|---|---|---|
+| **密码型** | 人工维护的「手机号,密码」清单（粘贴 / CSV） | `POST /api/supplier-accounts/import` 的 `text` | ✅ 会话过期用存档密码重登 |
+| **会话型** | 操作员本地的一份**离线导出文件**（手机号 → uid / session / username / quota） | **离线一次性导入**（非 HTTP），见下 | ❌ **无密码即无法重登** |
+
+**会话型导入的四条纪律**：
+
+1. **不进 HTTP 面**：不给 `/api/*` 开"提交会话值"的入口 —— 那个端点一旦存在，
+   浏览器、代理日志、前端 `localStorage` 就都成了会话明文的过路点。会话型导入只由
+   **操作员在本机执行一次性导入**完成，路径由**运行时环境变量**给出（不写进配置仓库、不写进文档正文）。
+2. **不经 Agent / 不进本仓**：该文件的内容**不读入任何 AI 会话上下文、不进 git、不进日志、不进聊天记录**。
+   仓库里只有"如何导入"的说明，没有值本身。
+3. **入库后即视为该文件作废**：`session_cipher`（aes-256-gcm，`MASTER_KEY`）落库成功后，
+   该文件即完成使命 —— 之后的余额同步只读库里那份密文。文件由操作员自行销毁。
+4. **会话只服务管理面**：`session` / `TF-User` **绝不**写入 `upstream_keys`、**绝不**进入
+   网关侧的 `SecretResolver`。网关只吃 `sk-` 明文 + `baseUrl`（§16）。
+
+**已知代价（写在这里，不留给以后发现）**：**只有会话、没有密码的账号，会话一过期就回不来**。
+`session_expires_at` 到期后 `refresh` 无法自动重登（无密码可登），该账号落 `status="session_expired"`，
+需要操作员**再次执行一次性导入**（贴新会话）或**补录密码**（走 §15.2 `import`）。
+所以：长期看，**密码型凭据才是完整形态**，会话型导入是"先把今天的余额接进来"的过渡通路。
+**这条不是缺陷，是取舍** —— 会话型入口的价值就在于不必先拿到 27 个密码。
+
+- **`quota` 字段（离线文件里带的）只当首次对账参考**，**不入库为余额**：
+  入库后余额一律以管理面拉取为准（ADR-0017：上游接口是余额唯一事实源）。
+- **3 个登录失败号不丢弃**：导入时记 `status="login_failed"` + `statusMessage`（供应商错误码），
+  否则"这个号为什么不在列表里"会重复发生。
+- 到期时间：文件里的会话有效期由操作员说明给出（本次为**约 30 天**），
+  写入 `session_expires_at` 供前端提示"需重登"；**它是估计值，不是保证值** ——
+  真实失效由"下次查询返回 401"来证实，证实即落 `session_expired`。
+
+---
+
+## 16. TierFlow 数据面（`/v1/*`）接入约束（v1.4.0，路由者车道）
+
+本节只登记**数据面**（网关转发链路）的接入约束。管理面在 §15；路由者的实现影响面另见 ADR-0018「影响」。
+
+### 16.1 一个必须在 S2 之前钉死的未知
+
+供应商文档里出现过的端点（`/api/token/`、`/api/user/login`、`/api/subscription/self/token`、`/api/status`）
+**全部是管理面**。数据面（relay）路径**至今没有任何人写出来过** ——
+既没有出现在的契约里，也没有出现在三方任何一份影响面清单里。
+
+| 实测结论 | 后果 |
+|---|---|
+| 存在 OpenAI 兼容 relay | 按通用上游接入，`KeyConfig` / `KeyPool` **零签名改动** |
+| **只有自有协议** | 这家**接不进通用上游** —— 性质从"改两处"升级为"要 Bo 重新拍板"，必须升级处理，不能就地糊 |
+
+**判据按默认假设试**：`baseUrl = https://tierflow.cn` + OpenAI 兼容路径。
+**实测未完成前，本节其余条款不产生实现义务**（别按未证实的形状写代码）。
+
+### 16.2 上游返回 `200` + `success:false` 的识别窗口（**pre-first-chunk**）
+
+文档 §1.2 / §8.2 明说业务错误**通常返回 HTTP 200**，成败看 `success` 字段。而
+`classifyUpstreamStatus()` 是**纯状态码驱动**（401/403/402/429/≥500）。若 `/v1/chat/completions`
+也走 200 + `success:false`，则余额耗尽 / 令牌失效会被判成**成功调用** —— 不计失败、不进冷却、
+还 `reportSuccess`，死 key 永远被选中，直接打穿「单 key 故障 100ms 内切换」。
+
+**改动边界（路由者划定，本节收下）**：
+
+- 识别**只在 stream 首包发出之前**生效；判定为失败时按既有 Terminating 语义处理，客户端只看到一次
+  正常的上游错误响应。
+- **首包一旦发出，就不得再改 HTTP 状态**：只能记失败、进冷却、切换重试。
+  "客户端先收到 200、随后断流"就是**有感知**，直接违反 §10 的验收口径。
+- 因此这是 **pre-first-chunk 的识别**，不是响应结束时的整包校验 —— 后者在 stream 模式下没有落点。
+
+### 16.3 key 映射（1:1，无需改 `KeyConfig` / `KeyPool`）
+
+| TierFlow | 我们已有字段 |
+|---|---|
+| 普通 key（`unlimited_quota=true` / 固定 `remain_quota`） | `category='balance'` + `unlimited`（§15.6） |
+| `model_limits_enabled` + `model_limits` CSV | `KeyConfig.models` —— 白名单语义正好对上 `matchesModel()` |
+| `status: 1\|2` | `KeyStatus enabled\|disabled` |
+
+一个上游挂多 key 是**既有能力**；`getAvailableKeys` / `reportFailure` / `reportSuccess` 签名**零改动**。
+
+### 16.4 风控与探活（上游级 vs 账号级）
+
+- **探活（如新增）按 `(upstream, account)` 串行** + 最小间隔 **0.6s**（§15.5 同一条礼貌口径），
+  每账号只试一次 —— TierFlow 是"同一 host + 27 个账号 + 站点侧风控"，并发探活等于自找封禁。
+- **上游级熔断保留**：27 把 key 真的共用同一个 host，一起冷却**是对的行为**；
+  但要与"单账号被风控"区分开（后者只该影响该账号名下的 key）。
+- **现有实现没有主动探活**，只有被动冷却。是否新增探活不在本期范围（本期改动面：
+  错误体识别 + 探活限速两处，**且探活仅在新增时受本条约束**）。
+
+---
+
+*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`；v1.2.1（§13.4「槽位撞满」二分口径：全候选满并发 `503 NO_AVAILABLE_KEY` / 竞态窗口 `429 RATE_LIMITED`，零新增枚举、零代码改动）为文本对齐；v1.2.2（§2 `DELETE /api/upstreams/:id` 从属资源处置：`force!=true` 拦 key 与模型并报 `{keyCount, modelCount}`、`force=true` 按依赖序物理删整棵子树，修订 §11 C4）见 `docs/adr/0016-delete-upstream-subtree.md`；v1.3.0（§14 余额同步：自动同步节奏与退避、NULL 口径、快照与 `asOf`、方向级漂移提示；同批撤销「单价 × 用量的本地扣减账本」方案）见 `docs/adr/0017-balance-sync-source-of-truth.md`；v1.4.0（§15 供应商账号面 + §16 TierFlow 数据面约束：账号作独立资源、批量新建 key 为唯一入池通路、账号级余额第四口径、套餐不建成 key、`upstream_keys.unlimited`、凭据会话一次性离线导入、`…Cents` 金额口径；`ERROR_CODES` 首次新增 1 个 `ACCOUNT_HAS_KEYS`）见 `docs/adr/0018-supplier-account-batch.md`。以上各版同属本契约的同一冻结面。（**版本索引订正 2026-10-07，不升版**：本索引此前在 v1.2.1 之后漏记 v1.2.2 / v1.3.0 两条，本次补齐 —— 仅索引行，无内容变更。）*

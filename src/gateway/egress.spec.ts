@@ -225,6 +225,75 @@ describe('createEgressCooldown', () => {
   });
 });
 
+/* ------------------------------ 快照读面（契约 v1.5.0 ②） ------------------------------ */
+
+describe('createEgressCooldown().snapshot()', () => {
+  it('`untilMs` 是**绝对时刻**：跨 tick 前进后，同一条冷却的 untilMs 逐字不变', () => {
+    // 这条盯的是发帧指纹的稳定性。若实现返回"剩余量"，每 tick 都在变 ⇒ `sig` 永远算"变了"
+    // ⇒ 每 tick 白推一帧（§7 要避免的正是这个噪声）。绝对时刻才让"自然到期"表现为一次跳变。
+    const egress = createEgressCooldown({ now });
+    const until = egress.cool('a.example.com', 300_000);
+
+    const first = egress.snapshot();
+    assert.equal(first.length, 1);
+    assert.equal(first[0]?.untilMs, until, 'cool() 的返回值与快照的 untilMs 同一个数');
+
+    clock += 120_000; // 三个 tick 之后
+    const second = egress.snapshot();
+    assert.equal(second[0]?.untilMs, until, '时钟前进 → untilMs 不动（剩余量才动）');
+    assert.equal(egress.remainingMs('a.example.com'), 180_000, '剩余量确实在变 —— 但快照不受影响');
+  });
+
+  it('快照是**全量**：已过期条目仍在内（差分通道无墓碑，滤掉它 = 解除帧永不发出）', () => {
+    // 冷却自然到期没有任何写入动作。若这里按 `untilMs > now` 过滤，到期那一刻该出口直接从
+    // 本 tick 集合消失 ⇒ live.ts 只把它从 `seen` 删掉、不发帧 ⇒ 前端永远停在「出口限流中」。
+    // 发帧侧按 `untilMs > now ? ISO8601 : null` 出字段，所以"过期仍在内"是解除帧的前提，不是冗余。
+    const egress = createEgressCooldown({ now });
+    egress.cool('a.example.com', 300_000);
+    // 注意：冷却有 `max(Retry-After, 60s)` 地板（§16.7 裁定②），没有更短的档 ——
+    // 所以"过期"用时钟前进到 60s 之后制造，而不是喂一个 10s 的 Retry-After。
+    egress.cool('b.example.com');
+
+    clock += 60_000; // b 恰好到期，a 仍在冷却
+    const snap = egress.snapshot();
+
+    assert.equal(snap.length, 2, '两条都在快照里，不因过期被滤掉');
+    const a = snap.find((e) => e.host === 'a.example.com');
+    const b = snap.find((e) => e.host === 'b.example.com');
+    assert.ok(a !== undefined && b !== undefined);
+    assert.equal(egress.isCooling('b.example.com'), false, 'b 确实不在冷却了');
+    assert.ok(b.untilMs <= clock, 'b 在快照里的形状是"untilMs <= now"，不是缺席');
+    assert.equal(egress.isCooling('a.example.com'), true, 'a 仍在冷却 —— 全量与"冷却中"并不互斥');
+
+    // 从未冷却过的 host 不进快照（快照 = 该层记录过的出口，不是全部已知出口）
+    assert.equal(snap.find((e) => e.host === 'never.example.com'), undefined);
+  });
+
+  it('只读、不产生状态：noteSuccess / 未知 host 都不会凭空长出条目，也不清 `until`', () => {
+    const egress = createEgressCooldown({ now });
+    egress.noteSuccess('ghost.example.com');
+    egress.snapshot();
+    assert.equal(egress.snapshot().length, 0, '只读面不落条目');
+
+    egress.cool('a.example.com');
+    const until = egress.snapshot()[0]?.untilMs;
+    egress.noteSuccess('a.example.com');
+    assert.equal(egress.snapshot()[0]?.untilMs, until, '成功只清连续计数，快照的 until 不动（与接口注释同口径）');
+
+    const listed = egress.snapshot();
+    const again = egress.snapshot();
+    assert.deepEqual(again, listed, '两次快照内容一致：快照不消耗状态');
+  });
+
+  it('`clear()` 后快照归空（测试重置用；生产路径不 prune 过期条目）', () => {
+    const egress = createEgressCooldown({ now });
+    egress.cool('a.example.com');
+    assert.equal(egress.snapshot().length, 1);
+    egress.clear();
+    assert.equal(egress.snapshot().length, 0);
+  });
+});
+
 describe('retryAfterSecOf', () => {
   it('向上取整且至少 1s', () => {
     assert.equal(retryAfterSecOf(0), 1);

@@ -51,6 +51,20 @@ export interface EgressCooldown {
   /** 剩余冷却毫秒；不在冷却期 → 0（只读，不产生状态） */
   remainingMs(host: string): number;
   /**
+   * 全量只读快照 —— 出口冷却帧（契约 §7 `egress_cooldown`）的唯一数据源。
+   * 只读、不产生状态（与 `isCooling` / `remainingMs` 同族）。放行见契约 v1.5.0 ①。
+   *
+   * 两条语义是硬要求，不是风格（v1.5.0 ②）：
+   *  - **`untilMs` 是绝对时刻（epoch ms），不是剩余量。** 发帧侧不得用 `now() + remainingMs()`
+   *    反算 —— 那样每 tick 结果都变 ⇒ `sig` 永远"变了" ⇒ 每 tick 白推一帧。
+   *  - **返回全量，含已过期条目**（未在冷却者 `untilMs <= now` 也在内）。`live.ts` 的差分通道
+   *    **没有墓碑**：id 从本 tick 集合消失只是被从 `seen` 删掉、**不发任何帧** ⇒ 只报"冷却中的出口"
+   *    就会让**解除帧永不发出**，前端永远停在「出口限流中」。
+   *
+   * 因此本层**不得为省内存 prune 已过期条目**；真要 prune 得先给差分通道加墓碑，那是另一笔。
+   */
+  snapshot(): readonly { host: string; untilMs: number }[];
+  /**
    * 落一次出口级冷却。`retryAfterMs` 来自上游 `Retry-After`（§16.7：尊重它）。
    * 未给则 60s 起，连续命中按阶梯升档，30min 封顶；**已有更长的冷却不被缩短**。
    * @returns 本次冷却结束的 epoch ms
@@ -105,6 +119,12 @@ export function createEgressCooldown(options: EgressCooldownOptions = {}): Egres
     remainingMs(host: string): number {
       const s = state.get(host);
       return s === undefined ? 0 : Math.max(0, s.until - now());
+    },
+
+    // 全量快照：直接回 Map 的遍历序（插入序 = 首次冷却/成功落条目的序），不过滤、不 prune。
+    // `until` 在表内就是 epoch ms 绝对时刻，原样透出 —— 转 ISO8601 是发帧侧（live.ts）的事。
+    snapshot() {
+      return Array.from(state, ([host, s]) => ({ host, untilMs: s.until }));
     },
 
     cool(host: string, retryAfterMs?: number): number {

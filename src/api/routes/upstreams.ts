@@ -49,6 +49,7 @@ interface CreateBody {
   name: string;
   baseUrl: string;
   enabled?: boolean;
+  supplier?: string | null;
   balanceQuery?: unknown;
 }
 
@@ -56,11 +57,21 @@ interface UpdateBody {
   name?: string;
   baseUrl?: string;
   enabled?: boolean;
+  supplier?: string | null;
   balanceQuery?: unknown;
   revision: number;
 }
 
 const balanceQueryProp = { type: 'object', additionalProperties: true } as const;
+
+/**
+ * 契约 §2 `supplier`：`null` = 通用上游，`"tierflow"` = 走 §15 账号面。
+ *
+ * **取值是枚举，不是自由文本**：这一列是"该走哪个驱动器"的能力位，写错一个字的后果是
+ * 静默走错分支（或不走账号面），而不是一条能看见的报错。将来接第二家供应商时，
+ * 这里加一个取值 + §15 加一个驱动器，通用层不动（ADR-0018 决策 0）。
+ */
+const supplierProp = { type: ['string', 'null'], enum: [null, 'tierflow'] } as const;
 
 export function registerUpstreamRoutes(app: FastifyInstance, ctx: ApiContext): void {
   const { db, config } = ctx;
@@ -109,13 +120,14 @@ export function registerUpstreamRoutes(app: FastifyInstance, ctx: ApiContext): v
             name: { type: 'string', minLength: 1, maxLength: 100 },
             baseUrl: { type: 'string', minLength: 1, maxLength: 500 },
             enabled: { type: 'boolean' },
+            supplier: supplierProp,
             balanceQuery: balanceQueryProp,
           },
         },
       },
     },
     (req, reply) => {
-      const { name, baseUrl, enabled, balanceQuery } = req.body;
+      const { name, baseUrl, enabled, supplier, balanceQuery } = req.body;
 
       // 模板先规范化再校验：允许"先存一个没配好的模板、稍后再补"，
       // 但一旦 enabled=true 就必须完整，否则刷新任务会挨个失败。
@@ -130,6 +142,7 @@ export function registerUpstreamRoutes(app: FastifyInstance, ctx: ApiContext): v
         name,
         baseUrl: normalizeBaseUrl(baseUrl),
         enabled,
+        supplier,
         balanceQuery: template,
       });
       auditWrite(db, req, config, {
@@ -153,6 +166,7 @@ export function registerUpstreamRoutes(app: FastifyInstance, ctx: ApiContext): v
             name: { type: 'string', minLength: 1, maxLength: 100 },
             baseUrl: { type: 'string', minLength: 1, maxLength: 500 },
             enabled: { type: 'boolean' },
+            supplier: supplierProp,
             balanceQuery: balanceQueryProp,
             revision: revisionProp,
           },
@@ -160,7 +174,7 @@ export function registerUpstreamRoutes(app: FastifyInstance, ctx: ApiContext): v
       },
     },
     (req) => {
-      const { name, baseUrl, enabled, balanceQuery, revision } = req.body;
+      const { name, baseUrl, enabled, supplier, balanceQuery, revision } = req.body;
 
       let template: unknown;
       if (balanceQuery !== undefined) {
@@ -173,6 +187,7 @@ export function registerUpstreamRoutes(app: FastifyInstance, ctx: ApiContext): v
         name,
         baseUrl: baseUrl === undefined ? undefined : normalizeBaseUrl(baseUrl),
         enabled,
+        supplier,
         balanceQuery: template,
         revision,
       });

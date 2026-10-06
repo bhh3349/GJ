@@ -256,8 +256,12 @@ export function createBalanceSync(options: BalanceSyncOptions): BalanceSync {
       upstreamName: u.name,
       ts: at,
       totalBalanceCents: u.totalBalance,
-      knownKeyCount: u.balanceKeyCount - u.balanceUnknownKeyCount,
+      // known 必须**同时**减掉无限额度那一格：无限额度 key 的 balance 恒为 null，
+      // 但从 v1.4.0 起它不再进 unknown（ADR-0018 决策 8）。少减这一项，
+      // 27 把无限 key 就会被算成"余额已知 27 把" —— 一个查不到任何数值的"已知"。
+      knownKeyCount: u.balanceKeyCount - u.balanceUnknownKeyCount - u.unlimitedKeyCount,
       unknownKeyCount: u.balanceUnknownKeyCount,
+      unlimitedKeyCount: u.unlimitedKeyCount,
       tokenPlanKeyCount: u.tokenPlanKeyCount,
       trigger,
     });
@@ -423,6 +427,7 @@ export function createBalanceSync(options: BalanceSyncOptions): BalanceSync {
         totalBalanceCents: row.totalBalanceCents,
         knownKeyCount: row.knownKeyCount,
         unknownKeyCount: row.unknownKeyCount,
+        unlimitedKeyCount: row.unlimitedKeyCount,
         tokenPlanKeyCount: row.tokenPlanKeyCount,
       });
     }

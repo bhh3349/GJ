@@ -81,12 +81,29 @@ export interface UpstreamDto {
   name: string;
   baseUrl: string;
   enabled: boolean;
+  /**
+   * 契约 §2 `supplier`（v1.4.0）。**只读语义、可写入**。
+   *
+   * 它存在的唯一目的是让 `baseUrl` 的 host **不被当成能力判据**：猜错会静默走错驱动器，
+   * 而"这个上游有没有账号面"是管理员建上游时就知道的事，不该让代码去反推。
+   */
+  supplier: string | null;
   keyCount: number;
   enabledKeyCount: number;
-  /** 分；全部未知时 null */
+  /** 分；全部未知时 null。组成 = `Σ账号 + Σ无账号归属的 key`（§15.6 / ADR-0018 决策 3） */
   totalBalance: number | null;
+  /** `category='balance' AND unlimited=0 AND balance_cents IS NULL` */
   balanceUnknownKeyCount: number;
+  /** `balanceKeyCount` 的子集：无限额度 key 数。**不额外相加、也不进未知计数** */
+  unlimitedKeyCount: number;
   tokenPlanKeyCount: number;
+  /** §15 账号数；通用上游恒 0 */
+  accountCount: number;
+  /** 账号级余额合计（分）；通用上游恒 null */
+  accountsBalance: number | null;
+  accountsBalanceUnknownCount: number;
+  /** `totalBalance` 里由 key 贡献的那一半，供前端拆解合计；**不是**新增的一份钱 */
+  keysBalance: number | null;
   balanceQuery: BalanceQueryTemplate;
   /** 该 upstream 的 baseUrl 命中的内置 preset；没命中为 null。用户模板启用后它仍返回，只是 `effective:false` */
   balancePreset: BalancePresetDto | null;
@@ -118,6 +135,14 @@ export interface KeyDto {
   category: KeyCategory;
   enabled: boolean;
   weight: number;
+  /**
+   * 契约 §3 `unlimited`（v1.4.0）。无限额度 key 的 `balance` **恒为 `null`**（§15.7），
+   * 于是它与"还没查到余额"在 JSON 上逐字同形。
+   *
+   * **`unlimited: true` 优先于任何负值渲染**（§15.6）：上游给这类 key 的 `remain_quota`
+   * 是无意义的负数（如 `-331119`），前端若照抄会把"无限"画成"欠费"。
+   */
+  unlimited: boolean;
   /** 分；null = 未知 */
   balance: number | null;
   balanceCurrency: string | null;
@@ -442,8 +467,11 @@ export interface BalanceSnapshotPointDto {
   t: string;
   /** 分；`null` = 那一刻该上游 balance 类 key **全部未知**（不是 0） */
   totalBalanceCents: number | null;
+  /** `balanceKeyCount` − unknown − unlimited。**三格加起来才是那一刻的 key 总数**（v1.6.0） */
   knownKeyCount: number;
   unknownKeyCount: number;
+  /** v1.6.0：无限额度那一格。缺了它 `known + unknown` 会平白少一批 key 而无人能解释 */
+  unlimitedKeyCount: number;
   tokenPlanKeyCount: number;
 }
 

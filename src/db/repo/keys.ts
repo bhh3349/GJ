@@ -27,6 +27,7 @@ interface KeyRow {
   category: KeyCategory;
   enabled: number;
   weight: number;
+  unlimited: number;
   balance_cents: number | null;
   balance_currency: string | null;
   balance_updated_at: string | null;
@@ -72,6 +73,9 @@ function toDto(row: KeyRow, nowMs: number, nowDay: string): KeyDto {
     category: row.category,
     enabled: row.enabled === 1,
     weight: row.weight,
+    // 与 category 同一层纪律：只有 balance 类才谈得上"无限额度"。token-plan 行即使历史残留
+    // `unlimited = 1`，出口也必须是 false —— 那个类别不看余额（§3 表格里两个分支互斥）。
+    unlimited: isBalance && row.unlimited === 1,
     // 类别决定可见字段：token-plan 的 balance 恒为 null，balance 类的 tokenPlan 恒为 null。
     // 存储列可能有过期残留（改类别时），所以在**读路径**再拦一道，
     // 保证无论库里什么状态，响应都不会违反契约。
@@ -275,6 +279,8 @@ export interface CreateKeyInput {
   weight?: number | undefined;
   balance?: number | null | undefined;
   tokenPlan?: { remainingTokens: number; expiresAt: string | null } | null | undefined;
+  /** §15.7：`true` ⇒ 上游无限额度（`unlimited_quota`）。见下方落库规则。 */
+  unlimited?: boolean | undefined;
 }
 
 export function createKey(db: Db, input: CreateKeyInput, masterKey: Buffer): KeyDto {
@@ -286,15 +292,28 @@ export function createKey(db: Db, input: CreateKeyInput, masterKey: Buffer): Key
   const masked = maskKey(input.key);
   const blob = encryptSecret(input.key, masterKey);
   const isBalance = input.category === 'balance';
+  /**
+   * §15.7 落库规则：`unlimited = 1` ⇒ `balance_cents` **必须落 NULL**（v1.4.5）。
+   *
+   * 上游对无限额度 key 回的是 `{unlimited_quota: true, remain_quota: -331119}`，那个负数是
+   * **无意义占位、不是"欠费"**。落进去就成了一把"已欠费"的 key，而网关可用性过滤是
+   * `balance_cents <= 0 → 排除` —— 于是它被**静默排除出选路**：不报错、不告警、不进冷却，
+   * 客户端只看到"没有可用 key"。落 NULL 则走既有的「未知 ≠ 0、仍可用」分支。
+   *
+   * 这条规则在这里**强制**，而不是靠调用方自觉：调用方（§15 驱动器）同时拿到
+   * `unlimited_quota` 与那个负数，忘了丢负数的代价是一个静默故障。
+   */
+  const unlimited = isBalance && input.unlimited === true;
+  const balance = unlimited ? null : (input.balance ?? null);
 
   try {
     db.prepare(
       `INSERT INTO upstream_keys (
          id, upstream_id, label, masked_key, secret, category, enabled, weight,
          balance_cents, balance_currency, balance_updated_at, balance_source,
-         token_plan_remaining, token_plan_expires_at,
+         token_plan_remaining, token_plan_expires_at, unlimited,
          today_tokens, today_day, revision, deleted_at, created_at, updated_at
-       ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, NULL, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, NULL, ?, ?)`,
     ).run(
       id,
       input.upstreamId,
@@ -303,12 +322,13 @@ export function createKey(db: Db, input: CreateKeyInput, masterKey: Buffer): Key
       blob,
       input.category,
       input.weight ?? 1,
-      isBalance ? (input.balance ?? null) : null,
+      balance,
       isBalance ? 'CNY' : null,
-      isBalance && input.balance !== undefined && input.balance !== null ? at : null,
-      isBalance && input.balance !== undefined && input.balance !== null ? 'manual' : null,
+      isBalance && balance !== null ? at : null,
+      isBalance && balance !== null ? 'manual' : null,
       isBalance ? null : (input.tokenPlan?.remainingTokens ?? null),
       isBalance ? null : (input.tokenPlan?.expiresAt ?? null),
+      unlimited ? 1 : 0,
       utcDay(),
       at,
       at,

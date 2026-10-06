@@ -272,6 +272,10 @@ CREATE TABLE IF NOT EXISTS balance_snapshots (
   total_balance_cents  INTEGER,                   -- 分；null = 全未知（不是 0）
   known_key_count      INTEGER NOT NULL,
   unknown_key_count    INTEGER NOT NULL,
+  -- v1.6.0：无限额度 key 数。**加这一列不是为了好看** —— known 的口径是
+  -- 「总数 − 未知 − 无限额度」，少了它前端看到"已知 0 / 未知 0"而该上游有 27 把 key，
+  -- 却没有任何一格能解释那 27 把去哪了（§15.6：无限与未知永远是两个平行的计数）。
+  unlimited_key_count  INTEGER NOT NULL DEFAULT 0,
   token_plan_key_count INTEGER NOT NULL,
   trigger              TEXT NOT NULL CHECK (trigger IN ('auto','manual')),
   created_at           TEXT NOT NULL
@@ -464,6 +468,10 @@ export function migrate(db: SqliteDatabase): void {
       ['upstream_keys', 'unlimited', 'INTEGER NOT NULL DEFAULT 0'],
       // 可空、无默认：老行 NULL == "不限模型"，与加列前逐字一致（§3：null 与 [] 同义，库里不出现 ''）。
       ['upstream_keys', 'model_limits', 'TEXT'],
+      // 有默认值：老快照行填 0 == "那一刻没有无限额度 key"。**这个 0 是有依据的**，
+      // 不是补一个好看的空缺：`unlimited` 这一列本身就是 v1.4.0 才有的，
+      // 比它更早的快照里不可能存在无限额度 key。
+      ['balance_snapshots', 'unlimited_key_count', 'INTEGER NOT NULL DEFAULT 0'],
     ];
     for (const [table, column, decl] of added) {
       if (!hasColumn(db, table, column)) {

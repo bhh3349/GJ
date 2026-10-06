@@ -674,8 +674,13 @@ describe('§14.3 判据 5 —— 快照只在"覆盖整个上游"的一轮之后
     const row = listBalanceSnapshots(h.db)[0];
     const u = computeGlobalBalance(h.db).byUpstream.find((x) => x.upstreamId === up);
     expect(row?.totalBalanceCents).toBe(u?.totalBalance);
-    expect(row?.knownKeyCount).toBe((u?.balanceKeyCount ?? 0) - (u?.balanceUnknownKeyCount ?? 0));
+    // known 是**三格里减掉两格**：无限额度 key 的 balance 恒为 null，但它不进 unknown
+    // （ADR-0018 决策 8），所以只减 unknown 会把"无限"算成"已知"。
+    expect(row?.knownKeyCount).toBe(
+      (u?.balanceKeyCount ?? 0) - (u?.balanceUnknownKeyCount ?? 0) - (u?.unlimitedKeyCount ?? 0),
+    );
     expect(row?.unknownKeyCount).toBe(u?.balanceUnknownKeyCount);
+    expect(row?.unlimitedKeyCount).toBe(u?.unlimitedKeyCount);
     expect(row?.tokenPlanKeyCount).toBe(u?.tokenPlanKeyCount);
   });
 });

@@ -87,7 +87,9 @@ export function registerStatsRoutes(app: FastifyInstance, ctx: ApiContext): void
             totalBalance: global.totalBalance,
             balanceKeyCount: global.balanceKeyCount,
             balanceUnknownKeyCount: global.balanceUnknownKeyCount,
+            unlimitedKeyCount: global.unlimitedKeyCount,
             tokenPlanKeyCount: global.tokenPlanKeyCount,
+            accountsBalanceUnknownCount: global.accountsBalanceUnknownCount,
             currency: global.currency,
             // 明细在 /api/stats/balance，见文件头
             byUpstream: global.byUpstream.map((u) => ({
@@ -96,7 +98,12 @@ export function registerStatsRoutes(app: FastifyInstance, ctx: ApiContext): void
               totalBalance: u.totalBalance,
               balanceKeyCount: u.balanceKeyCount,
               balanceUnknownKeyCount: u.balanceUnknownKeyCount,
+              unlimitedKeyCount: u.unlimitedKeyCount,
               tokenPlanKeyCount: u.tokenPlanKeyCount,
+              accountCount: u.accountCount,
+              accountsBalance: u.accountsBalance,
+              accountsBalanceUnknownCount: u.accountsBalanceUnknownCount,
+              keysBalance: u.keysBalance,
             })),
           },
         },

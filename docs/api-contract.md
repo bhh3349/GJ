@@ -11,6 +11,8 @@
 > **补遗 v1.0.3（2026-10-06）**：① §3 写明 `health` 等四个运行态字段的**来源与新鲜度**（网关进程 1s 批量镜像落 `key_runtime`，重启后归零），动机见 ADR-0010；② §6 新增「`costCents` 金额口径」小节 —— 契约此前**暴露**了 `costCents`（§4 Group、§6 usage 点）却从未**定义**它，未知单价该记 0 还是 null 无据可依；③ §10 把「无可用 key」与「候选用尽」两个 Terminating 结果拆开登记（`503 NO_AVAILABLE_KEY` ≠ `502 UPSTREAM_ERROR`，原文一句话把两者混在一起，与实现不符），并登记已在使用但未登记的 `504 UPSTREAM_TIMEOUT`。三处都是**文本对齐实现**，无字段改名、无类型变更、无端点增删。
 >
 > **勘误（2026-10-06，不升版）**：§7「关闭码」补登 **`1008`**（跨站 Origin 被拒）—— 服务端自 M4 起就发这个码，关闭码表漏登了这一行（路由者 M4 复核 P3 提出）。定性为**既有实现、文档补记**：无字段改名、无类型变更、无端点增删、**两侧实现零改动**（服务端已发 `1008`、前端 `live.ts` 已落 `default` 分支），同 v1.0.3 的 `504 UPSTREAM_TIMEOUT`，故**不 bump 版本**，留待下一次真正的字段/形状变更时统一升版。§7 另补「未登记码通则」一句，堵住"按码白名单实现"这个坑。
+>
+> **补遗 v1.0.4（2026-10-06）**：§10 错误码表按 **ADR-0011** 扩充两处**触发条件**（码值 / HTTP / `type` 全部不变）：① `RATE_LIMITED`(429) 增加「**网关池饱和**」触发路径（候选非空、0 次真实尝试、全候选并发已满），与用户组 RPM / TPM 超限共用码值；② `NO_AVAILABLE_KEY`(503) 增加「**候选存在但密文解不出**」的配置异常路径。同时写明 **429 一律带 `Retry-After`**，并明确「0 次真实尝试」**不得报 502**、不计入任何 key 的健康计数。无字段改名、无类型变更、无端点增删，`GATEWAY_ERROR_CODES` 无新增值。
 
 ---
 
@@ -658,14 +660,16 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
 | `INVALID_REQUEST` | 400 | `invalid_request_error` | body 不是 JSON 对象、缺 `model`/`messages`/`input` |
 | `INVALID_API_KEY` | 401 | `authentication_error` | 网关 key 缺失/未知/已吊销（**不区分**"不存在"与"已禁用"，避免探测窗口） |
 | `NOT_FOUND` | 404 | `invalid_request_error` | `/v1/*` 下未知路径 |
-| `RATE_LIMITED` | 429 | `rate_limit_error` | 用户组 RPM / TPM 超限 |
+| `RATE_LIMITED` | 429 | `rate_limit_error` | 用户组 RPM / TPM 超限，**或网关池饱和**（候选非空、0 次真实尝试、全候选并发已满，ADR-0011） |
 | `QUOTA_EXCEEDED` | 429 | `insufficient_quota` | 用户组日配额（token）超限 |
 | `UNSUPPORTED_ENDPOINT` | 501 | `invalid_request_error` | image / audio / rerank 等未实现端点 |
 | `UPSTREAM_ERROR` | 502 | `api_error` | **候选存在但用尽**：重试上限内每把 key 都失败 |
-| `NO_AVAILABLE_KEY` | 503 | `server_error` | **候选为空**：该模型一把可用 key 都没有 |
+| `NO_AVAILABLE_KEY` | 503 | `server_error` | **候选为空**：该模型一把可用 key 都没有；或**候选存在但密文解不出**（元数据在、`secrets.resolve === null`，0 次真实尝试的配置异常，ADR-0011） |
 | `UPSTREAM_TIMEOUT` | 504 | `api_error` | 所有尝试都超时（首字节超时，默认 120s） |
 
 > 502 与 503 的分界是**候选集是否为空**，不是"最终有没有成功"：池子里有 key 但全试完仍失败 → `502 UPSTREAM_ERROR`；一把都选不出来 → `503 NO_AVAILABLE_KEY`。两者的排障含义完全不同（前者查上游，后者查池子/档案）。
+> **0 次真实尝试不是上游故障（ADR-0011）**：候选非空却在派发前被并发槽位全部挡回（`skippedSaturated > 0` 且无可解析异常）→ `429 RATE_LIMITED` + `Retry-After: 1`，message 明示 `pool saturated`；候选里有 key 但密文解析不出 → `503 NO_AVAILABLE_KEY`（message 明示 `unresolvable`）。两条都**不得报 502**，且都是 0 次真实尝试、`failureReason: null` —— 不计入任何 key 的健康计数。
+> **429 响应一律带 `Retry-After`（秒，int）**：用户组 RPM / TPM 超限、日配额超限（`QUOTA_EXCEEDED`）与网关池饱和（`RATE_LIMITED`）三条路径都写该头（池饱和头部由 ADR-0011 起补），两类 `rate_limit_error` 语义统一为"退避后可重试"。调用方按该头退避，不解析 message 文本。
 > 另有一个不对外承诺的内部结果：客户端中途断开时引擎会构造 `499 UPSTREAM_ERROR`，此时对端已不可达，`499` 不出现在任何真实响应里，**不入本表**。
 
 - 失败枚举（计入 key 失败，仅这五类）：`AUTH_INVALID` / `RATE_LIMITED` / `INSUFFICIENT_BALANCE` / `UPSTREAM_ERROR` / `NETWORK`。400/404/422 与客户端断开**不计**失败。

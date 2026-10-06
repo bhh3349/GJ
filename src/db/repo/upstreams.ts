@@ -101,6 +101,18 @@ export function getUpstreamRow(db: Db, id: string): UpstreamRow | null {
   return (db.prepare('SELECT * FROM upstreams WHERE id = ?').get(id) as UpstreamRow | undefined) ?? null;
 }
 
+/**
+ * 全部上游的 `id + name`（不分页、不做 q/enabled 过滤）。余额自动同步的调度与
+ * §14.3 的运行态列表用它。
+ *
+ * **刻意不看 `enabled`**：禁用只影响 `/v1/*` 选路，不影响"这个上游还剩多少钱"。
+ * 把禁用上游排除在外还会制造一个静默错：它被禁用正是因为没钱了，而余额从此不再更新，
+ * 于是"什么时候能重新启用"这个问题永远答不上来。
+ */
+export function listUpstreamIdsAndNames(db: Db): { id: string; name: string }[] {
+  return db.prepare('SELECT id, name FROM upstreams ORDER BY name').all() as { id: string; name: string }[];
+}
+
 export function getUpstream(db: Db, id: string): UpstreamDto | null {
   const row = getUpstreamRow(db, id);
   if (!row) return null;

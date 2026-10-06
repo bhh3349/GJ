@@ -1,6 +1,6 @@
 # 17. M6-C：余额以上游接口同步为唯一事实源（自动同步 + 快照 + 漂移提示）
 
-- 状态：**接口阶段产物，待 PM 审**（范围由 PM 于 2026-10-07 冻结；实现待审后放行）
+- 状态：**生效**（接口阶段由 PM 于 2026-10-07 验收放行；实现同日落库，三条口径裁定与两条实现期纪律见下）
 - 日期：2026-10-07
 - 决策者：管家 · 管理后端（契约 §14）
 - 关联：ADR-0003（§6 余额三口径）/ ADR-0006（明文纪律）/ ADR-0011（0 次真实尝试不计消耗）/ ADR-0012（三段解析 + 失败引导）/ ADR-0016（物理删除上游子树）；**被撤销的上一版 0017（计费账本，见文末）**
@@ -30,7 +30,7 @@ M6-A 已经把「查上游余额」做完了：`upstreams.balance_query` 模板 
 
 ## 决策 1：自动同步 —— 触发 / 间隔 / 抖动 / 退避 / 单飞
 
-**触发**：进程内定时器按**每上游**的独立节奏跑，与手动刷新并存（手动三个端点语义**零变更**）。
+**触发**：进程内**一个**拍子（固定节拍扫描），按**每上游**各自的 `nextAttemptAt` 决定这一拍要不要跑它，与手动刷新并存（手动三个端点语义**零变更**）。刻意不用"每上游一条 `setTimeout` 链"：那种写法在运行期新建的上游上要么漏挂、要么得在 CRUD 里回写调度器，而拍子扫描天然收编新上游。**首个周期同样过抖动** —— 否则开机那一刻 N 个上游同时开火，∓10% 只把它们摊在 3 分钟里，退避与单飞都救不了"同时"。并发上限**复用既有的全量刷新上限** `REFRESH_CONCURRENCY`，不新开第二个数。
 
 | 项 | 冻结值 | 说明 |
 |---|---|---|
@@ -85,7 +85,7 @@ CREATE INDEX IF NOT EXISTS idx_balance_snapshots_upstream_ts ON balance_snapshot
 - **快照 = 状态，不是动作**：一条快照记的是"该上游此刻所有未软删 key 的余额状态"，不是"本次刷了多少把"。所以它和 `tasks` 表里的刷新结果（`checked/ok/failed/...`）**不是一回事**，不要合并。
 - **只在覆盖整个上游的同步后写**（自动同步 / 上游刷新 / 批量刷新里该上游的那部分）。**单 key 手动刷新不写快照** —— 那时上游合计里只有这一把 key 是新值、其余是旧值，记成"上游此刻的状态"会是一条半新半旧的假快照。
 - **无外键 + 名字快照**：ADR-0016 起删上游会物理删除整棵子树，`REFERENCES upstreams(id)` 会让删上游在钱上再踩一次那个 500。上游删掉后快照行仍在（历史可读），展示名取自 `upstream_name`。
-- **保留期**：`BALANCE_SNAPSHOT_RETENTION_DAYS`（默认 `90`，与 `HEALTH_SNAPSHOT_RETENTION_DAYS` 同一形态与理由），由启动期定时清理；**不参与** `pruneLogs`（那是 `usage_logs` 的 30 天口径，两件事别混）。
+- **保留期**：`BALANCE_SNAPSHOT_RETENTION_DAYS`（默认 `90`，与 `HEALTH_SNAPSHOT_RETENTION_DAYS` 同一形态与理由），由**独立周期任务**清理（启动跑一次 + 此后每小时一次，`unref()`），且**该周期任务在 `BALANCE_SYNC_MINUTES=0` 时照常注册** —— 关掉自动同步不等于放弃裁剪，历史快照仍然在增长；**不参与** `pruneLogs`（那是 `usage_logs` 的 30 天口径，两件事别混）。
 - **`asOf` 的两个层级，别混**：key 级 = `balanceUpdatedAt`（该 key 最近一次**真的查到**的时刻）；上游级 = 该上游最近一条快照的 `ts`。前端标注"数据新鲜度"时必须用 key 级那个。
 
 只读暴露：`GET /api/stats/balance/sync?upstreamId=&window=`（形状与错误口径见契约 §14.3）。
@@ -123,6 +123,15 @@ CREATE INDEX IF NOT EXISTS idx_balance_snapshots_upstream_ts ON balance_snapshot
 3. **它引入的失败模式比它解决的问题多**：账本与日志同事务、`NULL request_id` 拒收、删上游不删账、单价未知计 0 与"确实免费"不可区分 —— 每一条都是新的静默态。
 4. **它把两套口径同时放进系统**（上游查得 vs 本地推算），而 M6-A 好不容易建立的"未知就是未知"的信任，正好死在"两个余额数不一致"上。
 
+## PM 验收裁定（2026-10-07，实现期约束）
+
+接口阶段由 PM 逐条核实（对 `0c175b0`：2 files `+292/−2` 全在 `docs/`、四闸绿、`spentCents`/`availableCents`/`billing_ledger` 零残留、被撤销草稿从未进 git）后放行实现。三条口径裁定 **全部同意**：取不到保留旧值不清零（清零点 = 主动销毁唯一的事实）、单 key 手动刷新不写快照（宁缺一个点，不造假点）、漂移只能方向级（这条反过来自证了改向是对的）。另加两条**实现期纪律**（改的是纪律不是口径）：
+
+1. **保留期清理必须是周期任务**，不能只是启动跑一次 —— 长跑进程永不清理 = 快照表无界增长。
+2. **首个自动同步周期也要抖动，并发上限复用既有全量刷新的上限**。
+
+两条都已按上文落地（决策 1 的触发段、决策 3 的保留期段）。
+
 ## 备选方案
 
 | 方案 | 做法 | 代价 | 结论 |
@@ -140,11 +149,11 @@ CREATE INDEX IF NOT EXISTS idx_balance_snapshots_upstream_ts ON balance_snapshot
 |---|---|---|
 | `src/db/schema.ts` | 管家 | 加 1 张表 + 2 个索引（纯加表 → `SCHEMA_VERSION` 不递增、零迁移） |
 | `src/db/repo/balance-snapshots.ts`（新） | 管家 | 写快照（唯一写者）+ 读窗口序列 + 保留期裁剪 |
-| `src/wiring/balance-sync.ts`（新） | 管家 | 定时器（间隔/抖动/退避/单飞），复用现有 `refreshBalances`，**不新增查询路径** |
+| `src/api/balance-sync.ts`（新） | 管家 | 定时器（间隔/抖动/退避/单飞），复用现有 `refreshBalances`，**不新增查询路径**。**落地位置与本节原定不同**：原写 `src/wiring/balance-sync.ts` + `src/server.ts`，实现改在 `src/api/` 内、由 `buildApp` 建对象并挂 `onClose` 停表 —— 与既有 `createHealthSnapshotWriter` 完全同款，`src/server.ts` **零改动**、关停顺序表一行不用动，且 `src/wiring/` 属路由者车道（AGENTS.md §8） |
 | `src/config.ts` + `.env.example` | 管家 | `BALANCE_SYNC_MINUTES`（默认 15 / 0=关）、`BALANCE_SNAPSHOT_RETENTION_DAYS`（默认 90） |
 | `src/api/routes/stats.ts` + `dto.ts` | 管家 | 新增 `GET /api/stats/balance/sync`（只读） |
 | `src/api/services/balance-refresh.ts` | 管家 | 刷新收尾后按上游写快照（单 key 范围不写）+ 手动成功重置退避 |
-| `src/server.ts` | 管家 | 启停定时器 + 保留期清理 |
+| `src/api/app.ts` | 管家 | 启停定时器（建对象 + `onClose` 停表），**`src/server.ts` 零改动**（见上一行的位置说明） |
 | `docs/api-contract.md` | 管家 | 新增 §14、版本 **v1.2.2 → v1.3.0**、补文末版本索引（P3 #3） |
 | `web/` | 画师 | 余额趋势图（`asOf` + 上次同步时间标注）+ 漂移提示位；**不得**把不同 `asOf` 的点画成一条连续线 |
 | `src/gateway/` | 路由者 | **零改动** |

@@ -245,6 +245,36 @@ CREATE TABLE IF NOT EXISTS gateway_health_snapshots (
   error_count  INTEGER NOT NULL                -- 窗口内错误事件条数（含非上游类的）
 );
 CREATE INDEX IF NOT EXISTS idx_health_snap_ts ON gateway_health_snapshots(ts);
+
+-- 余额快照（契约 §14.3 / ADR-0017）。**纯加表**，SCHEMA_VERSION 不递增、零迁移 ——
+-- 同 gateway_error_events / gateway_health_snapshots 那两批，DDL 每次开库整体跑，
+-- 旧库上照建。
+--
+-- 三处与 gateway_health_snapshots 刻意不同，都不是风格问题：
+--   1. **无外键**。ADR-0016 起删上游是**物理删除**整棵子树，这里若写
+--      REFERENCES upstreams(id)，"删上游"会在钱上再踩一次那个 500（还是删不掉，
+--      因为快照行没人级联）。历史的可读性不靠外键保，靠下一列。
+--   2. **upstream_name 存名字快照**。上游删掉后行仍在，展示名仍有来源
+--      （同 usage_logs.key_masked 的做法：行自带可读标识，不依赖父行还在）。
+--   3. **total_balance_cents 可空**：null = 那一刻该上游的 balance 类 key **全部未知**，
+--      与 0（确实没钱了）严格区分（§0.2 / ADR-0003）。
+--
+-- 一条快照记的是"该上游此刻的状态"，不是"本次刷了多少把"（后者在 tasks 表）。
+-- 所以它不带 ok/failed 计数 —— 那些是动作的结果，不是状态。
+CREATE TABLE IF NOT EXISTS balance_snapshots (
+  id                   TEXT PRIMARY KEY,
+  upstream_id          TEXT NOT NULL,             -- 抹名引用：只 id，不存 baseUrl
+  upstream_name        TEXT NOT NULL,             -- 名字快照：上游物理删除后历史仍可读
+  ts                   TEXT NOT NULL,             -- 快照时刻（= 该上游本轮同步完成时刻，即上游级 asOf）
+  total_balance_cents  INTEGER,                   -- 分；null = 全未知（不是 0）
+  known_key_count      INTEGER NOT NULL,
+  unknown_key_count    INTEGER NOT NULL,
+  token_plan_key_count INTEGER NOT NULL,
+  trigger              TEXT NOT NULL CHECK (trigger IN ('auto','manual')),
+  created_at           TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_balance_snapshots_ts ON balance_snapshots(ts);
+CREATE INDEX IF NOT EXISTS idx_balance_snapshots_upstream_ts ON balance_snapshots(upstream_id, ts);
 `;
 
 /** 列是否存在。删列是"只做一次"的搬迁，靠它判幂等 —— 版本号只当记账用。 */

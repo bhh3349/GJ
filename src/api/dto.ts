@@ -408,3 +408,86 @@ export interface HealthSnapshotDto {
   dbOk: boolean;
   errorCount: number;
 }
+
+/**
+ * 契约 §14.3 自动同步的**生效参数回显**。
+ *
+ * 前端**不得**自算间隔 / 抖动 / 退避 —— 这些数只在这里给一次，前端抄了就会和
+ * 后端漂成两个值（同 `HealthMetricsDto.window` 的"归一化后回显"纪律）。
+ */
+export interface BalanceSyncAutoDto {
+  enabled: boolean;
+  intervalMinutes: number;
+  jitterRatio: number;
+  backoffCapMinutes: number;
+}
+
+/** 契约 §14.3 每上游运行态。退避与单飞都在**进程内存**里，重启即归零（ADR-0010 同款降级）。 */
+export interface BalanceSyncUpstreamStateDto {
+  upstreamId: string;
+  name: string;
+  /** 该上游最近一条快照的 `ts`（上游级 `asOf`）；从未同步过为 `null` */
+  lastSyncedAt: string | null;
+  consecutiveFailures: number;
+  /** 退避中非空；无排程（自动同步关闭）为 `null`。刻意不与 `nextRunAt` 求同：两者取的不是同一批上游 */
+  nextAttemptAt: string | null;
+  inFlight: boolean;
+}
+
+/**
+ * 契约 §14.3 快照点。**自带 `t`** —— 本节刻意没有等长 `axis`：
+ * 同步节奏本身不规则（抖动 + 退避 + 关闭期），造一条均匀轴就得发明不存在的点。
+ */
+export interface BalanceSnapshotPointDto {
+  t: string;
+  /** 分；`null` = 那一刻该上游 balance 类 key **全部未知**（不是 0） */
+  totalBalanceCents: number | null;
+  knownKeyCount: number;
+  unknownKeyCount: number;
+  tokenPlanKeyCount: number;
+}
+
+export interface BalanceSyncSeriesDto {
+  upstreamId: string;
+  /** 展示名来自快照行的 `upstream_name`：上游被物理删除后这一路仍可读 */
+  label: string;
+  points: BalanceSnapshotPointDto[];
+}
+
+/**
+ * 契约 §14.4 漂移提示码。**地位同 `hintCode`**：不进 `ERROR_CODES`、
+ * 不影响任何 HTTP 状态、不拦请求 —— 它只是"给管理员看一眼"的方向级提示。
+ */
+export type BalanceDriftCode = 'BALANCE_SPENT_WITHOUT_TRAFFIC' | 'BALANCE_UNCHANGED_WITH_TRAFFIC';
+
+export interface BalanceDriftAlertDto {
+  code: BalanceDriftCode;
+  upstreamId: string;
+  /** 相邻两次快照的较早 / 较晚时刻（判定的窗口两端） */
+  from: string;
+  to: string;
+  /** 该窗口内本网关的 token 用量（上游级，不按 key 过滤） */
+  usedTokens: number;
+}
+
+export interface BalanceDriftDto {
+  since: string;
+  /** 进程内计数，重启归零（`balance_drift_total{code}`），**不是**窗口内计数 */
+  counts: Record<BalanceDriftCode, number>;
+  /** 按 `to` 倒序，上限 20 条 */
+  alerts: BalanceDriftAlertDto[];
+}
+
+/** 契约 §14.3 `GET /api/stats/balance/sync` */
+export interface BalanceSyncStatusDto {
+  auto: BalanceSyncAutoDto;
+  /** 最近一次同步**完成**的时刻（任意触发都算）；从未同步过为 `null` */
+  lastSyncedAt: string | null;
+  lastTrigger: 'auto' | 'manual' | null;
+  /** 自动同步下一次计划时刻（已含抖动）；关闭时为 `null` */
+  nextRunAt: string | null;
+  window: { from: string; to: string };
+  upstreams: BalanceSyncUpstreamStateDto[];
+  series: BalanceSyncSeriesDto[];
+  drift: BalanceDriftDto;
+}

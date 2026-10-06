@@ -30,6 +30,16 @@ export interface AppConfig {
   logRetentionDays: number;
   /** 健康快照保留天数；快照量级远小于日志（60s 一条），默认给 90 天 */
   healthSnapshotRetentionDays: number;
+  /**
+   * 余额自动同步的基准间隔（分钟，契约 §14.1 / ADR-0017）。**`0` = 关闭自动同步**
+   * （手动三个刷新端点全部保留）；负数 / 非十进制 → 启动失败。
+   */
+  balanceSyncMinutes: number;
+  /**
+   * 余额快照保留天数（默认 90，与 `healthSnapshotRetentionDays` 同一形态与理由）。
+   * **不参与** `logRetentionDays`（那是 `usage_logs` 的 30 天口径，两件事别混）。
+   */
+  balanceSnapshotRetentionDays: number;
   /** 单次调用的最大尝试次数（含首次）；默认 3（冻结常量） */
   maxAttempts: number;
   /** 每把上游 key 的并发上限；默认 4（冻结常量） */
@@ -102,6 +112,20 @@ function intFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: number): num
 function positiveIntFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
   const n = intFromEnv(env, name, fallback);
   if (n < 1) throw new Error(`${name} 必须 >= 1，实际为 ${JSON.stringify(env[name])}`);
+  return n;
+}
+
+/**
+ * 非负整数项（`BALANCE_SYNC_MINUTES` 这类"0 有明确含义"的项）。
+ *
+ * 为什么不能直接用 `intFromEnv`：负数在这类项上**不是"更小的值"，是另一种语义**。
+ * `BALANCE_SYNC_MINUTES=-15` 会被 `intervalMinutes > 0` 判成"关闭自动同步"，
+ * 于是部署者以为配了一个更勤的间隔，实际把自动同步整个关掉了 —— 门禁全绿，
+ * 症状只是"余额再也不自己更新了"。这类值要么是正数、要么是显式的 0。
+ */
+function nonNegativeIntFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
+  const n = intFromEnv(env, name, fallback);
+  if (n < 0) throw new Error(`${name} 必须 >= 0（0 = 关闭），实际为 ${JSON.stringify(env[name])}`);
   return n;
 }
 
@@ -189,6 +213,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     readonlyToken: readonlyToken === '' ? null : readonlyToken,
     logRetentionDays: intFromEnv(env, 'LOG_RETENTION_DAYS', 30),
     healthSnapshotRetentionDays: positiveIntFromEnv(env, 'HEALTH_SNAPSHOT_RETENTION_DAYS', 90),
+    // 0 是**显式含义**（关闭自动同步），所以走非负版本而不是 positive 版本
+    balanceSyncMinutes: nonNegativeIntFromEnv(env, 'BALANCE_SYNC_MINUTES', 15),
+    balanceSnapshotRetentionDays: positiveIntFromEnv(env, 'BALANCE_SNAPSHOT_RETENTION_DAYS', 90),
     maxAttempts: positiveIntFromEnv(env, 'MAX_ATTEMPTS', 3),
     maxConcurrencyPerKey: positiveIntFromEnv(env, 'MAX_CONCURRENCY_PER_KEY', 4),
     cooldownLadderSeconds: cooldownLadderFromEnv(env),

@@ -82,6 +82,9 @@ function makeConfig(dbPath: string): AppConfig {
     cooldownLadderSeconds: [0, 60, 300, 900, 1800],
     // 新增必填配置项（契约 §13 `ASSISTANT_MODEL`）的测试取值：本套用例不涉及助手
     assistantModel: null,
+    // 同上，契约 §14 新增两项：测试里关掉自动同步，不引后台定时器
+    balanceSyncMinutes: 0,
+    balanceSnapshotRetentionDays: 90,
   };
 }
 

@@ -32,6 +32,12 @@ interface UsageQueryParams {
   model?: string;
 }
 
+/** 契约 §14.3 只读端点。`upstreamId` 查无此上游 → `200` + 该条为空（列表型过滤，不报 404）。 */
+interface BalanceSyncQuery {
+  upstreamId?: string;
+  window?: string;
+}
+
 const WINDOW_RE = /^(\d{1,5})(s|m|h)$/;
 const MAX_WINDOW_SECONDS = 86_400;
 
@@ -100,6 +106,29 @@ export function registerStatsRoutes(app: FastifyInstance, ctx: ApiContext): void
   );
 
   app.get('/api/stats/balance', () => ({ global: computeGlobalBalance(db) }));
+
+  app.get<{ Querystring: BalanceSyncQuery }>(
+    '/api/stats/balance/sync',
+    {
+      schema: {
+        querystring: {
+          type: 'object',
+          properties: {
+            upstreamId: { type: 'string', maxLength: 64 },
+            window: { type: 'string', maxLength: 10 },
+          },
+        },
+      },
+    },
+    (req) => {
+      // 默认 **6h**（契约 §14.3），与 overview 的 60s 不同，理由不是口味：
+      // 同步是 15 分钟级的节奏，60s 窗口里几乎必然一个点都没有 —— 而"空图"
+      // 会被读成"没在同步"。上限仍是共用的 24h。
+      const { seconds } = parseWindow(req.query.window ?? '6h');
+      // 只读：这里只是把调度器内存里的状态与库里的快照拼起来，**不触发任何查询**（§14.3）。
+      return ctx.balanceSync.status(seconds, req.query.upstreamId);
+    },
+  );
 
   app.get<{ Querystring: UsageQueryParams }>(
     '/api/stats/usage',

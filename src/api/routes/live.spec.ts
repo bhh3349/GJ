@@ -93,6 +93,9 @@ function makeConfig(dbPath: string): AppConfig {
     maxConcurrencyPerKey: 4,
     cooldownLadderSeconds: [0, 60, 300, 900, 1800],
     assistantModel: null,
+    // 余额自动同步在测试配置里默认关：本套用例不为它开后台定时器（它有自己的 spec）
+    balanceSyncMinutes: 0,
+    balanceSnapshotRetentionDays: 90,
   };
 }
 

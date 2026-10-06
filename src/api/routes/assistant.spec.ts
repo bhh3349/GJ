@@ -75,6 +75,9 @@ function makeConfig(dbPath: string, over: Partial<AppConfig> = {}): AppConfig {
     maxConcurrencyPerKey: 4,
     cooldownLadderSeconds: [0, 60, 300, 900, 1800],
     assistantModel: null,
+    // 契约 §14 新增两项：测试里关掉自动同步，不引后台定时器
+    balanceSyncMinutes: 0,
+    balanceSnapshotRetentionDays: 90,
     ...over,
   };
 }

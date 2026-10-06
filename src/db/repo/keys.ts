@@ -440,19 +440,21 @@ export function setKeyBalance(
   return toDto(updated, ctx.nowMs, ctx.nowDay);
 }
 
-/** 模板查询回写（C5：手动录入永远优先，所以这里只在模板路径显式调用时才覆盖）。 */
+/**
+ * 模板查询回写（C5：手动录入永远优先，所以这里只在模板路径显式调用时才覆盖）。
+ *
+ * 「取不到值」的分支是**真空操作**（契约 §14.2 / ADR-0017 决策 2）：不写金额（未知 ≠ 0），
+ * 也**不推 `balance_updated_at`**。那个时间戳的全部价值就是"最近一次真的查到数的时刻"
+ * （§14.3 `asOf`），把它推新等于把一条陈旧读数伪装成实时读数 —— 比不显示更坏。
+ * 顺带也就没有 `change_log`：什么都没变，不该把网关叫醒重建一次快照。
+ */
 export function applyTemplateBalance(
   db: Db,
   id: string,
   value: { balanceCents: number | null; currency: string | null; remainingTokens?: number | null; expiresAt?: string | null },
 ): void {
   const at = nowIso();
-  if (value.balanceCents === null) {
-    // 查不到 ≠ 0：保持"未知"，只更新查询时间，不改 balance_source
-    db.prepare('UPDATE upstream_keys SET balance_updated_at = ?, updated_at = ? WHERE id = ?').run(at, at, id);
-    appendChange(db, 'balance', id, 'update', null);
-    return;
-  }
+  if (value.balanceCents === null) return;
   db.prepare(
     `UPDATE upstream_keys
      SET balance_cents = ?, balance_currency = ?, balance_updated_at = ?, balance_source = 'template',
@@ -471,6 +473,8 @@ export function applyTemplateBalance(
  * 金额未知是 balance_cents IS NULL，套餐余量未知是 token_plan_remaining 保持原值。
  * 合并成一个函数会让"这次到底改了哪一列"变得含糊，而这两列恰好是
  * 前端区分"没钱"与"不知道"的依据。
+ *
+ * 「一个字都没给」同样是**真空操作**，理由与 applyTemplateBalance 一字不差（§14.2）。
  */
 export function applyTemplateTokenPlan(
   db: Db,
@@ -478,12 +482,7 @@ export function applyTemplateTokenPlan(
   value: { remainingTokens: number | null; expiresAt: string | null },
 ): void {
   const at = nowIso();
-  if (value.remainingTokens === null && value.expiresAt === null) {
-    // 上游没给余量：保持"未知"，只记一次查询时间
-    db.prepare('UPDATE upstream_keys SET balance_updated_at = ?, updated_at = ? WHERE id = ?').run(at, at, id);
-    appendChange(db, 'balance', id, 'update', null);
-    return;
-  }
+  if (value.remainingTokens === null && value.expiresAt === null) return;
   db.prepare(
     `UPDATE upstream_keys
      SET token_plan_remaining = COALESCE(?, token_plan_remaining),

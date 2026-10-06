@@ -16,6 +16,7 @@ const ID_PREFIX = {
   audit: 'aud',
   errorEvent: 'err',
   healthSnapshot: 'hs',
+  balanceSnapshot: 'bs',
 } as const;
 
 export type IdKind = keyof typeof ID_PREFIX;

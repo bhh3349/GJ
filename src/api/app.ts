@@ -22,6 +22,7 @@ import type { Db } from '../db/database.js';
 import { NO_ASSISTANT_METRICS } from '../db/observability.js';
 import { unwiredAssistantInvoker, type AssistantModelInvoker } from './assistant-port.js';
 import { LoginRateLimiter, requireSession, type SessionInfo } from './auth.js';
+import { createBalanceSync, type BalanceSync } from './balance-sync.js';
 import type { AssistantMetricsDto } from './dto.js';
 import { ApiError } from './errors.js';
 import { createHealthSnapshotWriter } from './health-snapshot-writer.js';
@@ -69,6 +70,12 @@ export interface ApiContext {
   assistant: AssistantModelInvoker;
   /** 助手独立计量（契约 §12.2 `assistant`）。经 `/api/observability/health` 只读暴露 */
   assistantMetrics: AssistantMetricsDto;
+  /**
+   * 余额自动同步调度器（契约 §14 / ADR-0017）。**始终存在**（即使 `BALANCE_SYNC_MINUTES=0`）——
+   * `GET /api/stats/balance/sync` 是只读观测口，不能因为"自动同步关了"就 404：
+   * 关了之后历史快照仍然可读，而那正是"关掉自动同步"的人最想确认的东西。
+   */
+  balanceSync: BalanceSync;
 }
 
 /** 唯一免鉴权路径（契约 §0.5）。用 method+path 精确匹配，不用前缀。 */
@@ -174,6 +181,21 @@ export interface BuildAppOptions {
   healthSnapshotIntervalMs?: number;
   /** 快照统计窗口，仅测试用（默认 300s） */
   healthSnapshotWindowSeconds?: number;
+  /**
+   * 是否**启动**余额自动同步调度器（契约 §14 / ADR-0017）。默认 `true`（线上行为）。
+   *
+   * 与 `healthSnapshots` 有意不同的一点：调度器**总是**被创建（路由要它），
+   * 这个开关只决定要不要 `start()` 注册定时器。测试关掉它就能用 `tick()` 手动驱动，
+   * 不必和应用的真实时钟赛跑。
+   *
+   * 它**不影响** `auto.enabled` 的回显：那个字段答的是"配置里自动同步开着吗"，
+   * 拿一个测试开关去篡改它，会让唯一一条能验证"`0` = 关"的路径失效。
+   */
+  balanceSync?: boolean;
+  /** 排程拍节，仅测试用（默认 15s） */
+  balanceSyncTickMs?: number;
+  /** 快照裁剪拍节，仅测试用（默认 1h） */
+  balanceSyncPruneIntervalMs?: number;
 }
 
 export function buildApp(opts: BuildAppOptions): FastifyInstance {
@@ -188,6 +210,18 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   const startedAt = opts.startedAt ?? new Date();
   const droppedEvents = opts.droppedEvents ?? (() => 0);
 
+  // 余额自动同步调度器（契约 §14 / ADR-0017）。**先建对象、后起步**：
+  // 路由与刷新收尾钩子都要拿到同一个实例，而"要不要注册定时器"是启动那一步的事。
+  const balanceSync = createBalanceSync({
+    db,
+    masterKey: config.masterKey,
+    intervalMinutes: config.balanceSyncMinutes,
+    retentionDays: config.balanceSnapshotRetentionDays,
+    log: app.log,
+    tickMs: opts.balanceSyncTickMs,
+    pruneIntervalMs: opts.balanceSyncPruneIntervalMs,
+  });
+
   const ctx: ApiContext = {
     db,
     config,
@@ -196,6 +230,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     droppedEvents,
     assistant: opts.assistant ?? unwiredAssistantInvoker,
     assistantMetrics: opts.assistantMetrics ?? NO_ASSISTANT_METRICS,
+    balanceSync,
   };
 
   app.decorateRequest('auth', null);
@@ -335,6 +370,16 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
       writer.stop();
     });
     writer.start();
+  }
+
+  // 余额自动同步（契约 §14 / ADR-0017）。生命周期与上面那位同款，理由也同款：
+  // 冻结的关停顺序保证 `app.close()` 早于 `db.close()`，于是这里停表就不会写到一个
+  // 已经关掉的连接上。两条定时器（排程 / 裁剪）都 `unref()`，不会吊住进程退出。
+  if (opts.balanceSync ?? true) {
+    app.addHook('onClose', async () => {
+      balanceSync.stop();
+    });
+    balanceSync.start();
   }
 
   return app;

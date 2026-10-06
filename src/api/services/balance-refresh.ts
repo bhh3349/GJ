@@ -31,8 +31,15 @@ import {
 } from './balance-query.js';
 import type { TaskReporter } from '../task-runner.js';
 
-/** 同时最多打几个上游请求。够快，又不至于把对方限流触发出来。 */
-const CONCURRENCY = 4;
+/**
+ * 同时最多打几个上游请求。够快，又不至于把对方限流触发出来。
+ *
+ * **导出是给自动同步用的**：调度器限制"同时几个上游在跑"时要复用这个数，
+ * 而不是另拍一个 —— 两处各有一个并发上限，早晚会漂成"同一次余额查询，
+ * 手动刷新打 4 个、自动同步打 12 个"，而症状只是上游那边偶尔 429。
+ */
+export const REFRESH_CONCURRENCY = 4;
+const CONCURRENCY = REFRESH_CONCURRENCY;
 
 export interface RefreshScope {
   upstreamId?: string | undefined;
@@ -55,7 +62,58 @@ export interface RefreshSummary {
   hint: string | null;
 }
 
-type Attempt = { kind: 'query'; outcome: QueryExecution } | { kind: 'skipped' };
+/**
+ * 该上游本轮各型计数。**只为收尾钩子**（写快照 / 退避归零 / 漂移判定）而存在：
+ * 对外返回的 `RefreshSummary` 形状一个字都不动（契约 §3 冻结）。
+ */
+export interface UpstreamRefreshResult {
+  upstreamId: string;
+  checked: number;
+  /** 请求成功数（2xx，**含**取不到金额的那些） */
+  ok: number;
+  failed: number;
+  unknown: number;
+  skipped: number;
+}
+
+/** 一轮刷新收尾时交给钩子的东西。`trigger` 与 `wholeUpstream` 由本函数保证，调用方不必自证。 */
+export interface RefreshDone {
+  /** 本轮完成时刻（= 快照的 `ts` / 上游级 `asOf`） */
+  at: string;
+  trigger: 'auto' | 'manual';
+  /**
+   * 本轮是否**覆盖了整个上游**：`scope.keyIds === undefined` 才是。
+   *
+   * 判据刻意只看"有没有给 key 列表"，不去证明"给的列表正好是全部 key" ——
+   * 后者要么多查一次库、要么在 key 增删的竞态里给出错答案，而错的代价是
+   * **造出一条半新半旧的假快照**（比缺一个点坏得多）。保守判定在这里是免费的。
+   */
+  wholeUpstream: boolean;
+  /** 本轮有 key 参与的上游（顺序 = 上游首次出现顺序） */
+  upstreams: readonly UpstreamRefreshResult[];
+}
+
+export interface RefreshOptions {
+  /** 覆盖 fetch，仅测试用。 */
+  fetchImpl?: typeof fetch | undefined;
+  /**
+   * 触发方。只影响快照行的 `trigger` 列与它在同步状态里的归类，
+   * **不改变任何刷新行为** —— 三个手动端点的语义零变更（契约 §14.1）。
+   */
+  trigger?: 'auto' | 'manual' | undefined;
+  /**
+   * 刷新收尾钩子：本轮只要有 key 参与就调一次（快照 / 退避 / 漂移接在这里）。
+   *
+   * **实现方必须自己吞掉异常**：钩子抛出去会把一次刷新结果正常的任务标成 `failed`
+   * （快照写失败 ≠ 余额刷新失败），那是把两件事混成一件。本函数不做静默兜底。
+   */
+  onUpstreamDone?: ((done: RefreshDone) => void) | undefined;
+}
+
+type Attempt =
+  | { upstreamId: string; kind: 'query'; outcome: QueryExecution }
+  | { upstreamId: string; kind: 'skipped' };
+
 
 /** 待刷新 key 的条数。路由在起任务前用它填 progress.total，避免前端看到 0/0。 */
 export function countRefreshableKeys(db: Db, scope: RefreshScope): number {
@@ -111,8 +169,9 @@ export async function refreshBalances(
   masterKey: Buffer,
   scope: RefreshScope,
   reporter: TaskReporter,
-  fetchImpl: typeof fetch = fetch,
+  options: RefreshOptions = {},
 ): Promise<RefreshSummary> {
+  const fetchImpl = options.fetchImpl ?? fetch;
   const refs = decryptedKeyRefs(db, scope, masterKey);
   reporter.setTotal(refs.length);
 
@@ -133,7 +192,7 @@ export async function refreshBalances(
     }
     if (plan === null) {
       reporter.step();
-      return { kind: 'skipped' };
+      return { upstreamId: ref.upstreamId, kind: 'skipped' };
     }
 
     const target: QueryTarget = {
@@ -146,11 +205,59 @@ export async function refreshBalances(
     const outcome = await executePlan(plan, target, fetchImpl);
     applyOutcome(db, ref, outcome);
     reporter.step();
-    return { kind: 'query', outcome };
+    return { upstreamId: ref.upstreamId, kind: 'query', outcome };
   });
 
-  return summarize(attempts);
+  const summary = summarize(attempts);
+
+  // 收尾钩子：快照、退避、漂移全在这里接上。刻意放在**刷新已经全部落库之后** ——
+  // 快照记的是"此刻的状态"，必须先让本轮的值真的写进 upstream_keys。
+  const hook = options.onUpstreamDone;
+  if (hook !== undefined) {
+    const perUpstream = groupByUpstream(attempts);
+    if (perUpstream.length > 0) {
+      hook({
+        at: new Date().toISOString(),
+        trigger: options.trigger ?? 'manual',
+        // 只看"有没有给 key 列表"：给了就是部分刷新，快照宁缺勿假（详见 RefreshDone）。
+        wholeUpstream: scope.keyIds === undefined,
+        upstreams: perUpstream,
+      });
+    }
+  }
+
+  return summary;
 }
+
+/** 按上游聚合本轮计数，保持上游首次出现的顺序（结果可预期，测试不必排序）。 */
+function groupByUpstream(attempts: readonly Attempt[]): UpstreamRefreshResult[] {
+  const acc = new Map<string, UpstreamRefreshResult>();
+  for (const a of attempts) {
+    const item = acc.get(a.upstreamId) ?? {
+      upstreamId: a.upstreamId,
+      checked: 0,
+      ok: 0,
+      failed: 0,
+      unknown: 0,
+      skipped: 0,
+    };
+    item.checked += 1;
+    if (a.kind === 'skipped') {
+      item.skipped += 1;
+    } else if (!a.outcome.ok) {
+      item.failed += 1;
+    } else {
+      item.ok += 1;
+      // 与 summarize 同一条判据：请求成功但拿不到数 = 未知，不是失败也不是成功
+      if (a.outcome.parsed === null || (a.outcome.parsed.balanceCents === null && a.outcome.parsed.remainingTokens === null)) {
+        item.unknown += 1;
+      }
+    }
+    acc.set(a.upstreamId, item);
+  }
+  return [...acc.values()];
+}
+
 
 /** 查询结果落库。金额只写 balance 类 key，余量只写 token-plan 类 key。 */
 function applyOutcome(db: Db, ref: DecryptedKeyRef, outcome: QueryExecution): void {

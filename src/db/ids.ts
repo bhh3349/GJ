@@ -17,6 +17,9 @@ const ID_PREFIX = {
   errorEvent: 'err',
   healthSnapshot: 'hs',
   balanceSnapshot: 'bs',
+  // 供应商账号（契约 §15.1 示例 `acc_…`）。id 前缀**构成 API 形状的一部分**：
+  // 前端拿它当不透明串，但契约文档里已经写成 `acc_`，换一个前缀就等于换个字段值。
+  supplierAccount: 'acc',
 } as const;
 
 export type IdKind = keyof typeof ID_PREFIX;

@@ -491,3 +491,78 @@ export interface BalanceSyncStatusDto {
   series: BalanceSyncSeriesDto[];
   drift: BalanceDriftDto;
 }
+
+// ---------------------------------------------------------------------------
+// §15 供应商账号面（TierFlow）
+// ---------------------------------------------------------------------------
+
+/**
+ * 契约 §15.1 `credentialSource`。
+ *
+ * 它回答的是**一个具体问题**「会话过期后能不能自动重登」：`password` = 库里有存档密码、能；
+ * `session` = 只有会话、不能（§15.9 明示取舍）。前端**不自行推断** ——
+ * 「有会话」和「能重登」是两件事，用 `hasSession` 推 `credentialSource` 一定推错。
+ */
+export type SupplierCredentialSource = 'password' | 'session';
+
+/** 契约 §15.1 账号状态。`unknown` = **从未成功查询过**，不是"正常"的同义词。 */
+export type SupplierAccountStatus = 'active' | 'login_failed' | 'session_expired' | 'unknown';
+
+/** 契约 §15.1 套餐摘要。金额一律 int **分**；上游给的是 quota 或**浮点元**，换算全在后端。 */
+export interface SupplierSubscriptionDto {
+  subNo: string;
+  planTitle: string | null;
+  planSlug: string | null;
+  amountTotalCents: number | null;
+  amountUsedCents: number | null;
+  paidCents: number | null;
+  basicTokenTotal: number | null;
+  basicTokenUsed: number | null;
+  status: string | null;
+  source: string | null;
+  startAt: string | null;
+  endAt: string | null;
+  /**
+   * **三态**：`true` / `false` 是上游明确给了；`null` 是**上游根本没这个字段**。
+   * 合并成两态，等于把"供应商没告诉我们"当成"不会自动续费" —— 替对方下了结论。
+   */
+  autoRenew: boolean | null;
+  hasKey: boolean;
+  /** 套餐 key **只有掩码、永不进池**（ADR-0018 决策 7） */
+  keyMasked: string | null;
+  updatedAt: string;
+}
+
+/** 契约 §15.1 `SupplierAccount`（`GET /api/supplier-accounts` 列表项与详情共用同一形状）。 */
+export interface SupplierAccountDto {
+  id: string;
+  upstreamId: string;
+  supplier: string;
+  /** **掩码**手机号 / 邮箱。真值不出后端 */
+  identifier: string;
+  username: string | null;
+  uid: string | null;
+  status: SupplierAccountStatus;
+  /** 面向人的一句话。只放供应商错误码或通用原因，不含凭据 */
+  statusMessage: string | null;
+  /** 分；`null` = 未知 ≠ 0（ADR-0003） */
+  balanceCents: number | null;
+  /** 最近一次**真的查到**余额的时刻。查失败**不动它** —— 否则会渲染成"刚查过"，而事实是没查到 */
+  balanceUpdatedAt: string | null;
+  /** 归属本账号、**已入池**（`upstream_keys` 未软删）的 key 数 */
+  keyCount: number;
+  /** `keyCount` 中 `unlimited = 1` 的条数。**是子集，不额外相加**（§15.7 不变量） */
+  unlimitedKeyCount: number;
+  /** 只拿到掩码、**进不了池**的 key 数（对账用）。**不得与 `keyCount` 相加成"key 总数"** */
+  maskedKeyCount: number;
+  /** **恒为数组**：上游给的是 `all_subscriptions: []`，单数对象表达不了"没有套餐" */
+  subscriptions: SupplierSubscriptionDto[];
+  /** 「能不能自动重登」，由它回答；与 `hasSession` **正交** */
+  credentialSource: SupplierCredentialSource;
+  /** 只回答**有无**。会话值永不出后端 */
+  hasSession: boolean;
+  sessionExpiresAt: string | null;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}

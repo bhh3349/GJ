@@ -37,15 +37,27 @@ jobs:
       # 四闸之 build。typecheck 是 `--noEmit`（只查类型），build 才会真的 emit ——
       # 它单独抓的是 tsconfig.build.json 的 rootDir/outDir 漂移，以及只在 emit 阶段
       # 才暴露的错误。本地四闸口径里有这一步，CI 缺它等于少一闸。
+      #
+      # 只 `exit 0` 不够：tsc 在 rootDir/outDir 漂了之后**照样 0 退出**，只是一股脑
+      # emit 到别处，dist/ 空空如也而这一步全绿。所以断言产物存在，这一步才算闸。
       - name: Build
-        run: pnpm run build
+        run: |
+          pnpm run build
+          test -f dist/server.js
 
       # 待办 6：优雅停机。单列成一步，是为了红了能直接看出"是停机这条挂了"，
       # 而不是淹没在某个测试文件里（这些用例 `pnpm test` 里也会跑，这里要的是**能指名道姓**）。
       # 顺序判据（src/wiring/shutdown.spec.ts）全平台可跑；
       # 真 SIGTERM 进程用例（src/server.spec.ts）只在 POSIX 上有效 ——
       # win32 没有 POSIX 信号语义，测不出优雅停机，这正是它必须落到 Linux CI 上的原因。
+      #
+      # `GATEWAY_ENTRY=dist`：这一步的冒烟打的是上一步刚 emit 的 `dist/server.js`，
+      # 也就是真正要发布的产物（tsc emit 出来的 ESM 解析/依赖图问题只有跑 dist 才暴露）。
+      # 本地不设这个变量，默认走源码 tsx —— 免得本地那份陈旧 dist 把测试喂成假绿。
+      # build → 冒烟必须同 job 且 build 在前，否则 dist 不存在，冒烟会假红。
       - name: Shutdown gate (优雅停机顺序 + 真 SIGTERM)
+        env:
+          GATEWAY_ENTRY: dist
         run: pnpm run check:shutdown
 
       # 验收第 9 条后半段：key 明文永不落盘。

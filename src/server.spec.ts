@@ -38,6 +38,14 @@ if (process.env['CI'] !== undefined && !POSIX) {
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
+// 子进程入口。默认走源码（tsx）——本地 `pnpm test` 不该被一份陈旧的 `dist/` 喂成假绿。
+// CI 的停机门禁步骤设 `GATEWAY_ENTRY=dist`，把它指到同一 job 里刚 emit 的产物上：
+// 那条路径打的是真正要发布的东西，tsc emit 阶段的 ESM 解析/依赖图问题只有跑 dist 才暴露。
+const ENTRY_ARGV =
+  process.env['GATEWAY_ENTRY'] === 'dist'
+    ? [join(ROOT, 'dist', 'server.js')]
+    : ['--import', 'tsx', join(ROOT, 'src', 'server.ts')];
+
 const STARTUP_TIMEOUT_MS = 60_000;
 const EXIT_TIMEOUT_MS = 30_000;
 
@@ -71,7 +79,8 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
- * 起一个真进程（`src/server.ts`，同 CI 里 `pnpm dev` 走的那条 tsx 路径）。
+ * 起一个真进程。入口见 `ENTRY_ARGV`：源码（`src/server.ts`，同 CI 里 `pnpm dev` 走的那条
+ * tsx 路径）或 emit 产物（`dist/server.js`），由 `GATEWAY_ENTRY` 切换，两条都验同一套判据。
  * 端口用 0 让内核挑空闲端口：CI 上固定端口撞车是那种"重跑一次就绿"的假失败。
  */
 function startServer(): ServerProcess {
@@ -92,7 +101,7 @@ function startServer(): ServerProcess {
   // 父进程（vitest）的 loader 参数不该泄进子进程
   delete env['NODE_OPTIONS'];
 
-  const proc = spawn(process.execPath, ['--import', 'tsx', join(ROOT, 'src', 'server.ts')], {
+  const proc = spawn(process.execPath, ENTRY_ARGV, {
     cwd: ROOT,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],

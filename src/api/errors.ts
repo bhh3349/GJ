@@ -17,6 +17,11 @@ export const ERROR_CODES = [
   'CONFLICT',
   'REVISION_MISMATCH',
   'UPSTREAM_HAS_KEYS',
+  // 契约 §0.4 / §15.2（v1.4.0 登记）：删账号但其名下有已入池 key。
+  // **注意与 UPSTREAM_HAS_KEYS 的区别**：上游那条是"删了 key 必然不可达"，
+  // 账号这条是"删了 key 仍然可用"，所以两者都拦，但 `force=true` 的**语义不同** ——
+  // 上游是真删子树、账号只是**解绑**（§15.2）。
+  'ACCOUNT_HAS_KEYS',
   'UNPROCESSABLE',
   'TOO_MANY_ATTEMPTS',
   'INTERNAL',
@@ -37,6 +42,7 @@ const HTTP_STATUS: Record<ErrorCode, number> = {
   CONFLICT: 409,
   REVISION_MISMATCH: 409,
   UPSTREAM_HAS_KEYS: 409,
+  ACCOUNT_HAS_KEYS: 409,
   UNPROCESSABLE: 422,
   TOO_MANY_ATTEMPTS: 429,
   INTERNAL: 500,

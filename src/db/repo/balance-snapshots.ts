@@ -22,8 +22,11 @@ export interface BalanceSnapshotInput {
   ts: string;
   /** 分；`null` = 该上游 balance 类 key 全部未知（**不是 0**） */
   totalBalanceCents: number | null;
+  /** `balanceKeyCount` 里**有余额概念且查到了值**的条数（= 总数 − 未知 − 无限额度） */
   knownKeyCount: number;
   unknownKeyCount: number;
+  /** v1.6.0：无限额度 key 数。缺了它 `known + unknown ≠ balanceKeyCount` 就没人解释得清 */
+  unlimitedKeyCount: number;
   tokenPlanKeyCount: number;
   trigger: 'auto' | 'manual';
 }
@@ -36,6 +39,7 @@ export interface BalanceSnapshotRow {
   totalBalanceCents: number | null;
   knownKeyCount: number;
   unknownKeyCount: number;
+  unlimitedKeyCount: number;
   tokenPlanKeyCount: number;
   trigger: 'auto' | 'manual';
 }
@@ -48,6 +52,7 @@ interface RawRow {
   total_balance_cents: number | null;
   known_key_count: number;
   unknown_key_count: number;
+  unlimited_key_count: number;
   token_plan_key_count: number;
   trigger: 'auto' | 'manual';
 }
@@ -61,6 +66,7 @@ function toRow(r: RawRow): BalanceSnapshotRow {
     totalBalanceCents: r.total_balance_cents,
     knownKeyCount: r.known_key_count,
     unknownKeyCount: r.unknown_key_count,
+    unlimitedKeyCount: r.unlimited_key_count,
     tokenPlanKeyCount: r.token_plan_key_count,
     trigger: r.trigger,
   };
@@ -72,8 +78,8 @@ export function appendBalanceSnapshot(db: Db, input: BalanceSnapshotInput): stri
   db.prepare(
     `INSERT INTO balance_snapshots (
        id, upstream_id, upstream_name, ts, total_balance_cents,
-       known_key_count, unknown_key_count, token_plan_key_count, trigger, created_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       known_key_count, unknown_key_count, unlimited_key_count, token_plan_key_count, trigger, created_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     id,
     input.upstreamId,
@@ -82,6 +88,7 @@ export function appendBalanceSnapshot(db: Db, input: BalanceSnapshotInput): stri
     input.totalBalanceCents,
     input.knownKeyCount,
     input.unknownKeyCount,
+    input.unlimitedKeyCount,
     input.tokenPlanKeyCount,
     input.trigger,
     new Date().toISOString(),

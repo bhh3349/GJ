@@ -36,6 +36,7 @@ import { registerMiscRoutes } from './routes/misc.js';
 import { registerModelRoutes } from './routes/models.js';
 import { registerObservabilityRoutes } from './routes/observability.js';
 import { registerStatsRoutes } from './routes/stats.js';
+import { registerSupplierAccountRoutes } from './routes/supplier-accounts.js';
 import { registerUpstreamRoutes } from './routes/upstreams.js';
 
 declare module 'fastify' {
@@ -337,6 +338,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   registerGroupRoutes(app, ctx);
   registerModelRoutes(app, ctx);
   registerStatsRoutes(app, ctx);
+  registerSupplierAccountRoutes(app, ctx);
   registerMiscRoutes(app, ctx);
   registerObservabilityRoutes(app, ctx);
   registerAssistantRoutes(app, ctx);

@@ -674,8 +674,13 @@ describe('§14.3 判据 5 —— 快照只在"覆盖整个上游"的一轮之后
     const row = listBalanceSnapshots(h.db)[0];
     const u = computeGlobalBalance(h.db).byUpstream.find((x) => x.upstreamId === up);
     expect(row?.totalBalanceCents).toBe(u?.totalBalance);
-    expect(row?.knownKeyCount).toBe((u?.balanceKeyCount ?? 0) - (u?.balanceUnknownKeyCount ?? 0));
+    // known 是**三格里减掉两格**：无限额度 key 的 balance 恒为 null，但它不进 unknown
+    // （ADR-0018 决策 8），所以只减 unknown 会把"无限"算成"已知"。
+    expect(row?.knownKeyCount).toBe(
+      (u?.balanceKeyCount ?? 0) - (u?.balanceUnknownKeyCount ?? 0) - (u?.unlimitedKeyCount ?? 0),
+    );
     expect(row?.unknownKeyCount).toBe(u?.balanceUnknownKeyCount);
+    expect(row?.unlimitedKeyCount).toBe(u?.unlimitedKeyCount);
     expect(row?.tokenPlanKeyCount).toBe(u?.tokenPlanKeyCount);
   });
 });
@@ -892,8 +897,13 @@ describe('判据 9 / 10 —— 热路径零回退与零新增枚举', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('§10 零新增枚举 / 零迁移：两张码表长度不变，SCHEMA_VERSION 仍为 2，漂移码不在码表里', () => {
-    expect(ERROR_CODES).toHaveLength(15);
+  it('§10 零新增枚举 / 零迁移：本版两张码表长度不变，SCHEMA_VERSION 仍为 2，漂移码不在码表里', () => {
+    // **本断言是**本版（v1.3.0 余额同步）**的**快照：它要钉的是"加余额同步没有新增任何枚举"。
+    // v1.4.0 给 §15 账号面加了 `ACCOUNT_HAS_KEYS`（契约明写"`ERROR_CODES` 首次新增 1 个"），
+    // 故这里的绝对值随之 15 → 16 —— **加的是别人那一版的，不是本版的**。
+    // 改动这里时请一并确认：新增的那个码有契约与 ADR 背书，不是因为顺手。
+    expect(ERROR_CODES).toHaveLength(16);
+    expect(ERROR_CODES).toContain('ACCOUNT_HAS_KEYS');
     expect(Object.keys(GATEWAY_ERROR_CODES)).toHaveLength(10);
     expect(SCHEMA_VERSION).toBe(2);
 

@@ -81,12 +81,29 @@ export interface UpstreamDto {
   name: string;
   baseUrl: string;
   enabled: boolean;
+  /**
+   * 契约 §2 `supplier`（v1.4.0）。**只读语义、可写入**。
+   *
+   * 它存在的唯一目的是让 `baseUrl` 的 host **不被当成能力判据**：猜错会静默走错驱动器，
+   * 而"这个上游有没有账号面"是管理员建上游时就知道的事，不该让代码去反推。
+   */
+  supplier: string | null;
   keyCount: number;
   enabledKeyCount: number;
-  /** 分；全部未知时 null */
+  /** 分；全部未知时 null。组成 = `Σ账号 + Σ无账号归属的 key`（§15.6 / ADR-0018 决策 3） */
   totalBalance: number | null;
+  /** `category='balance' AND unlimited=0 AND balance_cents IS NULL` */
   balanceUnknownKeyCount: number;
+  /** `balanceKeyCount` 的子集：无限额度 key 数。**不额外相加、也不进未知计数** */
+  unlimitedKeyCount: number;
   tokenPlanKeyCount: number;
+  /** §15 账号数；通用上游恒 0 */
+  accountCount: number;
+  /** 账号级余额合计（分）；通用上游恒 null */
+  accountsBalance: number | null;
+  accountsBalanceUnknownCount: number;
+  /** `totalBalance` 里由 key 贡献的那一半，供前端拆解合计；**不是**新增的一份钱 */
+  keysBalance: number | null;
   balanceQuery: BalanceQueryTemplate;
   /** 该 upstream 的 baseUrl 命中的内置 preset；没命中为 null。用户模板启用后它仍返回，只是 `effective:false` */
   balancePreset: BalancePresetDto | null;
@@ -118,6 +135,22 @@ export interface KeyDto {
   category: KeyCategory;
   enabled: boolean;
   weight: number;
+  /**
+   * 契约 §3 `unlimited`（v1.4.0）。无限额度 key 的 `balance` **恒为 `null`**（§15.7），
+   * 于是它与"还没查到余额"在 JSON 上逐字同形。
+   *
+   * **`unlimited: true` 优先于任何负值渲染**（§15.6）：上游给这类 key 的 `remain_quota`
+   * 是无意义的负数（如 `-331119`），前端若照抄会把"无限"画成"欠费"。
+   */
+  unlimited: boolean;
+  /**
+   * 契约 §3 `models`（v1.4.2）。模型白名单，取自 `upstream_keys.model_limits` CSV。
+   *
+   * `null` = 无白名单、不限模型；**`[]` 与 `null` 同义**（§3 / §5），故出口恒不出现 `[]`。
+   * 与网关 `KeyConfig.models` 同源同口径 —— 两边读的是**同一个列**。
+   * **只读**：`PATCH /api/keys/:id` 不收该字段；建 key 时由 §15.2 `keys` 入参给。
+   */
+  models: string[] | null;
   /** 分；null = 未知 */
   balance: number | null;
   balanceCurrency: string | null;
@@ -442,8 +475,11 @@ export interface BalanceSnapshotPointDto {
   t: string;
   /** 分；`null` = 那一刻该上游 balance 类 key **全部未知**（不是 0） */
   totalBalanceCents: number | null;
+  /** `balanceKeyCount` − unknown − unlimited。**三格加起来才是那一刻的 key 总数**（v1.6.0） */
   knownKeyCount: number;
   unknownKeyCount: number;
+  /** v1.6.0：无限额度那一格。缺了它 `known + unknown` 会平白少一批 key 而无人能解释 */
+  unlimitedKeyCount: number;
   tokenPlanKeyCount: number;
 }
 
@@ -490,4 +526,95 @@ export interface BalanceSyncStatusDto {
   upstreams: BalanceSyncUpstreamStateDto[];
   series: BalanceSyncSeriesDto[];
   drift: BalanceDriftDto;
+}
+
+// ---------------------------------------------------------------------------
+// §15 供应商账号面（TierFlow）
+// ---------------------------------------------------------------------------
+
+/**
+ * 契约 §15.1 `credentialSource`。
+ *
+ * 它回答的是**一个具体问题**「会话过期后能不能自动重登」：`password` = 库里有存档密码、能；
+ * `session` = 只有会话、不能（§15.9 明示取舍）。前端**不自行推断** ——
+ * 「有会话」和「能重登」是两件事，用 `hasSession` 推 `credentialSource` 一定推错。
+ */
+export type SupplierCredentialSource = 'password' | 'session';
+
+/** 契约 §15.1 账号状态。`unknown` = **从未成功查询过**，不是"正常"的同义词。 */
+export type SupplierAccountStatus = 'active' | 'login_failed' | 'session_expired' | 'unknown';
+
+/** 契约 §15.1 套餐摘要。金额一律 int **分**；上游给的是 quota 或**浮点元**，换算全在后端。 */
+export interface SupplierSubscriptionDto {
+  subNo: string;
+  planTitle: string | null;
+  planSlug: string | null;
+  amountTotalCents: number | null;
+  amountUsedCents: number | null;
+  paidCents: number | null;
+  basicTokenTotal: number | null;
+  basicTokenUsed: number | null;
+  status: string | null;
+  source: string | null;
+  startAt: string | null;
+  endAt: string | null;
+  /**
+   * **三态**：`true` / `false` 是上游明确给了；`null` 是**上游根本没这个字段**。
+   * 合并成两态，等于把"供应商没告诉我们"当成"不会自动续费" —— 替对方下了结论。
+   */
+  autoRenew: boolean | null;
+  hasKey: boolean;
+  /** 套餐 key **只有掩码、永不进池**（ADR-0018 决策 7） */
+  keyMasked: string | null;
+  updatedAt: string;
+}
+
+/**
+ * 契约 §15.2 `GET /api/supplier-accounts/subscriptions` 的一行 = `SupplierSubscriptionDto`
+ * **加上"它是谁的"**。
+ *
+ * 为什么必须带归属：套餐列表是**跨账号**的（详情页里那个 `subscriptions[]` 天然知道
+ * 自己属于谁，扁平列表不知道）。只给 `subNo` 的列表在读的人眼里是一串没有主语的编号，
+ * 对账时第一句话就是"这是哪个号的" —— 而那正是这个端点存在的用途。
+ *
+ * 归属字段**只放掩码**（`accountIdentifier`），真值连这个端点也不出后端（§15.1）。
+ */
+export interface SupplierSubscriptionRowDto extends SupplierSubscriptionDto {
+  accountId: string;
+  /** **掩码**手机号 / 邮箱。与 §15.1 同一条纪律：真值不出后端 */
+  accountIdentifier: string;
+  upstreamId: string;
+}
+
+/** 契约 §15.1 `SupplierAccount`（`GET /api/supplier-accounts` 列表项与详情共用同一形状）。 */export interface SupplierAccountDto {
+  id: string;
+  upstreamId: string;
+  supplier: string;
+  /** **掩码**手机号 / 邮箱。真值不出后端 */
+  identifier: string;
+  username: string | null;
+  uid: string | null;
+  status: SupplierAccountStatus;
+  /** 面向人的一句话。只放供应商错误码或通用原因，不含凭据 */
+  statusMessage: string | null;
+  /** 分；`null` = 未知 ≠ 0（ADR-0003） */
+  balanceCents: number | null;
+  /** 最近一次**真的查到**余额的时刻。查失败**不动它** —— 否则会渲染成"刚查过"，而事实是没查到 */
+  balanceUpdatedAt: string | null;
+  /** 归属本账号、**已入池**（`upstream_keys` 未软删）的 key 数 */
+  keyCount: number;
+  /** `keyCount` 中 `unlimited = 1` 的条数。**是子集，不额外相加**（§15.7 不变量） */
+  unlimitedKeyCount: number;
+  /** 只拿到掩码、**进不了池**的 key 数（对账用）。**不得与 `keyCount` 相加成"key 总数"** */
+  maskedKeyCount: number;
+  /** **恒为数组**：上游给的是 `all_subscriptions: []`，单数对象表达不了"没有套餐" */
+  subscriptions: SupplierSubscriptionDto[];
+  /** 「能不能自动重登」，由它回答；与 `hasSession` **正交** */
+  credentialSource: SupplierCredentialSource;
+  /** 只回答**有无**。会话值永不出后端 */
+  hasSession: boolean;
+  sessionExpiresAt: string | null;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
 }

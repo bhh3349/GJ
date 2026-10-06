@@ -162,6 +162,7 @@ function seed(
     totalBalanceCents,
     knownKeyCount: totalBalanceCents === null ? 0 : 1,
     unknownKeyCount: totalBalanceCents === null ? 1 : 0,
+    unlimitedKeyCount: 0,
     tokenPlanKeyCount: 0,
     trigger,
   });

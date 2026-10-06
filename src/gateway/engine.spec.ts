@@ -203,6 +203,122 @@ describe('无可用 key', () => {
   });
 });
 
+describe('0 真实尝试的分型（ADR-0011：不再合流成 502 UPSTREAM_ERROR）', () => {
+  /**
+   * 为什么用桩池：真实池的 `isUsable` 会把满并发的 key 直接挡在候选外（→ 候选空 → 503），
+   * 「候选非空但 beginAttempt 拒绝」只在并发竞态里出现 —— 引擎 getAvailableKeys 的 await
+   * 让出微任务、另一路请求先把槽位占满。单测里用桩池把这一形状确定性地喂给引擎，
+   * 验的是引擎收尾分型本身，与池内过滤无关。
+   */
+  function stubPool(candidates: Awaited<ReturnType<KeyPoolInternal['getAvailableKeys']>>, accept: (keyId: string) => boolean): KeyPoolInternal {
+    const view = candidates.map((c) => ({
+      keyId: c.keyId,
+      failCount: 0,
+      consecutiveFails: 0,
+      cooldownUntil: null,
+      lastFailureAt: null,
+      lastFailureReason: null,
+      lastLatencyMs: null,
+      inflight: 0,
+    }));
+    return {
+      getAvailableKeys: async () => candidates,
+      reportFailure: () => undefined,
+      reportSuccess: () => undefined,
+      applySnapshot: () => undefined,
+      beginAttempt: accept,
+      endAttempt: () => undefined,
+      view: () => view,
+    };
+  }
+
+  function engineOver(pool: KeyPoolInternal, resolveSecret: (keyId: string) => UpstreamTarget | null, steps: Script[]) {
+    const models: ModelCatalog = { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m };
+    const logs: UsageLogEntry[] = [];
+    const { fetchImpl, calls } = scriptedFetch(steps);
+    return {
+      engine: createGatewayEngine({
+        pool,
+        secrets: { resolve: resolveSecret },
+        models,
+        logs: { record: (e) => logs.push(e) },
+        fetchImpl,
+        now,
+      }),
+      calls,
+      logs,
+    };
+  }
+
+  const target = (keyId: string): UpstreamTarget => ({ upstreamId: 'up1', baseUrl: 'https://up1.example.com/v1', apiKey: `sk-${keyId}` });
+
+  it('池饱和（候选非空但并发槽位全满）→ 429 RATE_LIMITED + retry-after，而不是 502', async () => {
+    const pool = stubPool([{ keyId: 'k1', upstreamId: 'up1', category: 'balance', weight: 1 }, { keyId: 'k2', upstreamId: 'up1', category: 'balance', weight: 1 }], () => false);
+    const h = engineOver(pool, target, []);
+
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    assert.equal(result.kind, 'error');
+    if (result.kind !== 'error') return;
+
+    assert.equal(result.error.httpStatus, 429, '本地饱和不是上游故障，绝不许 502');
+    assert.equal(result.error.body.error.code, 'RATE_LIMITED');
+    assert.equal(result.error.body.error.type, 'rate_limit_error');
+    assert.equal(result.error.retryAfterSec, 1, '短退避：客户端 1s 后重试');
+    assert.equal(h.calls.length, 0, '一个上游请求都没发过');
+    assert.equal(result.attempts, 0, '错误文案里那句 all 0 attempt(s) 从此只属于真失败');
+    assert.equal(h.logs[0]?.statusCode, 429, '调用日志必须记 429，按饱和归因而不是上游故障');
+    assert.ok(h.logs[0]?.failureReason === null, '饱和没碰上游，不存在失败原因');
+  });
+
+  it('密文缺失（0 真实尝试、无饱和）→ 503 NO_AVAILABLE_KEY，不带 retry-after', async () => {
+    const pool = stubPool([{ keyId: 'k1', upstreamId: 'up1', category: 'balance', weight: 1 }], () => true);
+    const h = engineOver(pool, () => null, []);
+
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    assert.equal(result.kind, 'error');
+    if (result.kind !== 'error') return;
+
+    assert.equal(result.error.httpStatus, 503);
+    assert.equal(result.error.body.error.code, 'NO_AVAILABLE_KEY', '配置侧异常不新增码值，复用 NO_AVAILABLE_KEY');
+    assert.ok(result.error.body.error.message.includes('1 key(s) unresolvable'));
+    assert.equal(result.error.retryAfterSec, undefined, '不给客户端退避信号：重试解决不了密文缺失');
+    assert.equal(h.calls.length, 0);
+  });
+
+  it('密文缺失叠加饱和 → 归配置侧 503（配置异常优先于退避语义）', async () => {
+    const pool = stubPool(
+      [{ keyId: 'k1', upstreamId: 'up1', category: 'balance', weight: 2 }, { keyId: 'k2', upstreamId: 'up1', category: 'balance', weight: 1 }],
+      (keyId) => keyId !== 'k2', // k1 拿到槽位但解析不了；k2 满并发被拒
+    );
+    const h = engineOver(pool, (keyId) => (keyId === 'k1' ? null : target(keyId)), []);
+
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    assert.equal(result.kind, 'error');
+    if (result.kind !== 'error') return;
+    assert.equal(result.error.httpStatus, 503);
+    assert.equal(result.error.body.error.code, 'NO_AVAILABLE_KEY');
+    assert.ok(result.error.body.error.message.includes('1 key(s) unresolvable'), '归因 message 要能指出有几把解析不了');
+    assert.ok(result.error.body.error.message.includes('1 saturated'), '同时如实报有几把被并发拒了');
+    assert.equal(h.calls.length, 0);
+  });
+
+  it('中间真实失败 + 尾部饱和：仍是 502（attempts>0 走既有冻结口径，不被新分支吞掉）', async () => {
+    const h = makeHarness({
+      keys: [keyConfig('k1'), keyConfig('k2')],
+      steps: [() => textResponse('boom', 500), () => jsonResponse({ should: 'not be reached' })],
+    });
+    for (let i = 0; i < 4; i += 1) assert.equal(h.pool.beginAttempt('k2'), true); // k1 失败后 k2 饱和
+
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false });
+    assert.equal(result.kind, 'error');
+    if (result.kind !== 'error') return;
+    assert.equal(h.calls.length, 1);
+    assert.equal(result.error.httpStatus, 502, '真敲过上游就按五类失败口径走 502');
+    assert.equal(result.error.body.error.code, 'UPSTREAM_ERROR');
+    assert.equal(runtimeOf(h.pool, 'k1').lastFailureReason, 'UPSTREAM_ERROR');
+  });
+});
+
 describe('首字节前换 key（验收 2 / 7）', () => {
   it('首把 401 → 静默换第二把，客户端只看到 200', async () => {
     const h = makeHarness({

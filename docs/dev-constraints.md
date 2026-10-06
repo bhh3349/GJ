@@ -96,7 +96,7 @@ interface KeyCandidate {
 }
 
 interface KeyPool {
-  /** 过滤（模型匹配+启用+类目可用+不在冷却+并发未满）→ 排序（权重→剩余额度→上次失败时间） */
+  /** 过滤（模型匹配+启用+类目可用+不在冷却+并发未满）→ 排序（权重→（token-plan 剩余额度）→ 上次失败时间→ LRU），见 ADR-0011 */
   getAvailableKeys(model: string): Promise<KeyCandidate[]>;
 
   /** 记一次失败：更新失败计数、按 §四 进入冷却；同一请求同一 key 只调一次 */
@@ -114,6 +114,11 @@ interface KeyPool {
 3. 「超并发上限」的 key 暂不入选，**不算失败、不进冷却**（v1.1 §四.3）；token-plan 类不参与「余额>0」过滤，改按套餐余量/到期时间判定（P7）。
 4. **单写者**：`cooldown / fail_count` 归网关运行态，KeyPool 是**唯一写入方**；管理端只读展示 + 手动启停/恢复，写操作递增 `revision` 触发网关缓存失效（v1.1 §四.10）。
 5. 管理端读到的 key 健康数据来自网关侧快照 `GET /internal/snapshot`（v1.1 §四.6），管理端不得自行改写健康态。
+6. **排序口径（ADR-0011，2026-10-06 PM 裁决）：`权重 →（token-plan 剩余额度）→ 上次失败时间 → LRU`**。
+   `balance` 类**不参与**「剩余额度」排序（余额是计费资金、不随请求递减，按它排序 = 余额最高者垄断流量，
+   破验收 §九.1）；`isUsable` 的「余额>0/未知」可用性过滤**原样保留**，排序与可用性解耦。
+   LRU 兜底位用**单调使用序号**（`beginAttempt` 成功占位时打点），不进 `view()`、不落 `key_runtime` 镜像，
+   `/internal/snapshot` 与契约响应形状零变化。需求文档 §四.1 字面不动，冲突在 ADR-0011 备案。
 
 ---
 
@@ -167,13 +172,13 @@ interface KeyPool {
 
 | 命令 | 覆盖 | 对应验收 |
 |---|---|---|
-| `pnpm test:gateway` | 路由过滤/排序、冷却半开、重试上限 3、限流滑动窗口、TPM 预留与结算、别名映射 | §九 1/5 |
+| `pnpm test:gateway` | 路由过滤/排序、轮询出量分布（§九.1，每健康 key ≥10%）、冷却半开、重试上限 3、限流滑动窗口、TPM 预留与结算、别名映射 | §九 1/5 |
 | `pnpm test:fault` | 401 / 429 / 超时 / 进程 kill 四类故障注入：断言客户端无感、首字节前切换 < 100ms | §九 2 |
 | `pnpm bench:ttfb` | 同机直连 vs 经网关，输出 TTFB 增量 P50/P99 | §九 3 |
 | `pnpm test` | 全量回归（第 9 条验收） | §九 9 |
 | `pnpm check:secrets` | 扫描日志与 spool 文件，断言**不含 key 明文**（机器检查，非口头承诺） | §九 8 |
 
-> 上表 `test:gateway` / `test:fault` / `bench:ttfb` 三行是 **M0 冻结的语义名**，脚本尚未落地（M5 前补），**当前不可跑**；不得在门禁/CI/交付证据里当已存在的命令引用。
+> 上表三行均为 **M0 冻结的语义名**（不得改名）。落地进度（2026-10-06 更新）：`pnpm test:gateway` = `vitest run src/gateway`，**已落地可跑**（含 `rotation.spec.ts` 的 §九.1 轮询出量分布判据，ADR-0011）；`test:fault` / `bench:ttfb` **尚未落地**（M5 前补），仍不得在门禁/CI/交付证据里当已存在的命令引用。
 
 **DoD**：门禁**四闸**全绿 —— `pnpm typecheck` / `pnpm test` / `pnpm build` / `pnpm check:secrets`（CI 另跑 `pnpm check:sqlite` 作原生绑定判据、`pnpm check:shutdown` 作优雅停机证据步；这两条是**单列证据步，不属于四闸**，四闸永远只有上面四个名字）+ 可复现证据（命令与真实输出）+ 契约改动已回写 `docs/api-contract.md`。性能类验收必须报**同机直连基准对比**，不接受只有绝对值。
 

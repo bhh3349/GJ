@@ -28,6 +28,9 @@ export {
   unauthorizedError,
   unsupportedEndpointError,
   upstreamError,
+  poolMisconfiguredError,
+  poolSaturatedError,
+  POOL_SATURATED_RETRY_AFTER_SEC,
 } from './errors.js';
 export type { GatewayErrorCode, GatewayErrorType, OpenAIErrorBody, OpenAIErrorPayload } from './errors.js';
 export { classifyUpstreamStatus, parseRetryAfter } from './classify.js';

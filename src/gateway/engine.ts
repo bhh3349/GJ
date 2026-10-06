@@ -14,7 +14,7 @@
 
 import type { KeyPoolInternal } from './key-pool.js';
 import { classifyUpstreamStatus, parseRetryAfter } from './classify.js';
-import { GatewayError, GATEWAY_ERROR_CODES, noAvailableKeyError, openAIError, upstreamError } from './errors.js';
+import { GatewayError, GATEWAY_ERROR_CODES, noAvailableKeyError, openAIError, poolMisconfiguredError, poolSaturatedError, upstreamError } from './errors.js';
 import type { GroupContext, ModelCatalog, ModelDescriptor, SecretResolver, UpstreamTarget, UsageLogEntry, UsageLogSink } from './ports.js';
 import type { FailureReason, TokenUsage } from './types.js';
 import { createStreamUsageTracker, resolveUsage } from './usage.js';
@@ -189,14 +189,21 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
     let lastStatus = 0;
     let lastTimedOut = false;
     let previousUpstreamId: string | null = null;
+    // 0 真实尝试的分型（ADR-0011）：三件事共用「attempts===0」但含义完全不同，
+    // 客户端的重试策略与值班归因都靠它们分开 —— 不得再合流到 502 UPSTREAM_ERROR。
+    let skippedSaturated = 0; // beginAttempt=false：并发槽位全满 → 429 RATE_LIMITED
+    let skippedUnresolvable = 0; // secrets.resolve()===null：配置侧异常 → 503
+    let attemptableCandidates = 0; // 进入循环、未被 crossUpstreamRetry/maxAttempts 剪掉的候选数
 
     for (const candidate of candidates) {
       if (attempts >= maxAttempts) break;
       // 上一把已经试过别的上游且不允许跨上游 → 停
       if (!crossUpstreamRetry && previousUpstreamId !== null && candidate.upstreamId !== previousUpstreamId) break;
+      attemptableCandidates += 1;
 
       // 满并发的 key 直接跳过：不算失败、不进冷却，换下一把
       if (!pool.beginAttempt(candidate.keyId)) {
+        skippedSaturated += 1;
         emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'skipped' });
         continue;
       }
@@ -204,6 +211,7 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
       const target = secrets.resolve(candidate.keyId);
       if (target === null) {
         // 密文缺失 / key 已被删：配置侧问题，不计 key 失败
+        skippedUnresolvable += 1;
         pool.endAttempt(candidate.keyId);
         emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'skipped' });
         continue;
@@ -346,6 +354,21 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
         ttfbMs,
         attempts,
       };
+    }
+
+    // 收尾分型（ADR-0011）：
+    //   - attempts > 0：真敲过上游 → 502/504 按 lastReason（既有冻结口径不变）
+    //   - attempts === 0 且有候选：全是「跳过」—— 分饱和与配置异常两型，都不许报 502
+    //   - 真实失败发生在中途、后续候选被剪掉：lastReason 已带住，走 502/504
+    if (attempts === 0 && attemptableCandidates > 0) {
+      if (skippedSaturated > 0 && skippedUnresolvable === 0) {
+        // 池饱和：所有候选并发槽位全满。上游没有任何故障，让客户端带 Retry-After 短退避。
+        logAttempt(req, { keyId: '', upstreamId: '', statusCode: 429, usage: null, ttfbMs: now() - started, attempts, failureReason: null, started });
+        return { kind: 'error', error: poolSaturatedError(attemptableCandidates), attempts };
+      }
+      // 密文缺失/解析不到（可能叠加饱和）：配置侧异常，值班去查密文，不给客户端退避信号
+      logAttempt(req, { keyId: '', upstreamId: '', statusCode: 503, usage: null, ttfbMs: now() - started, attempts, failureReason: null, started });
+      return { kind: 'error', error: poolMisconfiguredError(skippedUnresolvable, skippedSaturated), attempts };
     }
 
     const detail =

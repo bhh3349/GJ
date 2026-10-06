@@ -113,6 +113,7 @@ export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOpt
         reply.raw.end();
         return reply;
       }
+      if (result.error.retryAfterSec !== undefined) reply.header('retry-after', String(result.error.retryAfterSec));
       return reply.code(result.error.httpStatus).send(result.error.body);
     }
 

@@ -56,6 +56,17 @@ interface RuntimeExtras {
   autoDisabled: boolean;
   /** token-plan：本次快照刷新后已消耗的 tokens（乐观扣减，结算由管家侧落库） */
   spentTokens: number;
+  /**
+   * 最近一次「占到并发位、真的去敲上游」的**单调序号**，`0` = 从未使用。
+   * 只在排序兜底位用（最久未用优先），**不进 `view()`、不落 key_runtime 镜像** ——
+   * 它是选路的内部轮转游标，不是对外健康态（ADR-0011）。
+   *
+   * 为什么不是 `lastUsedAt` 墙钟：实测 60 次串行请求整轮跑在 ~1ms 内，
+   * `Date.now()` 的毫秒分辨率会让多把 key 拿到**同一个** stamp → 比较器并列 →
+   * 回落到快照序 → 快照第一把照样吃掉 63%~70% 的流量（正是本改动要消灭的饥饿）。
+   * 序号与请求速率无关，任意吞吐下都是严格全序。见 ADR-0011「实现注记」。
+   */
+  lastUsedSeq: number;
 }
 
 const DEFAULT_MAX_CONCURRENCY = 4;
@@ -73,6 +84,7 @@ function emptyRuntime(keyId: string): KeyRuntimeState & RuntimeExtras {
     inflight: 0,
     autoDisabled: false,
     spentTokens: 0,
+    lastUsedSeq: 0,
   };
 }
 
@@ -92,7 +104,11 @@ function remainingQuotaOf(key: KeyConfig, rt: RuntimeExtras): number {
     if (key.tokenPlanRemainingTokens === null) return -1; // 未知 → 排序时靠后，但不排除
     return Math.max(0, key.tokenPlanRemainingTokens - rt.spentTokens);
   }
-  return key.balanceCents === null ? -1 : key.balanceCents;
+  // balance 类不参与「剩余额度」排序（ADR-0011）：余额是计费资金，不是随请求递减的配额，
+  // 若按 balanceCents 排序，余额最高者会垄断全部流量（验收 §九.1 要求每 key ≥10% 出量）。
+  // 返回常量 0 让 balance 类在键 2 上全平，轮转交给兜底位（lastUsedSeq LRU）。
+  // 可用性过滤（<=0 排除）仍在 isUsable，与排序无关。
+  return 0;
 }
 
 function isUsable(key: KeyConfig, rt: KeyRuntimeState & RuntimeExtras, now: number, fallbackMaxConcurrency: number): boolean {
@@ -123,6 +139,8 @@ export function createKeyPool(options: PoolOptions = {}): KeyPoolInternal {
 
   let snapshot: PoolSnapshot = { revision: 0, upstreams: [], keys: [] };
   const runtime = new Map<string, KeyRuntimeState & RuntimeExtras>();
+  /** 单调递增的使用序号（LRU 兜底键，见 RuntimeExtras.lastUsedSeq） */
+  let usedSeq = 0;
   const pool: KeyPoolInternal = {
     applySnapshot(next: PoolSnapshot): void {
       snapshot = next;
@@ -160,11 +178,15 @@ export function createKeyPool(options: PoolOptions = {}): KeyPoolInternal {
         if (b.weight !== a.weight) return b.weight - a.weight; // 1. 权重降序
         const ra = remainingQuotaOf(configOf(a), runtimeOf(a));
         const rb = remainingQuotaOf(configOf(b), runtimeOf(b));
-        if (rb !== ra) return rb - ra; // 2. 剩余额度降序（未知 = -1 靠后）
+        if (rb !== ra) return rb - ra; // 2. 剩余额度降序（仅 token-plan；balance 类恒 0，见 ADR-0011）
         const la = runtimeOf(a).lastFailureAt ?? -1;
         const lb = runtimeOf(b).lastFailureAt ?? -1;
         if (la !== lb) return la - lb; // 3. 上次失败时间升序（从未失败优先）
-        return (order.get(a.keyId) ?? 0) - (order.get(b.keyId) ?? 0); // 稳定兜底
+        const ua = runtimeOf(a).lastUsedSeq;
+        const ub = runtimeOf(b).lastUsedSeq;
+        if (ua !== ub) return ua - ub; // 4. LRU：最久未用优先（从未使用 = 0 = 最早）
+        // 5. 快照顺序兜底：序号全异的场景到不了这里，纯防御。
+        return (order.get(a.keyId) ?? 0) - (order.get(b.keyId) ?? 0);
       });
       return ready;
 
@@ -223,6 +245,8 @@ export function createKeyPool(options: PoolOptions = {}): KeyPoolInternal {
       const cap = key?.maxConcurrency ?? defaultMaxConcurrency;
       if (rt.inflight >= cap) return false;
       rt.inflight += 1;
+      usedSeq += 1;
+      rt.lastUsedSeq = usedSeq; // LRU 游标：占到并发位（真的要去敲上游）才算「用过」
       return true;
     },
 

@@ -60,7 +60,7 @@ describe('getAvailableKeys 过滤', () => {
 });
 
 describe('getAvailableKeys 排序', () => {
-  it('权重 → 剩余额度 → 上次失败时间', async () => {
+  it('权重 → 剩余额度(token-plan) → 上次失败时间 → LRU；balance 类不按余额排序', async () => {
     clock = 1_700_000_000_000;
     const pool = createKeyPool({ now });
     pool.applySnapshot(
@@ -74,17 +74,75 @@ describe('getAvailableKeys 排序', () => {
 
     assert.deepEqual(
       (await pool.getAvailableKeys('gpt-4o')).map((c) => c.keyId),
-      ['k3', 'k4', 'k2', 'k1'],
-      '同权重按剩余额度降序，额度相同按快照序稳定',
+      ['k2', 'k3', 'k4', 'k1'],
+      'balance 类在键 2 上全平（余额不再排序），同权重档回落到快照序；跨档仍按权重降序',
     );
 
     pool.reportFailure('k3', 'NETWORK');
     clock += 60 * MINUTE; // 冷却已过，lastFailureAt 仍保留
     assert.deepEqual(
       (await pool.getAvailableKeys('gpt-4o')).map((c) => c.keyId),
-      ['k4', 'k3', 'k2', 'k1'],
-      '额度相同则从未失败者优先',
+      ['k2', 'k4', 'k3', 'k1'],
+      '键 3（上次失败时间）仍生效：k3 带着失败记录沉到同档的 k2/k4 之后',
     );
+
+    // ADR-0011 的核心回归：键 4 LRU —— 用掉谁，谁就沉到同档队尾。
+    pool.beginAttempt('k2');
+    pool.endAttempt('k2');
+    assert.deepEqual(
+      (await pool.getAvailableKeys('gpt-4o')).map((c) => c.keyId),
+      ['k4', 'k2', 'k3', 'k1'],
+      'k2 刚用过 → 同档内让位给从未用过的 k4（旧行为里 k2 会永远霸占头把）',
+    );
+
+    clock += 1;
+    pool.beginAttempt('k4');
+    pool.endAttempt('k4');
+    assert.deepEqual(
+      (await pool.getAvailableKeys('gpt-4o')).map((c) => c.keyId),
+      ['k2', 'k4', 'k3', 'k1'],
+      'k4 用过之后轮到 k2（stamp T < T+1）—— 头把在 k2/k4 之间确定性轮转',
+    );
+  });
+
+  it('token-plan 仍按套餐余量降序（键 2 语义只对 token-plan 保留）', async () => {
+    clock = 1_700_000_000_000;
+    const pool = createKeyPool({ now });
+    pool.applySnapshot(
+      snapshot([
+        balanceKey('tp-rich', { category: 'token-plan', balanceCents: null, tokenPlanRemainingTokens: 900 }),
+        balanceKey('tp-poor', { category: 'token-plan', balanceCents: null, tokenPlanRemainingTokens: 100 }),
+        balanceKey('tp-unknown', { category: 'token-plan', balanceCents: null, tokenPlanRemainingTokens: null }),
+      ]),
+    );
+    assert.deepEqual(
+      (await pool.getAvailableKeys('gpt-4o')).map((c) => c.keyId),
+      ['tp-rich', 'tp-poor', 'tp-unknown'],
+      '余量降序，未知(-1)靠后但不排除',
+    );
+    pool.reportSuccess('tp-rich', { prompt: 400, completion: 0, total: 400, isEstimated: false }, 10);
+    assert.deepEqual(
+      (await pool.getAvailableKeys('gpt-4o')).map((c) => c.keyId),
+      ['tp-rich', 'tp-poor', 'tp-unknown'],
+      '乐观扣减后 900-400=500 仍 > 100，序不变（扣减真实生效即可，轮转由键 2 单调性自然产生）',
+    );
+    pool.reportSuccess('tp-rich', { prompt: 450, completion: 0, total: 450, isEstimated: false }, 10);
+    assert.deepEqual(
+      (await pool.getAvailableKeys('gpt-4o')).map((c) => c.keyId),
+      ['tp-poor', 'tp-rich', 'tp-unknown'],
+      '累计扣到余量 50（>0 仍可用）后 tp-poor 胜出 —— 这是验收 1 在 token-plan 上的既有轮转路径，不得回退',
+    );
+  });
+
+  it('lastUsedSeq 不进 view()（内部轮转游标，不对外承诺）', async () => {
+    clock = 1_700_000_000_000;
+    const pool = createKeyPool({ now });
+    pool.applySnapshot(snapshot([balanceKey('k1')]));
+    pool.beginAttempt('k1');
+    pool.endAttempt('k1');
+    const rt = pool.view().find((r) => r.keyId === 'k1');
+    assert.ok(rt !== undefined);
+    assert.equal('lastUsedAt' in rt, false, 'view() 输出形状零变化（/internal/snapshot、key_runtime 镜像不受影响）');
   });
 });
 

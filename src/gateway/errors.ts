@@ -59,12 +59,25 @@ export function openAIError(
 export class GatewayError extends Error {
   readonly httpStatus: number;
   readonly body: OpenAIErrorBody;
+  /**
+   * 写进响应头 `retry-after` 的秒数（ADR-0011 起）。
+   * 限流/饱和类错误需要告诉客户端「退避多久再来」，而 OpenAI 错误体本身没有这个字段。
+   */
+  readonly retryAfterSec?: number;
 
-  constructor(httpStatus: number, code: string, message: string, type: GatewayErrorType = 'invalid_request_error', param?: string) {
+  constructor(
+    httpStatus: number,
+    code: string,
+    message: string,
+    type: GatewayErrorType = 'invalid_request_error',
+    param?: string,
+    retryAfterSec?: number,
+  ) {
     super(message);
     this.name = 'GatewayError';
     this.httpStatus = httpStatus;
     this.body = openAIError(code, message, type, param);
+    if (retryAfterSec !== undefined) this.retryAfterSec = retryAfterSec;
   }
 }
 
@@ -73,6 +86,32 @@ export const unauthorizedError = (message = 'missing or invalid gateway key'): G
 
 export const noAvailableKeyError = (model: string): GatewayError =>
   new GatewayError(503, GATEWAY_ERROR_CODES.NO_AVAILABLE_KEY, `no available key for model: ${model}`, 'server_error');
+
+/** 池饱和（ADR-0011）：候选存在但并发槽位全满，一个上游都没碰到 —— 是「稍后重试」，不是上游故障 */
+export const POOL_SATURATED_RETRY_AFTER_SEC = 1;
+
+export const poolSaturatedError = (candidateCount: number): GatewayError =>
+  new GatewayError(
+    429,
+    GATEWAY_ERROR_CODES.RATE_LIMITED,
+    `pool saturated: ${candidateCount} key(s) at max concurrency, retry shortly`,
+    'rate_limit_error',
+    undefined,
+    POOL_SATURATED_RETRY_AFTER_SEC,
+  );
+
+/**
+ * 0 次真实尝试且非纯饱和：密文缺失/解析不到等配置侧异常。
+ * 复用 `NO_AVAILABLE_KEY`(503) 不新增码值 —— 对客户端而言「池里没有能派发的 key」与「一把都选不出来」
+ * 是同一种处置（别重试到这个组上）；归因差别在 message 里给值班看。见 ADR-0011。
+ */
+export const poolMisconfiguredError = (unresolvable: number, saturated = 0): GatewayError =>
+  new GatewayError(
+    503,
+    GATEWAY_ERROR_CODES.NO_AVAILABLE_KEY,
+    `no candidate dispatchable: ${unresolvable} key(s) unresolvable${saturated > 0 ? `, ${saturated} saturated` : ''}`,
+    'server_error',
+  );
 
 export const upstreamError = (message: string): GatewayError =>
   new GatewayError(502, GATEWAY_ERROR_CODES.UPSTREAM_ERROR, message, 'api_error');

@@ -178,7 +178,10 @@ interface KeyPool {
 | `pnpm test` | 全量回归（第 9 条验收） | §九 9 |
 | `pnpm check:secrets` | 扫描日志与 spool 文件，断言**不含 key 明文**（机器检查，非口头承诺） | §九 8 |
 
-> 上表三行均为 **M0 冻结的语义名**（不得改名）。落地进度（2026-10-06 更新）：`pnpm test:gateway` = `vitest run src/gateway`，**已落地可跑**（含 `rotation.spec.ts` 的 §九.1 轮询出量分布判据，ADR-0011）；`test:fault` / `bench:ttfb` **尚未落地**（M5 前补），仍不得在门禁/CI/交付证据里当已存在的命令引用。
+> 上表三行均为 **M0 冻结的语义名**（不得改名）。落地进度（2026-10-06 更新）：
+> - `pnpm test:gateway` = `vitest run src/gateway`，**已落地可跑**（含 `rotation.spec.ts` 的 §九.1 轮询出量分布判据，ADR-0011）；
+> - `pnpm test:fault` = `vitest run src/gateway/fault.spec.ts`，**已落地**（四类故障注入：401/429/超时/进程 kill + 人为禁用 + 首字节前切换 P99<100ms）；
+> - `pnpm bench:ttfb` = `tsx scripts/bench-ttfb.ts`，**已落地**（同机直连 vs 经网关，配对采样 delta 分布 P50/P99，判据 ΔP50≤1ms / ΔP99≤5ms）。
 
 **DoD**：门禁**四闸**全绿 —— `pnpm typecheck` / `pnpm test` / `pnpm build` / `pnpm check:secrets`（CI 另跑 `pnpm check:sqlite` 作原生绑定判据、`pnpm check:shutdown` 作优雅停机证据步；这两条是**单列证据步，不属于四闸**，四闸永远只有上面四个名字）+ 可复现证据（命令与真实输出）+ 契约改动已回写 `docs/api-contract.md`。性能类验收必须报**同机直连基准对比**，不接受只有绝对值。
 

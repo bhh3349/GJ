@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.4.3**
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　当前版本：**v1.4.4**
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -37,6 +37,8 @@
 > **v1.4.1（2026-10-07，M6-D 拍板二拍）**：§15.1 非破坏新增 **`credentialSource`**（`"password"` \| `"session"`，回答"能不能自动重登"，前端不自行推断），§15.9 补**凭据双路径定位**（密码型 = 第一事实源、会话型 = 冷备/加速通道，两者并存不互斥）与**自动重登的触发、账号级互斥、节奏**，§15.3 收口 `action` 枚举的生产者。**无字段改名、无字段删除、无端点增删、`ERROR_CODES` 零新增、`/v1/*` 零变更**。动机与影响见 ADR-0018 决策 10。
 
 > **v1.4.2（2026-10-07，TierFlow 接入面补遗）**：① §3 `KeyDto` 非破坏新增 **`models`**（模型白名单，`string[] \| null`；`null` 与空数组同为"不限"，**与网关冻结件 `matchesModel()` 的口径一致** —— 本契约不制造实现不了的三态），数据源为上游 `model_limits` CSV —— **本条修的是一处断链**：§16.3 早已把 CSV 映射到网关侧 `KeyConfig.models`，但**管理面没有任何一列承载它**（`KeyConfig.models` 在 `src/wiring/store.ts` 里至今硬编码 `null`），网关永远读不到值，白名单在实现上等于不存在；② §15.2 `keys` 入参新增**可选** `models`（建 key 时落库，上游回显优先，两边都没有则 `NULL`），并写明 `keys/sync` **不**回填该列（掩码撞号风险 > 少同步一次）；③ §5 `availableKeyIds` 口径**补齐生效白名单条件** —— 少这一条，档案卡「可用 key」与网关实跑会长期对不上，且没有任何报错可追；④ §15.7 加列 `upstream_keys.model_limits TEXT`，**可空无默认**（老行 `NULL` = 不限，与加列前逐字一致；空串/空 CSV 归一化为 `NULL`，不落 `''`）；⑤ §16.1.1 **新增悬空件登记**：数据面实测（P0–P4）的执行主体是**凭据持有者本人**，不是任何 AI 会话，附产物 / 回执 / 兜底口径；⑥ §16.5 三项 S1 字段依赖对账。**无字段改名、无字段删除、无端点增删、`ERROR_CODES` 零新增、`/v1/*` 零变更、`KeyConfig` / `KeyPool` 签名零改动、`SCHEMA_VERSION` 仍为 2 但必须真发 `ALTER`**（`src/wiring/store.ts` 有一行**取值**改动待路由者确认：`models: null` → 读该列，**不是签名变更**）。动机与影响见 ADR-0019。
+
+> **v1.4.4（2026-10-07，出口级限流）**：新增 **§16.7 出口级（IP 级）限流** —— Bo 报回上游 `too many requests from your client ip`。① 定性：这是**第三层**限流（按来源 IP 计数），§16.4 只写了上游级 / 账号级两层，而 TierFlow 是「1 个出口 IP + 27 个账号 + 全部 key」，**所有 key 共命运**；② **取证**：当前实现下 IP 级 429 会被 `classify.ts:18` 判成普通 `RATE_LIMITED`、由 `engine.ts:399` 记在**当时那把 key** 头上、按 `cooldown.ts:56` 起步 60s 并升档至 30min，而池是**严格 key 级**（`key-pool.ts:30` 无出口级状态）—— 于是"换 key 重试"在出口不变的前提下**必然再撞**，一个客户端请求内即可逐把冷掉候选 key，**上游给的一下被轮换放大成全池 30 分钟不可用**；③ **归因纪律**：IP 级 429 **不计入任何 key 健康**（同 §10「0 次真实尝试不计 key 健康」），冷却对象由 key **上移到出口**（本期 = `upstream.host`），冷却期内**不换 key、径直回 `429 RATE_LIMITED` + `Retry-After`**；④ **处置三档**：Tier 1 出口级短冷却（仅需响应证据）/ Tier 1.5 出口级令牌桶 / Tier 2 出口 IP 池（需 Bo 拍代理资源，届时新表 `egress_proxies` + `supplier_accounts.egress_id` 可空，非破坏）；⑤ **识别规则不写死** —— 只有一句 message 文本，按悬空件登记，需响应体/响应头与退避时长；⑥ §15.5「0.6s 未触发限流」那条**依据降级**（值不变）—— 0.6s 是每账号口径，对按 IP 计数的限流不成立。**无字段改名、无字段删除、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`GATEWAY_ERROR_CODES` 零新增、`/v1/*` 对外行为零变更、`SCHEMA_VERSION` 不变**（Tier 1/1.5 是网关内核改动，Tier 2 未拍）。动机与影响见 ADR-0020。
 
 ---
 
@@ -1886,6 +1888,8 @@ createdAt, updatedAt`。
   但要与"单账号被风控"区分开（后者只该影响该账号名下的 key）。
 - **现有实现没有主动探活**，只有被动冷却。是否新增探活不在本期范围（本期改动面：
   错误体识别 + 探活限速两处，**且探活仅在新增时受本条约束**）。
+- **本节只有两层（上游级 / 账号级）；TierFlow 还有第三层：按来源 IP 计数的出口级限流**，
+  见 **§16.7** —— 那一层的处置方向与本节相反：**不换 key、不记 key 健康、冷却上移到出口**。
 
 ### 16.5 S1 字段依赖对账（路由者提的 3 项，v1.4.2）
 
@@ -1940,6 +1944,68 @@ createdAt, updatedAt`。
 **兜底（较 v1.4.2 不变）**：Bo 既不跑也不指定代跑 → §16.1 相关字段一律 `null` 占位、按默认假设接入、
 **不写 `classify` 改判**、**不把"缺数据"当已确认**。
 
+### 16.7 出口级（IP 级）限流：归因与处置（v1.4.4）
+
+**触发**（Bo 2026-10-07 报回，原文）：`Error: too many requests from your client ip`。
+
+这条**既不是账号级、也不是 key 级** —— 它按**来源 IP** 计数。TierFlow 当前部署形态是
+「**1 个出口 IP** + 27 个账号 + 全部 key」，所以**所有 key 共命运**：换 key 不改变出口，也就换不掉被限流的对象。
+§16.4 只写了「上游级 vs 账号级」两层，这是**第三层**。
+
+**现网它会滚成全池故障 —— 而且是网关自己放大出来的**（逐环取证，读的是当前 `main`）：
+
+| 环 | 位置 | 行为 |
+|---|---|---|
+| 1 | `src/gateway/classify.ts:18` | `429 → 'RATE_LIMITED'` —— **纯状态码驱动，不分** IP 级还是 key 级 |
+| 2 | `src/gateway/engine.ts:399` | `pool.reportFailure(candidate.keyId, 'RATE_LIMITED', {retryAfterMs})` —— 记在**当时正在打的那把 key** 头上 |
+| 3 | `src/gateway/cooldown.ts:56` | 无 `Retry-After` → **60s** 起步；连续失败按阶梯 1m → 5m → 15m → **30m** |
+| 4 | `src/gateway/key-pool.ts:30` | 池**只有 key 级状态**（`reportFailure(keyId, …)`），**没有**上游级 / 出口级冷却 |
+
+于是：IP 级 429 → 冷掉 key₁ → 引擎换 key₂ 重试 → **出口 IP 没变** → 再 429 → 冷掉 key₂ → …
+**一个客户端请求之内就能把候选 key 逐把冷掉**，后续请求无候选 → `503 NO_AVAILABLE_KEY`；
+重回候选的 key 再撞一次，`consecutiveFails` 升档 → 最长 **30 分钟**全池不可用。
+
+> 一句话：**"换 key 能救"这个前提在 IP 级限流下不成立，而引擎照换不误。**
+> 故障不是上游给的那一下，是轮换把它放大成的那一片。
+
+**归因纪律（本期定死，不依赖任何外部证据）**
+
+- **IP 级 429 不计入任何 key 的健康计数**，也不触发 `AUTH_INVALID` 那类自动停用。
+  与 §10「0 次真实尝试不计 key 健康」是同一把刀：**谁没错，不给谁记过**。
+- **冷却对象从 key 上移到出口**（本期"出口" = `upstream.host`）：同出口下的 key 共用一道冷却。
+- **冷却期内不做换 key 重试** —— 同 IP 轮换必然再撞，轮换在这里不是容错，是**放大器**。
+- 对客户端仍走 §10 既有口径：`429 RATE_LIMITED` + `Retry-After`。**不新增错误码、不新增 HTTP 状态**
+  —— 出口被限流在调用方那侧与"池饱和"同形（都是"退避后可重试"），语义正确。
+
+**前置未知（按 §16.1.1 同款悬空件登记，需外部输入）**
+
+识别规则**现在不写死**，因为手上只有一句 message 文本。需要补三样：
+
+1. 这条报错的**来源**（Python 工作台 / 本仓网关 / 别的脚本）—— 决定它是历史遗留还是现网在流；
+2. **原始响应**：HTTP 状态码 + 完整响应体 + 响应头（尤其有没有 `Retry-After`）；
+3. **退避多久恢复**：能自愈 = 限速窗口（Tier 1 可治）；长时间不恢复 = 封 IP（**必须** Tier 2）。
+
+两种可能的世界，落法不同：
+
+- **(a) 与普通 429 同形**（只有 body 文案不同）→ 走 §16.2 同款 **pre-first-chunk** 识别窗口，按供应商错误码 / 文案判；
+- **(b) 上游给了专用码或专用字段** → 直接按码判，**不解析文案**（文案会变，码不会）。
+
+**处置三档**
+
+| 档 | 内容 | 依赖 | 车道 |
+|---|---|---|---|
+| **Tier 1** | 识别后**不调 `reportFailure(keyId)`**；改落**出口级短冷却**（尊重 `Retry-After`，无则 60s 起、封顶 30min）；冷却期内**不轮换 key，径直回 `429 RATE_LIMITED` + `Retry-After`** | 只需上面 (1)(2) 两项证据 | 路由者（`src/gateway/`） |
+| **Tier 1.5** | **出口级令牌桶**：所有发往同一出口的请求（刷新 / 建 key / 重登 / 探活 / 数据面）共用一条速率，取代"每账号各自 0.6s" | 需 (3) 的实测退避时长 | 路由者 + 管家（§15.5 口径） |
+| **Tier 2** | **出口 IP 池**：账号分组绑不同出口（proxy / 多宿 IP），把"27 账号 = 1 个 IP"拆成"N 个 IP" | 需 Bo 拍**代理资源** | 管家（schema + DTO + ADR） |
+
+**Tier 2 若做，是非破坏新增**：新表 `egress_proxies` + `supplier_accounts.egress_id`（**可空**，缺省 `null` = 用宿主出口）。
+不阻塞今天的 S1，**不改画师要消费的任何字段**（前端这列不在本期）。
+
+**§15.5 那条依据要收回一句**：`账号间间隔 0.6s —— 工作台 29 号跑下来未触发限流`
+这条**只在"单出口 + 当时那种请求密度"下成立**，而 IP 级限流已被触发过，说明**条件变了，或它本来就是侥幸**。
+0.6s 是**每账号**的礼貌间隔，对**按 IP 计数**的限流**不成立** —— 27 个账号各自守 0.6s，出口侧照样可以超速。
+本节**不改 §15.5 的值**（值仍复用），但那条**依据**从"实测未触发"降级为"待 Tier 1.5 按出口级口径重新标定"。
+
 ---
 
-*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`；v1.2.1（§13.4「槽位撞满」二分口径：全候选满并发 `503 NO_AVAILABLE_KEY` / 竞态窗口 `429 RATE_LIMITED`，零新增枚举、零代码改动）为文本对齐；v1.2.2（§2 `DELETE /api/upstreams/:id` 从属资源处置：`force!=true` 拦 key 与模型并报 `{keyCount, modelCount}`、`force=true` 按依赖序物理删整棵子树，修订 §11 C4）见 `docs/adr/0016-delete-upstream-subtree.md`；v1.3.0（§14 余额同步：自动同步节奏与退避、NULL 口径、快照与 `asOf`、方向级漂移提示；同批撤销「单价 × 用量的本地扣减账本」方案）见 `docs/adr/0017-balance-sync-source-of-truth.md`；v1.4.0（§15 供应商账号面 + §16 TierFlow 数据面约束：账号作独立资源、批量新建 key 为唯一入池通路、账号级余额第四口径、套餐不建成 key、`upstream_keys.unlimited`、凭据会话一次性离线导入、`…Cents` 金额口径；`ERROR_CODES` 首次新增 1 个 `ACCOUNT_HAS_KEYS`）见 `docs/adr/0018-supplier-account-batch.md`；v1.4.1（§15.1 非破坏新增 `credentialSource`；§15.9 补凭据双路径定位、自动重登的触发与账号级互斥；§15.3 收口 `action` 枚举的生产者）见 `docs/adr/0018-supplier-account-batch.md` 决策 10；v1.4.2（§3 `KeyDto` 非破坏新增 `models` 模型白名单 + §5 `availableKeyIds` 补白名单条件 + §15.2 `keys` 入参可选 `models` + §15.7 加列 `upstream_keys.model_limits` + §16.1.1 悬空件登记 + §16.5 S1 字段对账）见 `docs/adr/0019-key-model-whitelist.md`；v1.4.3（§16.1.1 **执行主体改锚**：凭据由持有者运行时注入、可明示指定执行会话代跑，路由者只出探针与结论；新增 **§16.6 S4 验收锚定**含执行链三步与三项 S1 占位值表 —— 其中"数据面路径与协议"**明确不落 DTO**；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增**）见 `docs/adr/0018-supplier-account-batch.md` 决策 11。以上各版同属本契约的同一冻结面。（**版本索引订正 2026-10-07，不升版**：本索引此前在 v1.2.1 之后漏记 v1.2.2 / v1.3.0 两条，本次补齐 —— 仅索引行，无内容变更。）*
+*已冻结：v1.0-frozen，冻结裁决见 `docs/adr/0007-api-contract-freeze-c1-c5.md`。字段改动必须改本契约并新增 ADR。v1.1.0 补遗见 `docs/adr/0013-observability-readonly-query.md`；v1.1.1 补遗（关联键 `x-request-id`，§6 / §10 / §12.1 / §12.3）见 `docs/adr/0014-request-id-correlation.md`；v1.1.2 补遗（§10 登记 `GROUP_DISABLED` + §12.1 `AUTH_FAILED` 扩 403 + 四条产出边界）见 `docs/adr/0013-observability-readonly-query.md`「落地补遗」；v1.2.0（§13 内置 AI 助手聊天 + §12.2 `assistant` 字段）见 `docs/adr/0015-assistant-chat.md`；v1.2.1（§13.4「槽位撞满」二分口径：全候选满并发 `503 NO_AVAILABLE_KEY` / 竞态窗口 `429 RATE_LIMITED`，零新增枚举、零代码改动）为文本对齐；v1.2.2（§2 `DELETE /api/upstreams/:id` 从属资源处置：`force!=true` 拦 key 与模型并报 `{keyCount, modelCount}`、`force=true` 按依赖序物理删整棵子树，修订 §11 C4）见 `docs/adr/0016-delete-upstream-subtree.md`；v1.3.0（§14 余额同步：自动同步节奏与退避、NULL 口径、快照与 `asOf`、方向级漂移提示；同批撤销「单价 × 用量的本地扣减账本」方案）见 `docs/adr/0017-balance-sync-source-of-truth.md`；v1.4.0（§15 供应商账号面 + §16 TierFlow 数据面约束：账号作独立资源、批量新建 key 为唯一入池通路、账号级余额第四口径、套餐不建成 key、`upstream_keys.unlimited`、凭据会话一次性离线导入、`…Cents` 金额口径；`ERROR_CODES` 首次新增 1 个 `ACCOUNT_HAS_KEYS`）见 `docs/adr/0018-supplier-account-batch.md`；v1.4.1（§15.1 非破坏新增 `credentialSource`；§15.9 补凭据双路径定位、自动重登的触发与账号级互斥；§15.3 收口 `action` 枚举的生产者）见 `docs/adr/0018-supplier-account-batch.md` 决策 10；v1.4.2（§3 `KeyDto` 非破坏新增 `models` 模型白名单 + §5 `availableKeyIds` 补白名单条件 + §15.2 `keys` 入参可选 `models` + §15.7 加列 `upstream_keys.model_limits` + §16.1.1 悬空件登记 + §16.5 S1 字段对账）见 `docs/adr/0019-key-model-whitelist.md`；v1.4.3（§16.1.1 **执行主体改锚**：凭据由持有者运行时注入、可明示指定执行会话代跑，路由者只出探针与结论；新增 **§16.6 S4 验收锚定**含执行链三步与三项 S1 占位值表 —— 其中"数据面路径与协议"**明确不落 DTO**；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增**）见 `docs/adr/0018-supplier-account-batch.md` 决策 11；v1.4.4（§16.7 **出口级（IP 级）限流**：定性为第三层限流、取证"轮换放大"回路、归因纪律"IP 级 429 不计 key 健康 + 冷却上移到出口 + 冷却期内不换 key"、处置三档 Tier 1/1.5/2、识别规则按悬空件登记、§15.5 那条依据降级；**无字段增删、无端点增删、无 DTO 变更、`ERROR_CODES` 零新增、`/v1/*` 对外行为零变更**）见 `docs/adr/0020-egress-ip-rate-limit.md`。以上各版同属本契约的同一冻结面。（**版本索引订正 2026-10-07，不升版**：本索引此前在 v1.2.1 之后漏记 v1.2.2 / v1.3.0 两条，本次补齐 —— 仅索引行，无内容变更。）*

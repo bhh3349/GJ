@@ -70,6 +70,7 @@ describe('deriveCategory：分型由码值决定，不由状态码推', () => {
       ['NOT_FOUND', 'CLIENT_REQUEST'],
       ['UNSUPPORTED_ENDPOINT', 'CLIENT_REQUEST'],
       ['INVALID_API_KEY', 'AUTH_FAILED'],
+      ['GROUP_DISABLED', 'AUTH_FAILED'],
       ['RATE_LIMITED', 'RATE_LIMITED'],
       ['QUOTA_EXCEEDED', 'QUOTA_EXCEEDED'],
       ['NO_AVAILABLE_KEY', 'NO_AVAILABLE_KEY'],

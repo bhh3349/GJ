@@ -174,7 +174,7 @@ keyword 搜索不可靠 → 留空拉全量再本地过滤；删除 key 用**无
 | `src/db/repo/**` | 新增 `supplier-accounts.ts`；`createKey` 复用不新增写路径（多一个可选入参 `unlimited`） |
 | `src/api/services/supplier/tierflow.ts` | 新增驱动器（登录 / 余额 / 建 key / 列表 / 套餐），唯一接触会话明文的地方 |
 | `src/api/routes/supplier-accounts.ts` | 新增 §15 端点 |
-| 契约 | v1.4.0：新增 §15；§2 Upstream 非破坏新增 6 字段；§3 `KeyDto` 新增 `unlimited`；§6 合计口径补账号级 |
+| 契约 | v1.4.0：新增 §15；§2 Upstream 非破坏新增 6 字段 + `POST/PATCH /api/upstreams` 可选 `supplier`；§3 `KeyDto` 新增 `unlimited`；§6 合计口径补账号级 |
 | `web/` | 画师新增「供应商账号」页（列表 / 导入 / 批量操作进度 / 套餐明细） |
 | `src/gateway/` | **零改动**：写入的还是同一张 `upstream_keys`，走的还是同一条 `change_log` + 1s 轮询；余额不在热路径上 |
 | 安全扫描 | `check:secrets` 现有规则不变；新增"响应序列化里不得出现密码/会话真值"的断言（注入真值后断言不出现在响应 JSON 中） |

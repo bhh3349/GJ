@@ -26,7 +26,11 @@ import type {
   SupplierSubscriptionRowDto,
 } from '../../api/dto.js';
 import { ApiError } from '../../api/errors.js';
+import { nowIso } from '../../util/time.js';
+import { decryptSecret } from '../crypto.js';
 import type { Db } from '../database.js';
+import { newId } from '../ids.js';
+import { translateWriteError } from './write-errors.js';
 
 /**
  * 账号行。**注意这里刻意没有 `encrypted_password` / `encrypted_session`** ——
@@ -473,4 +477,507 @@ export function deleteSupplierAccount(db: Db, id: string, force: boolean): void 
     db.prepare('DELETE FROM supplier_account_keys WHERE account_id = ?').run(id);
     db.prepare('DELETE FROM supplier_accounts WHERE id = ?').run(id);
   })();
+}
+
+// ---------------------------------------------------------------------------
+// 写路径（§15.2 六个要打上游的端点）
+// ---------------------------------------------------------------------------
+//
+// 与上面的读面**分开一段**，因为两段面对的约束不同：读面只 SELECT 公开列，
+// 写路径要碰两个凭据 BLOB。凭据纪律在这里收紧成一条：
+//   **密文只在 `createSupplierAccount` / `updateSupplierAccount` 的入参里出现一次，
+//   此后本文件不再持有它**；解密只有一个出口 `readSupplierCredential`，而它返回的对象
+//   **只活在调用方栈内**，不得进入任何 DTO / 任务 result / 审计 detail（§15.9 纪律 4）。
+
+/** 账号的最小定位信息。批量端点先列它，再决定对谁干活。 */
+export interface SupplierAccountRef {
+  id: string;
+  upstreamId: string;
+  /** **掩码**（列表展示用；真值只以 `identifier_hash` 存在） */
+  identifier: string;
+  identifierHash: string;
+  status: SupplierAccountStatus;
+}
+
+interface RefRow {
+  id: string;
+  upstream_id: string;
+  identifier: string;
+  identifier_hash: string;
+  status: string;
+}
+
+function toRef(r: RefRow): SupplierAccountRef {
+  return {
+    id: r.id,
+    upstreamId: r.upstream_id,
+    identifier: r.identifier,
+    identifierHash: r.identifier_hash,
+    status: r.status as SupplierAccountStatus,
+  };
+}
+
+/**
+ * 按条件列账号（`refresh` / `keys` / `keys/sync` 的目标集）。
+ *
+ * `ids` 给了就**只认这些 id**（不再叠加 `upstreamId`/`status` 过滤）—— 这是刻意的：
+ * 调用方明确指名了账号时，再套一层"状态必须是 active"会让一次手动重登在
+ * `session_expired` 的账号上静默变成"什么都不做"，而操作员点那个按钮的**全部目的**
+ * 就是把它从 `session_expired` 里救回来。过滤条件用于"省略 ids 时选谁"，
+ * 不用于"我点名的这个还算不算数"。
+ */
+export function listSupplierAccountRefs(
+  db: Db,
+  query: {
+    upstreamId?: string | undefined;
+    ids?: readonly string[] | undefined;
+    statuses?: readonly string[] | undefined;
+  },
+): SupplierAccountRef[] {
+  if (query.ids !== undefined) {
+    if (query.ids.length === 0) return [];
+    // 重复 id 去重：调用方传了 50 个 id 不代表要干 50 次活。
+    const unique = [...new Set(query.ids)];
+    const rows = db
+      .prepare(
+        `SELECT id, upstream_id, identifier, identifier_hash, status
+           FROM supplier_accounts WHERE id IN (${placeholders(unique.length)})
+          ORDER BY created_at DESC, id`,
+      )
+      .all(...unique) as RefRow[];
+    return rows.map(toRef);
+  }
+
+  const where: string[] = [];
+  const params: unknown[] = [];
+  if (query.upstreamId !== undefined && query.upstreamId !== '') {
+    where.push('upstream_id = ?');
+    params.push(query.upstreamId);
+  }
+  if (query.statuses !== undefined && query.statuses.length > 0) {
+    where.push(`status IN (${placeholders(query.statuses.length)})`);
+    params.push(...query.statuses);
+  }
+  const clause = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+  const rows = db
+    .prepare(
+      `SELECT id, upstream_id, identifier, identifier_hash, status
+         FROM supplier_accounts ${clause}
+        ORDER BY created_at DESC, id`,
+    )
+    .all(...params) as RefRow[];
+  return rows.map(toRef);
+}
+
+export interface CreateSupplierAccountInput {
+  upstreamId: string;
+  supplier: string;
+  /** **掩码**（`maskIdentifier` 的产物）—— 真值不落这一列 */
+  identifier: string;
+  identifierHash: string;
+  username?: string | null | undefined;
+  uid?: string | null | undefined;
+  status: SupplierAccountStatus;
+  statusMessage?: string | null | undefined;
+  /** 已经 `encryptSecret` 过的密文；`null` = 这一路凭据没有 */
+  encryptedPassword?: Buffer | null | undefined;
+  encryptedSession?: Buffer | null | undefined;
+  sessionExpiresAt?: string | null | undefined;
+}
+
+/**
+ * 建一行账号。`id` 由调用方给（`acc_…`，`newId('supplierAccount')`）。
+ *
+ * 两路凭据都空 → 撞 DDL 的 `CHECK (encrypted_password IS NOT NULL OR encrypted_session IS NOT NULL)`。
+ * **不在这里兜底**：那种行是永远登不上的死行，能在写入点炸出来是最好的结果。
+ */
+export function createSupplierAccount(db: Db, id: string, input: CreateSupplierAccountInput): void {
+  const at = nowIso();
+  try {
+    db.prepare(
+      `INSERT INTO supplier_accounts (
+         id, upstream_id, supplier, identifier, identifier_hash, username, uid,
+         encrypted_password, encrypted_session, session_expires_at,
+         status, status_message, balance_cents, balance_currency, balance_updated_at,
+         revision, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 1, ?, ?)`,
+    ).run(
+      id,
+      input.upstreamId,
+      input.supplier,
+      input.identifier,
+      input.identifierHash,
+      input.username ?? null,
+      input.uid ?? null,
+      input.encryptedPassword ?? null,
+      input.encryptedSession ?? null,
+      input.sessionExpiresAt ?? null,
+      input.status,
+      input.statusMessage ?? null,
+      at,
+      at,
+    );
+  } catch (err) {
+    throw translateWriteError(err, 'upstreamId');
+  }
+}
+
+/**
+ * 账号的一次写入。**所有字段都是"给了才改"**（`undefined` = 不动这一列）。
+ *
+ * 这一点不是风格：刷新只拿到余额、重登只拿到会话、导入拿到密码 —— 三件事各改各的列，
+ * 用"整行覆写"的话，一次余额刷新会把刚重登得到的会话抹成 NULL
+ * （然后账号静默回到"没有会话"状态，而列表上看起来一切正常）。
+ */
+export interface UpdateSupplierAccountInput {
+  username?: string | null | undefined;
+  uid?: string | null | undefined;
+  status?: SupplierAccountStatus | undefined;
+  statusMessage?: string | null | undefined;
+  /** 密文；**给了就覆写**（§15.9「覆写 `session_cipher`」） */
+  encryptedSession?: Buffer | null | undefined;
+  /** 明文密码经 `encryptSecret` 后的密文；只在使用方拿到新密码时给 */
+  encryptedPassword?: Buffer | null | undefined;
+  sessionExpiresAt?: string | null | undefined;
+  balanceCents?: number | null | undefined;
+  balanceCurrency?: string | null | undefined;
+  /** 只在**真查到**余额时给（§14.2：查失败不动它，否则会渲染成"刚查过"） */
+  balanceUpdatedAt?: string | null | undefined;
+}
+
+export function updateSupplierAccount(db: Db, id: string, patch: UpdateSupplierAccountInput): void {
+  const sets: string[] = [];
+  const params: unknown[] = [];
+
+  const put = (column: string, value: unknown): void => {
+    sets.push(`${column} = ?`);
+    params.push(value);
+  };
+
+  if (patch.username !== undefined) put('username', patch.username);
+  if (patch.uid !== undefined) put('uid', patch.uid);
+  if (patch.status !== undefined) put('status', patch.status);
+  if (patch.statusMessage !== undefined) put('status_message', patch.statusMessage);
+  if (patch.encryptedSession !== undefined) put('encrypted_session', patch.encryptedSession);
+  if (patch.encryptedPassword !== undefined) put('encrypted_password', patch.encryptedPassword);
+  if (patch.sessionExpiresAt !== undefined) put('session_expires_at', patch.sessionExpiresAt);
+  if (patch.balanceCents !== undefined) put('balance_cents', patch.balanceCents);
+  if (patch.balanceCurrency !== undefined) put('balance_currency', patch.balanceCurrency);
+  if (patch.balanceUpdatedAt !== undefined) put('balance_updated_at', patch.balanceUpdatedAt);
+
+  // 一次空 patch 直接返回：写一条 `UPDATE ... SET revision = revision + 1` 会让
+  // 一个"什么都没改"的调用把乐观锁版本推进一格，前端下次提交就撞 REVISION_MISMATCH。
+  if (sets.length === 0) return;
+
+  // `revision + 1` 与 `updated_at` 永远一起动（§0.2 乐观锁口径）。
+  sets.push('revision = revision + 1', 'updated_at = ?');
+  params.push(nowIso(), id);
+
+  db.prepare(`UPDATE supplier_accounts SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+}
+
+/** 一个账号在库里的两路凭据（**已解密**）。只在调用方栈内存在，不得进 DTO（§15.9 纪律 4）。 */
+export interface SupplierCredential {
+  id: string;
+  upstreamId: string;
+  /** 归一化真值（重登时要原样提交给上游）；会话型账号取不到真值时是 `''` */
+  identifier: string;
+  identifierHash: string;
+  /** 掩码，仅用于在结果里标明"这是哪个号" */
+  maskedIdentifier: string;
+  password: string | null;
+  session: string | null;
+  tfUser: string | null;
+}
+
+interface CredRow {
+  id: string;
+  upstream_id: string;
+  identifier: string;
+  identifier_hash: string;
+  encrypted_password: Buffer | null;
+  encrypted_session: Buffer | null;
+}
+
+/**
+ * 解密一个账号的凭据。**本文件唯一的解密出口**。
+ *
+ * `identifier` 真值不在库里（只有 sha256 摘要）—— 而重登要用真值调 `/api/user/login`。
+ * 所以真值随密码一起存在密码密文里（见 `supplier/credentials.ts` 的文件头）：
+ * 只有密码型账号才需要"拿真值去登录"，而它恰好是唯一能存下真值的那种账号。
+ * 会话型账号（无密码）返回 `identifier: ''`，调用方据 `password === null` 就知道用不上它。
+ */
+export function readSupplierCredential(db: Db, id: string, masterKey: Buffer): SupplierCredential | null {
+  const row = db
+    .prepare(
+      `SELECT id, upstream_id, identifier, identifier_hash, encrypted_password, encrypted_session
+         FROM supplier_accounts WHERE id = ?`,
+    )
+    .get(id) as CredRow | undefined;
+  if (row === undefined) return null;
+
+  const passwordBlob = row.encrypted_password;
+  const sessionBlob = row.encrypted_session;
+
+  let identifier = '';
+  let password: string | null = null;
+  if (passwordBlob !== null) {
+    const parsed = parseCredentialBlob(decryptSecret(passwordBlob, masterKey));
+    identifier = parsed.identifier;
+    password = parsed.secret;
+  }
+
+  let session: string | null = null;
+  let tfUser: string | null = null;
+  if (sessionBlob !== null) {
+    const parsed = parseCredentialBlob(decryptSecret(sessionBlob, masterKey));
+    session = parsed.secret;
+    tfUser = parsed.tfUser;
+  }
+
+  return {
+    id: row.id,
+    upstreamId: row.upstream_id,
+    identifier,
+    identifierHash: row.identifier_hash,
+    maskedIdentifier: row.identifier,
+    password,
+    session,
+    tfUser,
+  };
+}
+
+/**
+ * 凭据密文的载荷形态。
+ *
+ * 为什么要 JSON 而不是裸串：`session` 那一路**还有一个 `TF-User` 要一起存**
+ * （§15.9 明写"换一枚新 `session`（+ `TF-User`），覆写 `session_cipher`"），
+ * 而库里只有一列 `encrypted_session`。给它加一列等于把"一次登录的产物"
+ * 拆成两列、两处都可能只写一半；JSON 让它**原子地**进出一个 BLOB。
+ * 密码那一路顺带存真值 `identifier`（见 `readSupplierCredential` 的注释）。
+ */
+export function parseCredentialBlob(raw: string): {
+  secret: string;
+  identifier: string;
+  tfUser: string | null;
+} {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      const rec = parsed as Record<string, unknown>;
+      const secret = typeof rec['secret'] === 'string' ? rec['secret'] : null;
+      if (secret !== null && secret !== '') {
+        return {
+          secret,
+          identifier: typeof rec['identifier'] === 'string' ? rec['identifier'] : '',
+          tfUser: typeof rec['tfUser'] === 'string' && rec['tfUser'] !== '' ? rec['tfUser'] : null,
+        };
+      }
+    }
+  } catch {
+    /* 落到下面的旧形态 */
+  }
+  // 兼容"裸串"形态：`encryptSecret('…')` 一类的历史 / 手工写入。
+  // **保留这条分支**：库里若真有一行是裸串，报错会让那个账号永远读不出会话，
+  // 而按裸串解释至少能让它继续工作。
+  return { secret: raw, identifier: '', tfUser: null };
+}
+
+/** 账号的套餐行（写侧形态）。`end_at` 的 ISO 归一化责任在调用方（§15.2）。 */
+export interface SupplierSubscriptionWrite {
+  subNo: string;
+  planTitle?: string | null | undefined;
+  planSlug?: string | null | undefined;
+  amountTotalCents?: number | null | undefined;
+  amountUsedCents?: number | null | undefined;
+  paidCents?: number | null | undefined;
+  basicTokenTotal?: number | null | undefined;
+  basicTokenUsed?: number | null | undefined;
+  status?: string | null | undefined;
+  source?: string | null | undefined;
+  startAt?: string | null | undefined;
+  endAt?: string | null | undefined;
+  autoRenew?: boolean | null | undefined;
+  hasKey?: boolean | undefined;
+  keyMasked?: string | null | undefined;
+}
+
+/**
+ * 整批替换一个账号的套餐行。
+ *
+ * **替换而不是 upsert**：上游给的是"此刻这个账号的全部套餐"，我们照抄这个全集。
+ * 只做 upsert 的话，一个**在上游已被删掉**的套餐会永远留在我们库里 ——
+ * 于是 `subscriptionCount` 长期偏大，而到期排序里会飘着一个早就不存在的套餐。
+ */
+export function replaceSupplierSubscriptions(
+  db: Db,
+  accountId: string,
+  subs: readonly SupplierSubscriptionWrite[],
+): void {
+  const at = nowIso();
+  db.transaction(() => {
+    db.prepare('DELETE FROM supplier_account_subscriptions WHERE account_id = ?').run(accountId);
+    const insert = db.prepare(
+      `INSERT INTO supplier_account_subscriptions (
+         id, account_id, sub_no, plan_title, plan_slug, amount_total_cents, amount_used_cents,
+         paid_cents, basic_token_total, basic_token_used, status, source, start_at, end_at,
+         auto_renew, has_key, key_masked, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const s of subs) {
+      insert.run(
+        newId('supplierSubscription'),
+        accountId,
+        s.subNo,
+        s.planTitle ?? null,
+        s.planSlug ?? null,
+        s.amountTotalCents ?? null,
+        s.amountUsedCents ?? null,
+        s.paidCents ?? null,
+        s.basicTokenTotal ?? null,
+        s.basicTokenUsed ?? null,
+        s.status ?? null,
+        s.source ?? null,
+        s.startAt ?? null,
+        s.endAt ?? null,
+        // 三态：`null` = 上游没给这个字段，**不是 false**（§15.1）。落库保持 NULL。
+        s.autoRenew === undefined || s.autoRenew === null ? null : s.autoRenew ? 1 : 0,
+        s.hasKey === true ? 1 : 0,
+        s.keyMasked ?? null,
+        at,
+      );
+    }
+  })();
+}
+
+/** 台账行（写侧形态）。`pooledKeyId` 非空 = 已入池，空 = 只拿到掩码。 */
+export interface SupplierAccountKeyWrite {
+  maskedKey: string;
+  pooledKeyId?: string | null | undefined;
+  note?: string | null | undefined;
+}
+
+/**
+ * 整批替换一个账号的 key 台账。
+ *
+ * 与套餐同理**整体替换**：`keys/sync` 拿到的是"这个账号此刻的全部 key"。
+ * 但这里多一条 —— **已入池的行不能因为一次同步没看见它就消失**。
+ * 上游列表是掩码、池里是明文，一次拉取失败 / 掩码撞号都会让某把 key "看不见"，
+ * 而它可能正在被网关使用；台账行一没，`keyCount` 就少一把，删账号的 409 判定跟着失效。
+ * 所以入池行**只增不减**：本次未命中的入池行原样保留，只重建"仅掩码"的那些行。
+ */
+export function replaceSupplierAccountKeyLedger(
+  db: Db,
+  accountId: string,
+  rows: readonly SupplierAccountKeyWrite[],
+): void {
+  const at = nowIso();
+  const insert = db.prepare(
+    `INSERT INTO supplier_account_keys (id, account_id, masked_key, pooled_key_id, note, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  );
+  db.transaction(() => {
+    // 只清"仅掩码"的行（`pooled_key_id IS NULL`）—— 见上面的理由。
+    db.prepare('DELETE FROM supplier_account_keys WHERE account_id = ? AND pooled_key_id IS NULL').run(accountId);
+
+    // 同一批内"仅掩码"行的去重集合：上游分页返回两条一样的掩码时不该在台账里长两行。
+    // 入池行不走这个集合 —— 它们由 `pooled_key_id` 唯一确定，重复的入池 id 会被
+    // 第二条 UPDATE 命中（changes=1）而不会重复插入，天然幂等。
+    const seenMasked = new Set<string>();
+
+    for (const r of rows) {
+      const pooled = r.pooledKeyId ?? null;
+      if (pooled !== null) {
+        const updated = db
+          .prepare(
+            `UPDATE supplier_account_keys SET masked_key = ?, note = ?, updated_at = ?
+              WHERE account_id = ? AND pooled_key_id = ?`,
+          )
+          .run(r.maskedKey, r.note ?? null, at, accountId, pooled);
+        if (updated.changes > 0) continue;
+        insert.run(newId('supplierAccountKey'), accountId, r.maskedKey, pooled, r.note ?? null, at, at);
+        continue;
+      }
+      if (seenMasked.has(r.maskedKey)) continue;
+      seenMasked.add(r.maskedKey);
+      insert.run(newId('supplierAccountKey'), accountId, r.maskedKey, null, r.note ?? null, at, at);
+    }
+    // 这个 `()` 不能省：`db.transaction(fn)` **只构造**一个事务函数，不执行。
+    // 少了它，整个函数变成一次静默空转 —— 而它照样 `return { rows: rows.length }`，
+    // 于是调用方看到"更新了 2 行"、库里一行没动。这类 bug 不会报错、不会变慢，
+    // 只会让台账和事实长期分叉（`keyCount` 偏小 → 删账号的 409 判定跟着失效）。
+  })();
+}
+
+/** 账号当前挂着的、已入池的 key id（`keys/sync` 与 `keys` 要跳过它们，避免重复入池）。 */
+export function listLinkedPooledKeyIds(db: Db, accountId: string): string[] {
+  const rows = db
+    .prepare('SELECT pooled_key_id FROM supplier_account_keys WHERE account_id = ? AND pooled_key_id IS NOT NULL')
+    .all(accountId) as { pooled_key_id: string }[];
+  return rows.map((r) => r.pooled_key_id);
+}
+
+/**
+ * 已入池 key 的**掩码**（`keys/sync` 对账用）。
+ *
+ * 走 `JOIN upstream_keys … AND deleted_at IS NULL`，与 `keyCount`（`countsFor()`）**同一口径**：
+ * 软删掉的 key 不该再参与"后 4 位"匹配，否则一次同步会把一把已经删了的 key 的掩码
+ * 匹配到新 key 上 —— 而台账行还在（它没有外键，见 §15.2），只靠台账数不出来这件事。
+ */
+export function listLinkedPooledKeyMasks(
+  db: Db,
+  accountId: string,
+): { pooledKeyId: string; maskedKey: string }[] {
+  const rows = db
+    .prepare(
+      `SELECT sak.pooled_key_id AS pooled_key_id, uk.masked_key AS masked_key
+         FROM supplier_account_keys sak
+         JOIN upstream_keys uk ON uk.id = sak.pooled_key_id AND uk.deleted_at IS NULL
+        WHERE sak.account_id = ? AND sak.pooled_key_id IS NOT NULL`,
+    )
+    .all(accountId) as { pooled_key_id: string; masked_key: string }[];
+  return rows.map((r) => ({ pooledKeyId: r.pooled_key_id, maskedKey: r.masked_key }));
+}
+
+/**
+ * 追加 / 更新一行「已入池」台账（`keys` 端点当场建完 key 后调，§15.2）。
+ *
+ * **为什么不复用 `replaceSupplierAccountKeyLedger`**：那个函数是**整体替换**语义
+ * （它会把 `pooled_key_id IS NULL` 的"仅掩码"行全删掉重建）。建 key 只多了一把，
+ * 拿一次"建 key"去清掉上一次同步攒下的对账行，等于用一个动作悄悄毁掉另一件事的产出。
+ * 整体替换归 `keys/sync`，单向追加归这里 —— 两个语义两种入口。
+ *
+ * 幂等：同一个 `pooledKeyId` 再调一次只是把掩码/备注覆写一遍（`changes > 0` 就不插入），
+ * 所以重跑一次批量建 key 不会在台账里长重复行。
+ */
+export function linkSupplierAccountKey(
+  db: Db,
+  accountId: string,
+  pooledKeyId: string,
+  maskedKey: string,
+  note: string | null = null,
+): void {
+  const at = nowIso();
+  const updated = db
+    .prepare(
+      `UPDATE supplier_account_keys SET masked_key = ?, note = ?, updated_at = ?
+        WHERE account_id = ? AND pooled_key_id = ?`,
+    )
+    .run(maskedKey, note, at, accountId, pooledKeyId);
+  if (updated.changes > 0) return;
+  db.prepare(
+    `INSERT INTO supplier_account_keys (id, account_id, masked_key, pooled_key_id, note, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  ).run(newId('supplierAccountKey'), accountId, maskedKey, pooledKeyId, note, at, at);
+}
+
+/** 上游的 `supplier` 与根地址。`import` 前必须 `supplier === 'tierflow'`，否则 `422`（§15.2）。 */
+export function upstreamSupplier(
+  db: Db,
+  upstreamId: string,
+): { baseUrl: string; supplier: string | null } | null {
+  const row = db.prepare('SELECT base_url, supplier FROM upstreams WHERE id = ?').get(upstreamId) as
+    | { base_url: string; supplier: string | null }
+    | undefined;
+  return row === undefined ? null : { baseUrl: row.base_url, supplier: row.supplier };
 }

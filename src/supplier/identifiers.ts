@@ -5,6 +5,8 @@
 // 排除名单决定"这一行今天能不能被碰"。三处各写一份归一化，就会出现
 // "判重时算 `+86162…`、排除时比 `162…`、显示时用原文"—— 而症状是**某个号被静默漏掉**。
 
+import { sha256Hex } from '../db/crypto.js';
+
 /**
  * 归一化：把"同一个号的各种写法"收成一个字符串（`identifier_hash` 的输入）。
  *
@@ -110,4 +112,28 @@ export function isExcluded(
   // 收不出东西的输入**不当作排除**：它不是"被排除的号"，是"这一行根本没法处理"，
   // 该由解析器按"跳过并报原因"处置（§15.2），混在这里会让两件事的计数对不上。
   return normalized !== null && excluded.has(normalized);
+}
+
+/**
+ * 排除名单的**摘要形态**（`supplier_accounts.identifier_hash` 的那一套 sha256）。
+ *
+ * 批量端点手边只有 `identifier_hash` —— 掩码列推不回真值，真值只封在密码密文里
+ * （`supplier/credentials.ts` 文件头）。要在它们身上判"这个号今天能不能碰"，
+ * 有两条路：
+ *   - 把每个账号解密出来、归一化、再比对 → 为了回答一个是/否，把 27 个明文手机号
+ *     在内存里摊开一遍。凭据摊开的每一处都是一次泄漏面（§15.9 纪律），不值得；
+ *   - **在摘要上比** → `sha256Hex` 是单向的，同一真值必得同一摘要，判定完全等价。
+ *
+ * 选后者。`isExcluded` 留给**手里有真值**的调用方（离线会话导入脚本、导入解析器），
+ * 两个入口判定的是同一件事，只是手上拿着的东西不同。
+ */
+export function excludedHashSet(excluded: ReadonlySet<string>): ReadonlySet<string> {
+  const out = new Set<string>();
+  for (const identifier of excluded) out.add(sha256Hex(identifier));
+  return out;
+}
+
+/** 摘要形态的排除判定。**空集合不等于放行**，只说明这一次没人给出排除项（同 `isExcluded`）。 */
+export function isExcludedHash(identifierHash: string, excludedHashes: ReadonlySet<string>): boolean {
+  return excludedHashes.size > 0 && excludedHashes.has(identifierHash);
 }

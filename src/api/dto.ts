@@ -618,3 +618,78 @@ export interface SupplierSubscriptionRowDto extends SupplierSubscriptionDto {
   createdAt: string;
   updatedAt: string;
 }
+
+/**
+ * 契约 §15.2 `SupplierTestResult`（连接自测）。
+ *
+ * 与 §2 `BalanceTestResult` 同口径的三条：**永不写库**、业务性失败一律 `200 + ok:false`、
+ * `raw` 是上游原样而 `parsed` 才是换算后的结论。
+ *
+ * `loginAttempted` 存在是为了让"这次测得慢"可解释：为验证存档密码而真登了一次的时候，
+ * 耗时里含一次完整登录往返，否则运维会去查一个不存在的性能问题。
+ */
+export interface SupplierTestResult {
+  ok: boolean;
+  accountId: string;
+  /** **掩码**手机号 / 邮箱。真值不出后端（§15.1） */
+  identifier: string;
+  /** 未能发出请求时为 `0`（同 §2：`null` 会让人以为是"没记录"，事实是"没发生"） */
+  httpStatus: number;
+  durationMs: number;
+  /** 本次是否为验证密码而真实登录过 */
+  loginAttempted: boolean;
+  /** **换算后**的结论：`balanceCents` 是分。取不到就是 `null`，不是 0 */
+  parsed: SupplierTestParsed;
+  /** 上游原样。已抹掉所有凭据出现并截断；**前端禁止读这里的数字当金额渲染** */
+  raw: unknown;
+  errorCode: string | null;
+  hintCode: HintCode | null;
+  hint: string | null;
+}
+
+export interface SupplierTestParsed {
+  balanceCents: number | null;
+  /** 换算比（比例，非金额）。保留是为了诊断"换算比是不是被供应商改了" */
+  quotaPerUnit: number | null;
+  subscriptionCount: number | null;
+}
+
+/**
+ * 契约 §15.3 批量任务逐行结果。
+ *
+ * `action` 的五个取值**每个都必须有生产者**（§15.3 明令不留"枚举里有、没人发"的空值）：
+ * `login` = `import` 里新建账号的首登；`relogin` = 已有账号在 `import`/`refresh`/`keys` 中被重登；
+ * `refresh` = `refresh`；`create` = `keys`；`sync` = `keys/sync`。
+ */
+export type SupplierBatchAction = 'login' | 'relogin' | 'refresh' | 'create' | 'sync';
+
+/** 一行。**不含任何凭据** —— `keyMasked` 是掩码，`keyId`/`tokenNo` 是内部标识。 */
+export interface SupplierBatchItem {
+  accountId: string | null;
+  /** **掩码**；这一行没能解析出账号时为 `null` */
+  identifier: string | null;
+  action: SupplierBatchAction | null;
+  ok: boolean;
+  /** 供应商错误码原样（如 `LOGIN_INVALID_CREDENTIALS`）或本契约错误码 */
+  code: string | null;
+  message: string | null;
+  keyId: string | null;
+  keyMasked: string | null;
+  tokenNo: number | null;
+}
+
+/** 契约 §15.3 批量任务 result（四个批量端点共用形状）。 */
+export interface SupplierBatchResult {
+  done: number;
+  total: number;
+  ok: number;
+  failed: number;
+  skipped: number;
+  /** `items` 截断前的真实行数 */
+  itemsTotal: number;
+  /** `items` 超过 500 行时为 `true`（前端须提示"逐行明细已截断"） */
+  truncated: boolean;
+  items: SupplierBatchItem[];
+  hintCode: HintCode | null;
+  hint: string | null;
+}

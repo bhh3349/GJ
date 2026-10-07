@@ -55,6 +55,18 @@ export interface TierFlowErr {
   httpStatus: number;
   /** **已擦除凭据**的一句话。可以直接进日志 / 进任务 result。 */
   message: string;
+  /**
+   * 上游响应体**原样**（解不出 JSON 时是截断后的原文），连不上时为 `null`。
+   *
+   * 存在的理由是 `:id/test`：诊断端点的主诉是"取值路径没配对"，而配对失败时
+   * 唯一的线索就是上游到底回了什么 —— 只给一句 `message` 的诊断是不可诊断的。
+   *
+   * ⚠ **未净化**（与 `AccountSelfSnapshot.raw` 同一纪律）：上游会在报错体里**回显本次
+   * 请求带的凭据**，而擦除要那把账号的密码/会话 —— 驱动器只有本次请求用的会话，密码它拿不到，
+   * 也**不该**为了擦一句话去拿。所以净化一律在**出口侧**做（§15.2 `SupplierTestResult.raw`
+   * 过 `sanitizeUpstreamBody`）。**任何直接把它塞进日志 / 响应 / result 的写法都是凭据泄漏。**
+   */
+  raw?: unknown;
 }
 
 export type TierFlowResult<T> = TierFlowOk<T> | TierFlowErr;
@@ -298,6 +310,15 @@ export interface AccountSelfSnapshot {
   unlimited: boolean;
   currency: string | null;
   quotaPerUnit: number;
+  /**
+   * 上游原样（`data` 那一层）。`SupplierTestResult.raw` 要的就是它 —— 契约 §15.2：
+   * "想要 quota 原值看 `raw`"。**已过 `decodeEnvelope`**，不是完整信封。
+   *
+   * 这里**不在这里做净化**：擦除要那把账号的密码/会话，而驱动器只有本次请求用的会话
+   * （见 `request()` 的 `secrets`），密码它拿不到也不该拿。净化是**出口**那一侧的事
+   * （`services/supplier-accounts.ts` 过 `sanitizeUpstreamBody`），与 §2 自测同一条切法。
+   */
+  raw: unknown;
 }
 
 export interface UpstreamTokenRow {
@@ -396,6 +417,7 @@ export function createTierFlowClient(options: TierFlowOptions): TierFlowClient {
         failure: 'session_expired',
         httpStatus: res.status,
         message: scrubbedMessage(parsed, text, secrets) ?? '会话失效',
+        raw: rawFor(parsed, text),
       };
     }
 
@@ -405,6 +427,7 @@ export function createTierFlowClient(options: TierFlowOptions): TierFlowClient {
         failure: 'http_error',
         httpStatus: res.status,
         message: scrubbedMessage(parsed, text, secrets) ?? `上游返回 HTTP ${res.status}`,
+        raw: rawFor(parsed, text),
       };
     }
 
@@ -416,6 +439,7 @@ export function createTierFlowClient(options: TierFlowOptions): TierFlowClient {
         failure: 'rejected',
         httpStatus: res.status,
         message: scrubCredentials(text.slice(0, 200), secrets),
+        raw: rawFor(parsed, text),
       };
     }
 
@@ -426,6 +450,7 @@ export function createTierFlowClient(options: TierFlowOptions): TierFlowClient {
         failure: 'rejected',
         httpStatus: res.status,
         message: scrubCredentials(envelope.message ?? '上游拒绝了本次请求', secrets),
+        raw: rawFor(parsed, text),
       };
     }
 
@@ -463,6 +488,7 @@ export function createTierFlowClient(options: TierFlowOptions): TierFlowClient {
           unlimited: balance.unlimited,
           currency: readString(data, 'currency'),
           quotaPerUnit,
+          raw: res.data,
         },
       };
     },
@@ -730,6 +756,17 @@ function scrubbedMessage(parsed: unknown, text: string, secrets: readonly (strin
   const envelope = decodeEnvelope(parsed);
   const message = envelope.message ?? (text === '' ? null : text.slice(0, 200));
   return message === null ? null : scrubCredentials(message, secrets);
+}
+
+/**
+ * 失败时带出去的上游原文。解出 JSON 就给整份，否则是截断后的文本，连响应都没有时 `null`。
+ *
+ * 截断的额度与 `message` 相同（200 字符）—— 那是"够不够定位"与"会不会把一份 HTML 错误页
+ * 整个搬进 result"之间的取舍。**未净化**，见 `TierFlowErr.raw`。
+ */
+function rawFor(parsed: unknown, text: string): unknown {
+  if (parsed !== null) return parsed;
+  return text === '' ? null : text.slice(0, 200);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

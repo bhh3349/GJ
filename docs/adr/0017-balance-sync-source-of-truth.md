@@ -202,6 +202,10 @@ CREATE INDEX IF NOT EXISTS idx_balance_snapshots_upstream_ts ON balance_snapshot
 > 补遗 6 加**逐出口记账**与**标定同出口**两条（容量是**每个出口**的数，见 ADR-0021 决策 8 v5）；
 > 补遗 1–4 及其余各行**不动**。ADR-0021 同步升 **v5**。
 >
+> **v1.7.0 修订稿 v5（2026-10-07，路由者回代码核 #3 后扩写）**：补遗 3 新增「**实现落点**」一节（两处判定 +
+> 第 5 个旁路计数 / 判据按状态码而非标记头的取证与理由 / 码名待确认 / `Retry-After` 提示面的连带）；
+> 落地清单 #3 按这四条扩写，**新增第 16 行** ⇒ 落地清单 15 → **16 行**。补遗 1–2、4–6 与其余各行**不动**。
+>
 > **本段未生效**：PM 放行前**不改契约正文、不改代码**。落地清单一并列在文末，供一次性过目。
 
 ### 补遗 1：决策 5 那句「TTFB 判据自动满足」**后半句作废**（前半句仍真）
@@ -294,6 +298,48 @@ failed > 0 时：
   3. `web/src/api/types.ts` 的 `HintCode` 联合类型同批加成员。
 - **备选（否）**：429 仍报 `BALANCE_UPSTREAM_UNREACHABLE`、只换文案。码与文案是 1:1（`hintText(code)`），
   换文案就得按码分叉，等于偷偷加了一个码；而给"上游不可达"配一句"出口限流"的说明，正是本补遗要消灭的误读。
+
+#### 补遗 3 · 实现落点（路由者 `#3` 四条对账，逐条给代码锚点）
+
+1. **两处判定 + 一个旁路计数，缺一则批量路径返回不出这个码。** 判定函数有两处：`hintForQueryResult`
+   （`src/api/services/balance-query.ts:62-75`，唯一调用点 = 自测 `balance-selftest.ts:176`）与 `hintForSummary`
+   （同文件 `:84-96`，唯一调用点 = `balance-refresh.ts:309` 的 `summarize()`）。新码要在**批量刷新**侧出得来，
+   必须同批加**第 5 个旁路计数** `rateLimited`，位置与 `authRejected`（`balance-refresh.ts:290` 声明 / `:299` 累加）
+   **同处**现算、**同样不参与三型计数口径**，并穿过 `summarize()` → `hintForSummary`。**只接单查询侧 = 批量路径
+   永远给不出这个码** —— 它只在自测里生效，而自测恰恰不是被打满的那条路。落地清单只写"加一行"的话，这个缺口
+   实现时看不见。
+   注：这个 `rateLimited` 与补遗 2 那个（进 `UpstreamRefreshResult`、供退避与漂移判定用）**同源同值、各自独立** ——
+   一个是收尾钩子的输入（内部类型，**不出 REST 面**），一个是 hint 的输入（**要出 REST 面**）。不得为了省一处
+   把两者并成一个对外字段。
+2. **判据是状态码 `429`，不是标记头 —— 并写明「无标记头的真 429 归同一行」。**
+   - **取证**：`QueryOutcome`（`src/balance/template.ts:126-144`）**只有 `httpStatus` 与可选 `raw`，没有 headers 字段**，
+     且批量路径不采集 `raw`（`:214` 只在 `captureRaw` 时给）。按标记头判，先要给它加一个布尔字段，再穿过
+     `Attempt` / `summarize()` / `executePlan` 三处；而状态码今天就在（`:213`）。这是"要造判据"与"判据已在手"的差别。
+   - **语义（更要紧的是这条）**：新码是"**本次请求被限流（429）**"这个**证据面同形**的类（§16.7 v1.6.2），
+     **不是"我们出口的错"这个归因** —— 决策 4 让本地拒绝与上游 429"证据面同形"，目的正是**不**按来源分型。
+     按标记头分流会造出一个**新的误报类**：标记头只证明"**我们自己的桶拒了**"，**不证明**"给 429 的是这把 key 的额度"
+     —— 未带标记的**上游出口级 429**（上游按 IP 限我们）会被判成"key 自身限额"，与补遗 3 要消灭的误报**镜像同形**。
+     故 429 一行通吃，**两行触发条件按状态码一条线切**：`429` 一行、**非 429 的 `failed`** 另一行。
+   - 代价由文案纪律承担：`hintText` 那句"**可能是出口 IP 的请求预算已用尽，也可能该 key 自身撞到限额**"
+     就是这个形状的必然产物，**不得**改成确定性归因（决策 4 的同形性在文案上的直接后果）。
+3. **码名比文案强（待 PM 一句话）。** 码名 `BALANCE_EGRESS_RATE_LIMITED` 是**归因式**的，而上一节的文案纪律要求
+   **不越证据**（PM 口径对账里用的也是 `RATE_LIMITED`）。建议改 **`BALANCE_RATE_LIMITED`** —— 未发布，改名零成本，
+   随 #3 / #8 / #11 / #12 一处同步。若 PM 判保留码名，则**前端 `HINT_CONFIG` 第 5 项的 `title` 也必须按"不越证据"写**：
+   #12 现只写了"第 5 项 + 兜底"，而 `title` 是**另一处用户可见文案**，写死"出口限流"就把后端刚立的文案纪律从这一处漏掉。
+4. **`Retry-After` 的提示面（新连带，带前置依赖）。** 全仓 API 侧**无人读 `retry-after`**（只有网关
+   `src/gateway/classify.ts:24` / `engine.ts:400`），而本地拒绝按 ADR-0021 决策 8 会带 `Retry-After`
+   （= 到下一枚 token 的时间）。文案若写"稍后重试"却给不出秒数，前端只能说"稍后"、说不出"等多久"。
+   落法：`QueryOutcome` 增 `retryAfterSeconds?: number`（`res.headers` 在 `template.ts:186` 手边），#10 带进刷新结果。
+   **⚠️ 这不是零成本**：对外刷新结果的形状是**契约 §3 冻结**的那份（`balance-refresh.ts:67` 注释明写"形状一个字都不动"，
+   `docs/api-contract.md:303`）⇒ 加字段 = §3 / §14.2 **新增一个可选字段**，须**同批写进正文**，不能只留在实现里；
+   #12 前端同批展示。
+   **前置依赖（跨车道，等 PM 裁）**：管理面现在**根本没走出口** —— `balance-refresh.ts:174` 的 `options.fetchImpl ?? fetch`、
+   `balance-query.ts:246` 与 `balance-selftest.ts:247/295` 的 `fetchImpl: typeof fetch = fetch` 都是全局 fetch
+   （宿主 IP、不过桶、不 `reserve`）。ADR-0021 落地清单已登记"默认值外面套 `createEgressFetch`、调用点零改动"，
+   但那条**与 ADR-0021「未接线时运行时行为与改动前逐字节相同」合起来正是"编译期无感"**：漏接线不会编译报错，
+   只会静默走宿主 IP —— 而此时 §2 那行在承诺"同一张账"，是**空头**。故 #3 挂一条前置：管理面三处改**必填注入**
+   （漏传 = 编译错误），与"缺省闸 `permissiveEgressGate` 恒放行"**并存** —— 必填约束的是**接线点**，不是闸的缺省实现。
+   **本节不裁**：它属 ADR-0021 决策 4/5 的注脚，等 PM「Tier 2 出口传递形状」那条一并落。
 
 ### 补遗 4：漂移判据加**前置条件**（`judgeDrift`）并给 `knownKeyCount` 定语义 —— **明确不收窄 `usedTokens`**
 
@@ -405,7 +451,7 @@ PM 裁决第一条要求先 `BALANCE_SYNC_MINUTES=0`，但"什么时候能开回
 |---|---|---|---|
 | 1 | 契约 §14.1 第 3 条 + §14.5 | 按补遗 1 的订正文案替换（「TTFB 判据自动满足」后半句作废） | 管家 |
 | 2 | 契约 §14.1 退避段 + §14.3 `upstreams[]` 说明 | 归零条件改为"有值 + 成功比例 ≥ 阈值 + 本轮无 429"；`consecutiveFailures` 语义改述 | 管家 |
-| 3 | 契约 §14.2 末行 + §2 引导表 | "`hintCode` 四值不变"作废；**加第 5 行** `BALANCE_EGRESS_RATE_LIMITED`，**且** §2 `BALANCE_UPSTREAM_UNREACHABLE` 触发列改为"不可达 / 超时 / 非 2xx（**429 除外**，429 归 `BALANCE_EGRESS_RATE_LIMITED`）"（两行触发条件不得重叠；§14.2 `:1387` 那张写库纪律表**不动**，见补遗 3 后果 1） | 管家 |
+| 3 | 契约 §14.2 末行 + §2 引导表 + `src/api/services/` | "`hintCode` 四值不变"作废；**加第 5 行** `BALANCE_EGRESS_RATE_LIMITED`，**且** §2 `BALANCE_UPSTREAM_UNREACHABLE` 触发列改为"不可达 / 超时 / 非 2xx（**429 除外**，429 归 `BALANCE_EGRESS_RATE_LIMITED`）"（两行触发条件不得重叠；§14.2 `:1387` 那张写库纪律表**不动**，见补遗 3 后果 1）。**判据 = 状态码 429，不是标记头**，且**无标记头的真 429 归同一行**（理由与取证见补遗 3「实现落点」2 —— 按标记头分流会把上游出口级 429 误判成"key 自身限额"，是镜像同形的误报）；**两处判定都要接**（`hintForQueryResult` + `hintForSummary`），**并新增第 5 个 hint 旁路计数 `rateLimited` 穿过 `summarize()`**（`balance-refresh.ts:284-319`）—— 只接单查询侧则批量路径永远给不出这个码（「实现落点」1）；**码名待 PM 一句话**（建议 `BALANCE_RATE_LIMITED`，见「实现落点」3） | 管家 |
 | 4 | 契约 §14.4 判定段 + §14.3 `knownKeyCount` | 加"本轮有出口级限流不判定"前置条件；`knownKeyCount` 语义成文（**待 PM 点头，见文末**） | 管家 |
 | 5 | 契约 §16.7 Tier 1.5 | 按补遗 5 的九条落正文（作用域点名 / 计价单位 / 第四条路径 / 保留额度 / 键一致 / 冷却来源分列 / 终态形状 / 检测器转正） | 管家 |
 | 6 | 契约 §15.5 表 + 0.6s 间隔 | 按补遗 5 ⑥ 重算（≈14 分钟）；0.6s 保留为内层纪律 | 管家 |
@@ -414,10 +460,11 @@ PM 裁决第一条要求先 `BALANCE_SYNC_MINUTES=0`，但"什么时候能开回
 | 9 | `src/api/balance-sync.ts` | `judgeRound` / `judgeDrift` —— **只改判据，不改写库纪律** | 管家 |
 | 10 | `src/api/services/balance-refresh.ts` | 现算 `rateLimited`（`httpStatus === 429`，**含本地合成 429**），带进 `UpstreamRefreshResult`；三型计数零变更 | 管家 |
 | 11 | `src/api/services/balance-query.ts` + `dto.ts` | `hintForSummary` / `hintForQueryResult` 加 429 分支；第 5 个 `HintCode` + `hintText` | 管家 |
-| 12 | `web/` | `HINT_CONFIG` 第 5 项 **+ 兜底**；`types.ts` 联合类型；**并改 `BALANCE_UPSTREAM_UNREACHABLE` 的既有文案** —— 现行 `description` 写的是"请求超时或**返回非 2xx**"（`web/src/components/BalanceHint.tsx:29`），拆行后这句必须去掉"非 2xx"，否则契约改了、UI 还在把 429 说成"上游不可达"（第 5 项也自带一句文案，两处不得互相矛盾） | 画师（**同批，不得延后**） |
+| 12 | `web/` | `HINT_CONFIG` 第 5 项 **+ 兜底**；`types.ts` 联合类型；**第 5 项的 `title` 与文案同样按"不越证据"写**（不得写死"出口限流" —— 判据是状态码，见补遗 3「实现落点」2/3）；**并改 `BALANCE_UPSTREAM_UNREACHABLE` 的既有文案** —— 现行 `description` 写的是"请求超时或**返回非 2xx**"（`web/src/components/BalanceHint.tsx:29`），拆行后这句必须去掉"非 2xx"，否则契约改了、UI 还在把 429 说成"上游不可达"（第 5 项也自带一句文案，两处不得互相矛盾）；**并展示第 16 行的 `retryAfterSeconds`**（"等多久"要说得出来） | 画师（**同批，不得延后**） |
 | 13 | `web/` | §7 `egress_cooldown` 帧接线（出口限流提示位，三处接线点照 v1.4.11）+ 手动刷新二次确认 | 画师 |
 | 14 | 出口预算闸（令牌桶）与注入缝 | 按 `docs/adr/0021-egress-budget-seam.md`（v4，同批）：`src/egress/` + `src/gateway/egress.ts` + `engine.ts` + 装配 | 路由者 + 管家 |
 | 15 | 验收用例 | 按补遗 5 ⑧ 的四条断言落用例（**429 不是 502** / `attempts` 恒 0 / 不写 key 失败行 / `inner` 零调用 + `consecutive`·`until` 逐字节不变），与 ADR-0021 §验证第 3·4·5·10 条同源 | 路由者 + 管家 |
+| 16 | 契约 §3 / §14.2 刷新结果 + `Retry-After` 提示面 | 刷新结果**新增可选** `retryAfterSeconds`（= 本地拒绝带回的 `Retry-After`，语义见补遗 3「实现落点」4）⇒ **§3 / §14.2 正文同批加字段**：对外形状是冻结的那份，这是**契约面、非零成本**，不能只留在实现里；#12 前端同批展示。**前置依赖（跨车道，待 PM 裁）**：管理面三处 `fetchImpl` 兜底（`balance-refresh.ts:174` / `balance-query.ts:246` / `balance-selftest.ts:247/295`）改**必填注入** —— ADR-0021 落地清单的"默认值外面套 `createEgressFetch`"是同一件事的接线层，缺了它新码是纸面码、§2 承诺的"同一张账"是空头 | 管家（#12 展示归画师） |
 
 **本补遗 1–4 不做的事**（与 PM 裁决一致）：不改 §14 的三个手动端点语义、不改 NULL 口径、不改快照表结构、
 不新增错误码、不动 `src/gateway/`。**补遗 5–6 涉及的 `src/gateway/` 改动不属本 ADR**，

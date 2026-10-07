@@ -14,7 +14,8 @@
        （§10 补遗 v1.0.4 `:15` ＋ §10 正文 `:1088`「**429 一律带 `Retry-After`**」）。
        （决策 9(5) / 落点清单第 3 条 / 影响表 / 验证第 18 条同批改。）
     2. **`observeLimited` 是全域函数（total）**：任何分支都**不返回 `undefined`、不抛** ——
-       内部异常**就地降级为 `attribution:'key'`**，并在 shadow 记录里打 **`degraded`**。
+       内部异常**就地降级为 `attribution:'key'`**（逐字 `{ attribution:'key', cooldownUntilMs: null }`，
+       **降级路径不 `cool()`**），并在 shadow 记录里打 **`degraded`**。
        理由不是防御式编程，是**标定本身**：**"判据开着但每次都炸"与"开着且什么都没发现"必须在 shadow
        输出里可区分**，否则 N 会标定在一个**已经死掉的判据**上 —— 与「缺省不是证据」同一把刀。
        **"默认关"的表达式同理**：默认关 = **恒回 `'key'` 且照常产出 shadow 记录**，**不是"不调用"** ——
@@ -231,7 +232,8 @@ export interface EgressGate {
    *  （N=3，决策 10；窗口按出口、不按消费方分桶）。`accountId` 为 `null` 的事件贡献 0。
    *  **v10 全域（total）**：任何分支都**不返回 `undefined`、不抛** —— 内部异常**就地降级**为
    *  `attribution:'key'` 并在 shadow 记录里打 `degraded`（"判据炸了"必须与"判据什么都没发现"在
-   *  shadow 里可区分，否则 N 会标定在一个死掉的判据上）。 */
+   *  shadow 里可区分，否则 N 会标定在一个死掉的判据上）。**降级返回值逐字为
+   *  `{ attribution: 'key', cooldownUntilMs: null }`** —— 降级路径**不得** `cool()`：判不出归因就不动状态。 */
   observeLimited(input: EgressLimitedInput): EgressVerdict;
   /**
    * 出口**真的答了**（仅上游证据）→ 清连续计数、退出升档阶梯。与内核既有 `noteSuccess()` 同义。
@@ -796,6 +798,8 @@ CREATE TABLE IF NOT EXISTS egress_proxies (
   任何分支**不返回 `undefined`、不抛**；**内部异常就地降级为 `attribution:'key'` 并置 `degraded: true`**。
   标定吃的就是这个位：**"判据开着但每次都炸"与"开着且什么都没发现"必须在输出里可区分**，
   否则 N 会建在一个**已经死掉的判据**上 —— 与「缺省不是证据」同一把刀。
+  降级返回值**逐字**为 `{ attribution: 'key', cooldownUntilMs: null }`，**降级路径不得 `cool()`** ——
+  判不出归因就不动状态（"炸了但要保险起见冷一下"正是把误报从"错一次短冷却"放大回"误退出口"的那条路）。
 - **"默认关"的表达式 = 恒回 `'key'` 且照常产出 shadow 记录（`degraded: false`），不是"不调用"** ——
   "不调用"会让"影子没响"同时意味着**未接线 / 判据没发现 / 判据炸了**三件不同的事，标定无从分辨。
 - **sustained / ambiguous**：命中后**跨过一个完整窗口**（`now − lastFireAt ≥ windowMs`）再次命中 ⇒ 记
@@ -886,8 +890,9 @@ CREATE TABLE IF NOT EXISTS egress_proxies (
     不发 §7 帧、`snapshot()` 逐字不变**，但每窗口产出一条判决记录，且 `wouldFire` 与真实判决**同源**
     （同一处 `observeLimited`，无第二个计数器）；③ **本地 reject 零进入观察面**：合成 429 反复打满窗口 ⇒
     窗口内 `distinctAccounts` 恒 0、判据**不会**据此摘掉自己（与第 9 条自伤回归同一条断言的两个面）；
-    ④ **全域（v10）**：判据内部抛异常 ⇒ 端口**不抛、不返回 `undefined`**，就地回 `attribution:'key'`，
-    且 shadow 记录带 `degraded`；**"默认关"的断言是"照常产出记录"**（恒回 `'key'` + `degraded: false`），
+    ④ **全域（v10）**：判据内部抛异常 ⇒ 端口**不抛、不返回 `undefined`**，就地回 `attribution:'key'`、
+    `cooldownUntilMs: null`，且 shadow 记录带 `degraded`；**降级路径零副作用**（不 `cool`、不推进阶梯、
+    不发 §7 帧）；**"默认关"的断言是"照常产出记录"**（恒回 `'key'` + `degraded: false`），
     **不是"零记录"** —— 否则"判据炸了却沉默"与"判据什么都没发现"在标定里分不开。
 
 ## 已知缺口 / 未决

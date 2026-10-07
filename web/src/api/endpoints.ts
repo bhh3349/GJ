@@ -8,6 +8,8 @@ import { api, type QueryValue } from './http';
 import type {
   AuditEntry,
   BalanceStats,
+  BalanceSyncQuery,
+  BalanceSyncStatus,
   BalanceTemplateTestRequest,
   BalanceTestResult,
   CallLog,
@@ -154,6 +156,16 @@ export const statsApi = {
   overview: (window: StatsWindow) => api.get<StatsOverview>('/stats/overview', { query: { window } }),
   balance: () => api.get<BalanceStats>('/stats/balance'),
   usage: (query: UsageQuery) => api.get<UsageStats>('/stats/usage', { query: q(query) }),
+  /**
+   * §14.3 余额同步观测口（**只读**）。回显生效的自动同步参数 + 带 `asOf` 的余额序列 + 漂移提示。
+   *
+   * 两条纪律落在调用方，别在这里"顺手"补：
+   * - **前端不得自算间隔 / 抖动 / 退避** —— 一律读 `auto`，它是服务端配置的投影；
+   * - `points[].totalBalanceCents === null` 是"那一刻全未知"，**不得补 0、不得插值**。
+   * `window` 默认 `6h`（后端回显实际值），**不是**同步节奏。
+   */
+  balanceSync: (query: BalanceSyncQuery = {}) =>
+    api.get<BalanceSyncStatus>('/stats/balance/sync', { query: q(query) }),
 };
 
 export const logsApi = {

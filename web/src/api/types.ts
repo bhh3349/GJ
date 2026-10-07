@@ -597,6 +597,117 @@ export interface AuditEntry {
   result: string;
 }
 
+// ── §14 余额同步（v1.3.0） ────────────────────────────────────────────────
+
+/**
+ * `lastTrigger`：最近一次同步**完成**的触发方（`"auto"` | `"manual"`）—— **任意触发都算**，
+ * 不是"最近一次自动同步"。从未同步过是 `null`。
+ */
+export type BalanceSyncTrigger = 'auto' | 'manual';
+
+/**
+ * 契约 §14.4 方向级漂移码。**只有这两个**，且**只 warn + 计数**：
+ * 本地没有单价（`usage_logs` 只有 token、`balance` 只有分，量纲不可比），
+ * 所以漂移**只能判方向 + 零/非零，不能判钱**。前端不得据此推断"对账不上"或建议扣减。
+ */
+export type BalanceDriftCode =
+  | 'BALANCE_SPENT_WITHOUT_TRAFFIC'
+  | 'BALANCE_UNCHANGED_WITH_TRAFFIC';
+
+/**
+ * 自动同步的**生效参数回显**。前端**不得自算**间隔 / 抖动 / 退避（契约 §14.3 逐字）。
+ *
+ * ⚠️ 这三个数是**服务端配置**（`BALANCE_SYNC_MINUTES` 环境变量）的只读投影，
+ * **不是**可以从前端改写的字段：契约里**没有**写这个配置的端点，
+ * 也**没有** `min_interval_minutes` 这样的每上游字段。UI 只能显示 + 指向部署侧。
+ */
+export interface BalanceSyncAuto {
+  enabled: boolean;
+  /** 基准间隔（分钟）。`enabled=false` 时该值仍回显配置值，但**不代表正在跑**。 */
+  intervalMinutes: number;
+  /** ±比例，如 `0.1` = ±10%。 */
+  jitterRatio: number;
+  /** 退避上限（分钟），契约冻结 360。 */
+  backoffCapMinutes: number;
+}
+
+/** 每上游的运行态（§14.3 `upstreams[]`）：退避与单飞读面。 */
+export interface BalanceSyncUpstreamState {
+  upstreamId: string;
+  name: string;
+  /** 该上游最近一次同步**完成**时刻；从未同步过为 `null`。 */
+  lastSyncedAt: Iso8601 | null;
+  /** 连续失败次数（退避用）；任一成功即归零。 */
+  consecutiveFailures: number;
+  /** 退避中非空，否则 `null`。 */
+  nextAttemptAt: Iso8601 | null;
+  inFlight: boolean;
+}
+
+/**
+ * 一个快照点 = 该上游**此刻**所有未软删 key 的余额状态（**照下来的相**，不是作业记录）。
+ * `totalBalanceCents === null` 表示那一刻**全未知** —— **不是 0**（§0.2 / §14.2 绝不补 0）。
+ */
+export interface BalanceSyncPoint {
+  t: Iso8601;
+  totalBalanceCents: Cents | null;
+  /** 推导值：`balanceKeyCount - unknownKeyCount - unlimitedKeyCount`，分列出来才解释得通缺口。 */
+  knownKeyCount: number;
+  unknownKeyCount: number;
+  unlimitedKeyCount: number;
+  tokenPlanKeyCount: number;
+}
+
+export interface BalanceSyncSeries {
+  upstreamId: string;
+  /** 上游名快照（ADR-0016：删上游后历史仍可读）。 */
+  label: string;
+  /** **不自带等长轴**：节奏不规则（抖动 + 退避 + 关闭期），要均匀轴就得发明不存在的点。 */
+  points: BalanceSyncPoint[];
+}
+
+/**
+ * 一条漂移告警：相邻两次快照 + 同窗口 token 用量。
+ * `from` / `to` 是判定窗口两端，`usedTokens` 是**上游级**（不按 key 过滤）。
+ */
+export interface BalanceDriftAlert {
+  code: BalanceDriftCode;
+  upstreamId: string;
+  from: Iso8601;
+  to: Iso8601;
+  usedTokens: number;
+}
+
+/** §14.4 漂移块。`counts` 是**进程内计数**（重启归零），**不是**窗口内计数。 */
+export interface BalanceDrift {
+  since: Iso8601;
+  counts: Record<BalanceDriftCode, number>;
+  /** 按 `to` 倒序，上限 20 条。 */
+  alerts: BalanceDriftAlert[];
+}
+
+/** 契约 §14.3 `GET /api/stats/balance/sync` 的 200 响应。**只读**：不改状态、不触发查询。 */
+export interface BalanceSyncStatus {
+  auto: BalanceSyncAuto;
+  lastSyncedAt: Iso8601 | null;
+  lastTrigger: BalanceSyncTrigger | null;
+  /** 已含抖动的下一次计划时刻；关闭自动同步时为 `null`。 */
+  nextRunAt: Iso8601 | null;
+  window: { from: Iso8601; to: Iso8601 };
+  upstreams: BalanceSyncUpstreamState[];
+  series: BalanceSyncSeries[];
+  drift: BalanceDrift;
+}
+
+/**
+ * `window` 为 `Ns` / `Nm` / `Nh`，上限 24h，**默认 `6h`**（解析规则同 §6 `overview`）。
+ * 契约说得很清楚：这是**观测窗口**，与自动同步的节奏**无关** —— 别拿它当"同步间隔"。
+ */
+export interface BalanceSyncQuery {
+  upstreamId?: string;
+  window?: string;
+}
+
 // ── §7 实时通道 ───────────────────────────────────────────────────────────
 
 export interface LiveReadyMessage {

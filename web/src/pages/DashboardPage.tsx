@@ -1,9 +1,11 @@
 /**
- * 仪表盘 —— QPS / 成功率 / 余额总览 / key 健康状态。
+ * 仪表盘 —— QPS / 成功率 / 余额总览与趋势 / 漂移提示 / key 健康状态。
  *
- * 数据来源两条，口径写在契约里，页面必须尊重：
+ * 数据来源三条，口径写在契约里，页面必须尊重：
  * 1. `GET /api/stats/overview?window=` 给**快照**（含后端算好的 `window`，前端不得自算 QPS）；
- * 2. `WS /api/stats/live` 给**每秒一帧**的实时值。
+ * 2. `WS /api/stats/live` 给**每秒一帧**的实时值；
+ * 3. `GET /api/stats/balance/sync?window=`（契约 §14.3，只读）给**余额快照序列与漂移提示** ——
+ *    余额历史不在 `overview` 里，所以这一块独立取数、独立降级（见 `BalanceSyncSection`）。
  *
  * 断线纪律（契约 §7）：通道不新鲜时**退回快照并标注**，绝不把上一帧当实时值继续展示。
  */
@@ -20,6 +22,7 @@ import { HealthTag } from '@/components/HealthTag';
 import { PageHeader } from '@/components/PageHeader';
 import { StatCard } from '@/components/StatCard';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
+import { BalanceSyncSection } from '@/pages/stats/BalanceSyncSection';
 import { isLiveFresh } from '@/realtime/live';
 import { useLive } from '@/realtime/useLive';
 import { tokens } from '@/theme/tokens';
@@ -88,7 +91,7 @@ export default function DashboardPage() {
   if (loading) {
     return (
       <>
-        <PageHeader title="仪表盘" description="QPS、成功率、余额总览、key 健康状态" />
+        <PageHeader title="仪表盘" description="QPS、成功率、余额总览与趋势、漂移提示、key 健康状态" />
         <LoadingState tip="正在加载总览…" minHeight={420} />
       </>
     );
@@ -97,7 +100,7 @@ export default function DashboardPage() {
   if (error && !data) {
     return (
       <>
-        <PageHeader title="仪表盘" description="QPS、成功率、余额总览、key 健康状态" />
+        <PageHeader title="仪表盘" description="QPS、成功率、余额总览与趋势、漂移提示、key 健康状态" />
         <ErrorState error={error} onRetry={reload} variant="page" title="总览加载失败" />
       </>
     );
@@ -128,7 +131,7 @@ export default function DashboardPage() {
     <>
       <PageHeader
         title="仪表盘"
-        description="QPS、成功率、余额总览、key 健康状态"
+        description="QPS、成功率、余额总览与趋势、漂移提示、key 健康状态"
         extra={
           <div style={{ display: 'flex', alignItems: 'center', gap: tokens.space.md }}>
             <Tooltip title="时间窗口由后端下发，前端不用本地时间自算 QPS。">
@@ -265,6 +268,15 @@ export default function DashboardPage() {
             }}
           />
         </div>
+      </div>
+
+      {/*
+        余额同步观测区（契约 §14.3，只读）。独立取数：`/stats/overview` 不带余额历史，
+        所以这一块自己打 `/api/stats/balance/sync`，失败不影响上面的实时面板。
+        echarts 在该组件内部按需加载，不进首屏关键路径。
+      */}
+      <div style={{ marginTop: tokens.space.lg }}>
+        <BalanceSyncSection />
       </div>
     </>
   );

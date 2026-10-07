@@ -11,6 +11,13 @@
  *   （`key_runtime → upstream_keys → models → upstreams`）。所以文案必须说出
  *   「模型档案连同手改的开关 / 价格一起没」，且 `modelCount` 拿不到时**不写模型数**（不把「不知道」写成 0）。
  * - 写请求一律带 `revision`；409 `REVISION_MISMATCH` 时提示并拉最新，避免对着旧版本反复提交。
+ *
+ * 「自动同步」列（T2 接线，契约 §14.1 / §14.3）：
+ * - 这一列是**只读**的。自动同步开关与基准间隔来自服务端 `BALANCE_SYNC_MINUTES`
+ *   （`0` = 关闭），经 `GET /api/stats/balance/sync` 的 `auto` 回显；
+ *   **契约里不存在** `min_interval_minutes` 这类每上游可写字段，也**没有**写这个配置的端点 ——
+ *   所以这里只显示 + 指路部署配置，不造一个点了就 404 的假开关。
+ * - 手动「查余额」三个端点语义**零变更**（§14.1），本页只把运行态（退避 / 单飞 / 上次同步）显示出来。
  */
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import {
@@ -27,20 +34,26 @@ import {
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useState } from 'react';
+import { useState, useMemo } from 'react';
 
-import { upstreamsApi } from '@/api/endpoints';
+import { statsApi, upstreamsApi } from '@/api/endpoints';
 import { describeError, isApiError } from '@/api/http';
 import { useAction, useResource } from '@/api/hooks';
 import { useTaskPolling } from '@/api/useTaskPolling';
-import { PAGE_SIZE_DEFAULT, type BalanceRefreshResult, type HintCode, type Upstream } from '@/api/types';
+import {
+  PAGE_SIZE_DEFAULT,
+  type BalanceRefreshResult,
+  type BalanceSyncUpstreamState,
+  type HintCode,
+  type Upstream,
+} from '@/api/types';
 import { BalanceHint } from '@/components/BalanceHint';
 import { BalanceText } from '@/components/BalanceText';
 import { PageHeader } from '@/components/PageHeader';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { UpstreamModal } from '@/pages/upstreams/UpstreamModal';
 import { tokens } from '@/theme/tokens';
-import { formatCount, formatIso, formatRelative } from '@/utils/format';
+import { formatCount, formatIso, formatPercent, formatRelative } from '@/utils/format';
 
 const { Text } = Typography;
 
@@ -113,6 +126,21 @@ export default function UpstreamsPage() {
     () => upstreamsApi.list(JSON.parse(queryKey)),
     [queryKey],
   );
+
+  /**
+   * §14.3 只读观测口：每上游的自动同步运行态（退避 / 单飞 / 上次同步）。
+   *
+   * 与列表**分开取数**：它是观测信息，失败只降级这一列，不该把整张表打成错误态。
+   * 也**不在这里放任何写入口** —— 契约里没有配置自动同步节奏的端点（那是部署侧
+   * `BALANCE_SYNC_MINUTES` 的事），做个点了就 404 的开关才是骗人。
+   */
+  const syncStatus = useResource(() => statsApi.balanceSync({}), []);
+  const syncByUpstream = useMemo(() => {
+    const map = new Map<string, BalanceSyncUpstreamState>();
+    for (const item of syncStatus.data?.upstreams ?? []) map.set(item.upstreamId, item);
+    return map;
+  }, [syncStatus.data]);
+
   const task = useTaskPolling((finished) => {
     const result = finished.result as BalanceRefreshResult | null;
     setRefreshHint(
@@ -120,6 +148,8 @@ export default function UpstreamsPage() {
     );
     message.success('余额查询完成');
     list.reload();
+    // 手动刷新成功同样归零退避（§14.1），所以这列必须跟着重取，否则会显示过期的失败计数。
+    syncStatus.reload();
   });
 
   const openCreate = () => {
@@ -304,6 +334,79 @@ export default function UpstreamsPage() {
       ),
     },
     {
+      title: (
+        <Tooltip title="自动同步运行态（契约 §14.3，只读）。间隔 / 抖动 / 退避是服务端配置的回显，前端不自算；开关与间隔由部署侧 BALANCE_SYNC_MINUTES 决定，管理面没有写入口。">
+          <span>自动同步</span>
+        </Tooltip>
+      ),
+      key: 'autoSync',
+      width: 156,
+      render: (_: unknown, row) => {
+        const sync = syncStatus.data;
+        const state = syncByUpstream.get(row.id);
+        // 状态取不到就说取不到 —— 不把它渲染成「已关闭」（缺省不是证据）。
+        if (!sync) {
+          return syncStatus.error ? (
+            <Tooltip title="自动同步状态加载失败，这一列暂时未知（不代表该上游已关闭自动同步）。">
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                未知
+              </Text>
+            </Tooltip>
+          ) : (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              …
+            </Text>
+          );
+        }
+        if (!sync.auto.enabled) {
+          return (
+            <Tooltip title="自动同步整体已关闭（BALANCE_SYNC_MINUTES=0）。手动「查余额」不受影响。">
+              <Tag
+                bordered={false}
+                style={{
+                  marginInlineEnd: 0,
+                  background: tokens.tint.neutral,
+                  color: tokens.color.textSecondary,
+                }}
+              >
+                已关闭
+              </Tag>
+            </Tooltip>
+          );
+        }
+        return (
+          <Space direction="vertical" size={2}>
+            <Text style={{ fontSize: 12 }}>{`每 ${sync.auto.intervalMinutes} 分钟`}</Text>
+            {state?.inFlight ? (
+              <Text style={{ fontSize: 11, color: tokens.color.info }}>同步中</Text>
+            ) : null}
+            {state && state.consecutiveFailures > 0 ? (
+              <Tooltip
+                title={
+                  state.nextAttemptAt
+                    ? `连续失败进入指数退避，下次自动尝试 ${formatIso(state.nextAttemptAt)}。手动查询仍可立即发起。`
+                    : '连续失败中；任一次拿到值即归零。'
+                }
+              >
+                <Text style={{ fontSize: 11, color: tokens.color.warning }}>
+                  {`连续失败 ${formatCount(state.consecutiveFailures)} 次`}
+                </Text>
+              </Tooltip>
+            ) : null}
+            {state?.lastSyncedAt ? (
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                {`上次 ${formatRelative(state.lastSyncedAt)}`}
+              </Text>
+            ) : (
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                尚未同步
+              </Text>
+            )}
+          </Space>
+        );
+      },
+    },
+    {
       title: '操作',
       key: 'actions',
       width: 200,
@@ -378,6 +481,18 @@ export default function UpstreamsPage() {
       <Text type="secondary" style={{ fontSize: 12 }}>
         共 {formatCount(list.data?.total ?? 0)} 个上游
       </Text>
+      {syncStatus.data ? (
+        <Tooltip title="自动同步的生效参数由服务端回显（契约 §14.3），前端不得自算间隔 / 抖动 / 退避。要改间隔请改部署侧 BALANCE_SYNC_MINUTES —— 管理面没有写入口。">
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {syncStatus.data.auto.enabled
+              ? `自动同步：每 ${syncStatus.data.auto.intervalMinutes} 分钟 ±${formatPercent(
+                  syncStatus.data.auto.jitterRatio,
+                  0,
+                )}（退避上限 ${syncStatus.data.auto.backoffCapMinutes} 分钟）`
+              : '自动同步：已关闭（仅手动查询）'}
+          </Text>
+        </Tooltip>
+      ) : null}
     </div>
   );
 
@@ -434,7 +549,7 @@ export default function UpstreamsPage() {
           columns={columns}
           dataSource={list.data?.items ?? []}
           loading={list.refreshing}
-          scroll={{ x: 1180 }}
+          scroll={{ x: 1340 }}
           pagination={{
             current: page,
             pageSize,

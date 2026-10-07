@@ -26,6 +26,11 @@
  *   PROBE_KEY=sk-... PROBE_MODEL=... pnpm probe:tierflow
  *   PROBE_DRY_RUN=1 pnpm probe:tierflow      # 只打印计划，不发任何请求（自检用）
  *
+ * 分片重跑（**全跑在实测的出口 IP 预算下结构上做不到**，见 PROBE_ONLY 注释）：
+ *   PROBE_ONLY=P3,P4 PROBE_COOLDOWN_MS=180000 PROBE_KEY=... PROBE_EXHAUSTED_KEY=... PROBE_MODEL=... pnpm probe:tierflow
+ *   撞到 429 会**停下本片剩余探针**（PROBE_STOP_ON_429=0 可关，不推荐）——
+ *   目的是不让前面的请求把后面几条污染成假 429 结论。
+ *
  * 退出码：全部探针都跑完 → 0；有探针**没能执行**（网络/超时）→ 1。
  * 探针本身「探出问题」**不算失败**（它是诊断工具），结论打在报告末的 VERDICT 段。
  */
@@ -48,6 +53,31 @@ const TIMEOUT_MS = intEnv('PROBE_TIMEOUT_MS', 15000, 1000);
  * 429 污染成假结论（"链路上游回 429" 与 "我们自己把 IP 打限流了" 分不开）。
  */
 const PACE_MS = intEnv('PROBE_PACE_MS', 700, 0);
+/**
+ * 只跑指定探针（逗号分隔，如 `PROBE_ONLY=P3,P4`）。空 = 全跑。
+ *
+ * **为什么需要它**：全跑一次要发 7 次请求，而实测出口 IP 预算在 2s 间隔下
+ * 第 6 次就触发 429（见 §16.7）—— 也就是「全跑」在这条出口上**结构上不可能**：
+ * 后半段必然被前半段自己打出的 429 污染成假结论。分片重跑不是可选优化，
+ * 是拿到干净结论的唯一方式（每片独立等冷却窗口）。
+ */
+const ONLY = (process.env.PROBE_ONLY ?? '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter((s) => s !== '');
+/**
+ * 开跑前的冷却等待。分片重跑时必须给 —— 上一片打出的 429 窗口没退，
+ * 这一片的第一条就会被污染，而报告上看起来像是"上游真的在限流这条链路"。
+ */
+const COOLDOWN_MS = intEnv('PROBE_COOLDOWN_MS', 0, 0);
+/**
+ * 撞到 429 就**停下本片剩余探针**。默认开。
+ *
+ * 判据是「这条出口只有约 5–8 次预算」：继续发只会让后面每条都变 429，
+ * 把「未观测」污染成「观测到 429」—— 那是比 SKIP 更坏的结论，
+ * 因为它看起来像实证。宁可少跑几条并显式标注不完整。
+ */
+const STOP_ON_429 = process.env.PROBE_STOP_ON_429 !== '0';
 
 /** 请求体里故意用一个不可能存在的模型，用来把「模型不存在」与「余额/鉴权」分开 */
 const BOGUS_MODEL = '__probe_model_that_does_not_exist__';
@@ -229,16 +259,25 @@ async function probeChat(
  * 与「首包已经发出、之后才断流」（不能改 HTTP 状态，否则客户端拿到 200 再断流 = 有感知）。
  * 所以这里刻意在首个 chunk 后立刻 cancel，并记录首包耗时。
  */
-async function probeChatStream(id: string, title: string, goal: string, secret: string, model: string): Promise<ProbeResult> {
+async function probeChatStream(
+  id: string,
+  title: string,
+  goal: string,
+  secret: string,
+  requires: string,
+  model: string,
+): Promise<ProbeResult> {
   const started = Date.now();
   const base: Omit<ProbeResult, 'body' | 'httpStatus' | 'networkError' | 'currentVerdict' | 'ran'> = {
     id,
     title,
+    goal,
+    requires,
     firstChunkMs: null,
     contentType: null,
     sse: false,
     needsBodyRecognition: false,
-  };
+  } as Omit<ProbeResult, 'body' | 'httpStatus' | 'networkError' | 'currentVerdict' | 'ran'>;
   try {
     const res = await fetch(CHAT_PATH, {
       method: 'POST',
@@ -486,7 +525,7 @@ function buildSpecs(): ProbeSpec[] {
       goal: '错误体出现在首包**之前**（可改判）还是之后（不可改 HTTP 状态）—— classify 改动边界的唯一依据',
       secret: KEY,
       requires: 'PROBE_KEY',
-      run: (s) => probeChatStream('P3', 'POST /v1/chat/completions · stream:true 不存在模型', '错误体相对首包的时序位置', s, BOGUS_MODEL),
+      run: (s) => probeChatStream('P3', 'POST /v1/chat/completions · stream:true 不存在模型', '错误体相对首包的时序位置', s, 'PROBE_KEY', BOGUS_MODEL),
     },
     {
       id: 'P4',
@@ -516,10 +555,18 @@ function printPlan(specs: ProbeSpec[]): void {
 }
 
 async function main(): Promise<number> {
-  const specs = buildSpecs();
+  const all = buildSpecs();
+  const unknown = ONLY.filter((id) => !all.some((s) => s.id === id));
+  const specs = ONLY.length === 0 ? all : all.filter((s) => ONLY.includes(s.id));
 
   console.log('TierFlow 数据面探针（M6-D / S1 待钉项）');
   console.log(`目标 baseUrl: ${BASE_URL}`);
+  if (ONLY.length > 0) console.log(`分片运行  : PROBE_ONLY=${ONLY.join(',')}（共 ${specs.length}/${all.length} 条）`);
+  if (unknown.length > 0) console.log(`⚠ 未知探针 id 被忽略：${unknown.join(',')}`);
+  if (specs.length === 0) {
+    console.log('没有可跑的探针（PROBE_ONLY 全是未知 id），退出。');
+    return 1;
+  }
   console.log('');
 
   if (DRY_RUN) {
@@ -530,6 +577,14 @@ async function main(): Promise<number> {
 
   const results: (ProbeResult & { goal: string; requires: string })[] = [];
   let skipped = 0;
+  let aborted = 0;
+  let hitRateLimit = false;
+
+  if (COOLDOWN_MS > 0) {
+    console.log(`冷却等待 ${COOLDOWN_MS}ms（让上一片的出口 IP 预算退干净）…`);
+    await new Promise((r) => setTimeout(r, COOLDOWN_MS));
+    console.log('');
+  }
 
   for (const spec of specs) {
     if (spec.secret === '' && spec.credentialFree !== true) {
@@ -537,11 +592,19 @@ async function main(): Promise<number> {
       skipped += 1;
       continue;
     }
+    if (hitRateLimit) {
+      aborted += 1;
+      continue;
+    }
     if (results.length + skipped > 0 && PACE_MS > 0) await new Promise((r) => setTimeout(r, PACE_MS));
     console.log(`RUN  ${spec.id} ${spec.title} …`);
     const r = await spec.run(spec.secret);
     results.push(r as ProbeResult & { goal: string; requires: string });
     console.log(`     → HTTP ${r.httpStatus ?? 'N/A'}${r.sse ? ' (SSE)' : ''}${r.networkError !== null ? `  ⚠ ${r.networkError}` : ''}`);
+    if (r.httpStatus === 429 && STOP_ON_429) {
+      hitRateLimit = true;
+      console.log('     ⚠ 429：出口 IP 预算已耗尽，停发本片剩余探针（避免把「未观测」污染成「观测到 429」）');
+    }
   }
 
   console.log('');
@@ -591,12 +654,18 @@ async function main(): Promise<number> {
     console.log(`跳过 ${skipped} 条：缺凭据。**路径存在性那一半的结论仍然有效**，`);
     console.log(`但「已鉴权协议兼容性」未实测 —— 补齐 PROBE_KEY 后重跑才能把 P0 推过线。`);
   }
+  if (hitRateLimit) {
+    console.log('');
+    console.log(`⚠ 本片在出口 IP 限流处中断：另有 ${aborted} 条**根本没发出去**。`);
+    console.log(`  「没发出去」不等于「没观察到」—— 别把这 ${aborted} 条读成任何结论。`);
+    console.log(`  等冷却窗口退干净后，用 PROBE_ONLY=<id,...> PROBE_COOLDOWN_MS=180000 分片重跑。`);
+  }
   console.log('');
   console.log('报告请整段回贴到群/契约；本脚本不落盘任何文件。');
 
-  // 有探针没能执行（网络/超时）→ 非 0，让执行者注意到结论不完整
+  // 有探针没能执行（网络/超时）或被限流截断 → 非 0，让执行者注意到结论不完整
   const failedToRun = results.some((r) => !r.ran);
-  return failedToRun || skipped > 0 ? 1 : 0;
+  return failedToRun || skipped > 0 || hitRateLimit ? 1 : 0;
 }
 
 main()

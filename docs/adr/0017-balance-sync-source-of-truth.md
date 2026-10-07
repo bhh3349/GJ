@@ -281,7 +281,13 @@ failed > 0 时：
   走的是同一个 429 分支 ⇒ 同样报 `BALANCE_EGRESS_RATE_LIMITED`。文案已按"不越证据"写（"可能是出口预算、
   也可能是该 key 自身"），**不需要为自拒绝另造第二句话** —— 这正是决策 4 让本地拒绝与上游 429"证据面同形"的目的。
 - **这不是零成本改动**，三处后果一起记：
-  1. `HintCode` **四值 → 五值**，而契约 §14.2 现写"`hintCode` 四值**不变**" ⇒ **该句作废**；§2 引导表加一行；契约升 **v1.7.0**（枚举新增，非破坏）。
+  1. `HintCode` **四值 → 五值**，而契约 §14.2 现写"`hintCode` 四值**不变**" ⇒ **该句作废**；契约升 **v1.7.0**（枚举新增，非破坏）。
+     **§2 引导表要改的是一行"加" + 一行"改"**：加第 5 行 `BALANCE_EGRESS_RATE_LIMITED`，**并且**把
+     `BALANCE_UPSTREAM_UNREACHABLE` 的触发列从"不可达 / 超时 / 非 2xx"改成"不可达 / 超时 / 非 2xx（**429 除外**）"。
+     **只加行不改列 = 触发条件互相包含**：429 同时命中两行，前端取到哪一行就退化成行序这样的实现细节，
+     而现行 §2 那句"非 2xx"正是本补遗要消灭的**误读本体**（先改列才算真的摘出来）。
+     **触发列全仓只有 §2 一处**：§14.2 `:1387` 那张表是**写库纪律**表（不可达 / 超时 / 非 2xx ⇒ **一个字都不写**），
+     429 无论上游的还是本地合成的**同属"不写"** ⇒ 那张表**不动**，别顺手给它加"429 除外"（会把"失败不写库"这条纪律改坏）。
   2. **画师侧是硬依赖，不是可选**：`web/src/components/BalanceHint.tsx` 的 `HINT_CONFIG` 是**穷尽的** `Record<HintCode, …>`，
      且 `config.title` **无兜底** ⇒ 新码先到、前端后到会**当场抛错**（整个组件渲染失败，不只是缺文案）。
      故本批**必须**同批加第 5 项，**并**补一个兜底分支（`?? fallback`）—— 老前端 + 新后端的部署顺序无法保证。
@@ -399,7 +405,7 @@ PM 裁决第一条要求先 `BALANCE_SYNC_MINUTES=0`，但"什么时候能开回
 |---|---|---|---|
 | 1 | 契约 §14.1 第 3 条 + §14.5 | 按补遗 1 的订正文案替换（「TTFB 判据自动满足」后半句作废） | 管家 |
 | 2 | 契约 §14.1 退避段 + §14.3 `upstreams[]` 说明 | 归零条件改为"有值 + 成功比例 ≥ 阈值 + 本轮无 429"；`consecutiveFailures` 语义改述 | 管家 |
-| 3 | 契约 §14.2 末行 + §2 引导表 | "`hintCode` 四值不变"作废；加第 5 行 `BALANCE_EGRESS_RATE_LIMITED` | 管家 |
+| 3 | 契约 §14.2 末行 + §2 引导表 | "`hintCode` 四值不变"作废；**加第 5 行** `BALANCE_EGRESS_RATE_LIMITED`，**且** §2 `BALANCE_UPSTREAM_UNREACHABLE` 触发列改为"不可达 / 超时 / 非 2xx（**429 除外**，429 归 `BALANCE_EGRESS_RATE_LIMITED`）"（两行触发条件不得重叠；§14.2 `:1387` 那张写库纪律表**不动**，见补遗 3 后果 1） | 管家 |
 | 4 | 契约 §14.4 判定段 + §14.3 `knownKeyCount` | 加"本轮有出口级限流不判定"前置条件；`knownKeyCount` 语义成文（**待 PM 点头，见文末**） | 管家 |
 | 5 | 契约 §16.7 Tier 1.5 | 按补遗 5 的九条落正文（作用域点名 / 计价单位 / 第四条路径 / 保留额度 / 键一致 / 冷却来源分列 / 终态形状 / 检测器转正） | 管家 |
 | 6 | 契约 §15.5 表 + 0.6s 间隔 | 按补遗 5 ⑥ 重算（≈14 分钟）；0.6s 保留为内层纪律 | 管家 |
@@ -408,7 +414,7 @@ PM 裁决第一条要求先 `BALANCE_SYNC_MINUTES=0`，但"什么时候能开回
 | 9 | `src/api/balance-sync.ts` | `judgeRound` / `judgeDrift` —— **只改判据，不改写库纪律** | 管家 |
 | 10 | `src/api/services/balance-refresh.ts` | 现算 `rateLimited`（`httpStatus === 429`，**含本地合成 429**），带进 `UpstreamRefreshResult`；三型计数零变更 | 管家 |
 | 11 | `src/api/services/balance-query.ts` + `dto.ts` | `hintForSummary` / `hintForQueryResult` 加 429 分支；第 5 个 `HintCode` + `hintText` | 管家 |
-| 12 | `web/` | `HINT_CONFIG` 第 5 项 **+ 兜底**；`types.ts` 联合类型 | 画师（**同批，不得延后**） |
+| 12 | `web/` | `HINT_CONFIG` 第 5 项 **+ 兜底**；`types.ts` 联合类型；**并改 `BALANCE_UPSTREAM_UNREACHABLE` 的既有文案** —— 现行 `description` 写的是"请求超时或**返回非 2xx**"（`web/src/components/BalanceHint.tsx:29`），拆行后这句必须去掉"非 2xx"，否则契约改了、UI 还在把 429 说成"上游不可达"（第 5 项也自带一句文案，两处不得互相矛盾） | 画师（**同批，不得延后**） |
 | 13 | `web/` | §7 `egress_cooldown` 帧接线（出口限流提示位，三处接线点照 v1.4.11）+ 手动刷新二次确认 | 画师 |
 | 14 | 出口预算闸（令牌桶）与注入缝 | 按 `docs/adr/0021-egress-budget-seam.md`（v4，同批）：`src/egress/` + `src/gateway/egress.ts` + `engine.ts` + 装配 | 路由者 + 管家 |
 | 15 | 验收用例 | 按补遗 5 ⑧ 的四条断言落用例（**429 不是 502** / `attempts` 恒 0 / 不写 key 失败行 / `inner` 零调用 + `consecutive`·`until` 逐字节不变），与 ADR-0021 §验证第 3·4·5·10 条同源 | 路由者 + 管家 |

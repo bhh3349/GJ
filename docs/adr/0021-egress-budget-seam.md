@@ -1,6 +1,20 @@
 # 21. 出口（IP）预算：跨车道共享令牌桶与统一注入缝
 
-- 状态：**草案 v7（待 PM 过目；PM 四条裁定 + 路由者终版对账 + Bo 的出口 IP / 代理池约束 + Bo 的出口报废口径已落，放行后生效）** —— 放行前不改契约正文、不改代码
+- 状态：**草案 v8（待 PM 过目；PM 四条裁定 + 路由者终版对账 + Bo 的出口 IP / 代理池约束 + Bo 的出口报废口径 + 路由者交回的判据两个数已落，放行后生效）** —— 放行前不改契约正文、不改代码
+  - **v8 变更（2026-10-07，路由者交回判据两个数 + `subject` 形状）**：
+    1. **新增决策 10：出口级归因判据窗口化** —— 「同一出口 **60s 滑动**窗口内 ≥ **3 个不同账号**同型失败」；
+       窗口是**滑动**不是翻滚；**首次命中只给 `scope:'egress'` 裁决 + 冷却阶梯第一档，不摘除**；
+       标定走 **shadow 观察模式**（判据默认关、只记不动）。决策 9 末尾的「未决一格」就此结清。
+    2. **`EgressLimitedInput.subject` 改 `{ accountId: string | null; keyId: string }`**（决策 3）：
+       **计数按 `accountId` 去重**、`keyId` 只作足迹；`accountId === null`（无主 key）**贡献 0** ——
+       没有归属就没有"跨账号"这个命题。`accountId` 由 `KEYS_SQL` **同一次 join** 带出，零额外查询。
+    3. **连带订正三处**（都是新判据自带的，不订正就会在文里自相矛盾）：
+       ① `EgressLimitedInput.scope: 'request' | 'batch'` **退休** —— 它存在的唯一理由是把计数参数化为"当前作用域内"，
+       窗口化判据不按相关单元分桶 ⇒ 该字段失去消费者（决策 3 / 4a）；
+       ② 决策 9(5) 的池空触发面**删掉「无预算」**并补 `Retry-After` 的有无规则 —— 预算耗尽仍走 `429`（决策 4/6），
+       同一事实两枚码只会让画师按码猜；
+       ③ 受害者账从 **27→1** 订正为 **27→(N−1)** —— 凑齐 N 之前先行那几把 key 仍各记一次失败，
+       "不记 key 失败"这句话在新判据下**不是**"全都不记"。
   - **v7 变更（2026-10-07，Bo「已经占用的出口肯定不再使用了啊，换其他的出口」+ 路由者两条形状交回本车道）**：
     1. **新增决策 9：出口生命周期** —— 状态**单轴化**（`enabled` → `status`/`retired_reason`/`retired_at`）、
        **退役不删行**（`egressId` 要比 IP 活得久）、**`url` 唯一（归一化后）**、**自动摘除不落库**（瞬时健康态）、
@@ -178,7 +192,8 @@ export interface EgressGate {
    * `consumer` 决定能否动用**数据面保留额度**（决策 8）：`'data'` 可，`'management'` 不可。
    */
   reserve(egressId: string, consumer: EgressConsumer): EgressReservation;
-  /** 收到 429 时报告，拿回归因结论。同一 `correlationId` 内第 2 个不同 `subject` ⇒ 出口级。 */
+  /** 收到 429 时报告，拿回归因结论。**同一 `egressId` 的 60s 滑动窗口内第 N 个不同账号 ⇒ 出口级**
+   *  （N=3，决策 10；窗口按出口、不按消费方分桶）。`accountId` 为 `null` 的事件贡献 0。 */
   observeLimited(input: EgressLimitedInput): EgressVerdict;
   /**
    * 出口**真的答了**（仅上游证据）→ 清连续计数、退出升档阶梯。与内核既有 `noteSuccess()` 同义。
@@ -201,13 +216,13 @@ export type EgressReservation =
 export interface EgressLimitedInput {
   egressId: string;
   /** 相关单元（数据面 = 一次客户端请求，管理面 = 一轮刷新 / 一个批量任务）：数据面用 ADR-0014 已有的
-   *  关联键，引擎内取不到时退化为该次调用作用域 id */
+   *  关联键，引擎内取不到时退化为该次调用作用域 id。**v8 起只作证据关联**：判据数的是
+   *  `egressId` × 60s 滑动窗口，**不按相关单元分桶**（决策 10）。 */
   correlationId: string;
-  /** 判据作用域：数据面 `'request'`、管理面 `'batch'`（**必填**，不设默认 —— 漏传应当是编译错误）。
-   *  没有它，管理面那侧**永远凑不出"第 2 把不同 key"** */
-  scope: 'request' | 'batch';
-  /** 本次请求所用凭据（keyId / accountId）。**同一凭据重复 429 不升级为出口级** —— 判据是"第 2 把不同 key" */
-  subject: string;
+  /** 本次 429 的凭据足迹（v8）。**计数按 `accountId` 去重**：同一账号 5 把 key 全挂 = **1** 个账号；
+   *  `accountId === null`（`src/db/balance.ts` 的 `UNOWNED_KEY`）**贡献 0**，不并入任何桶。
+   *  `keyId` 只作足迹 / 日志，**不进计数**。 */
+  subject: { accountId: string | null; keyId: string };
   /** 上游给的 `Retry-After`（实测上游从不发，§16.7 v1.6.2） */
   retryAfterMs?: number;
 }
@@ -227,6 +242,12 @@ export const permissiveEgressGate: EgressGate;
 > 「把 `distinctKeysFailed429` 从'本客户端请求内'**参数化为'当前作用域内'**」落成一个**显式入参** ——
 > 不显式给，就得靠 `correlationId` 的取值去猜作用域，而那个 id 是字符串、类型上无能为力。
 > 路由者若更愿意用别的表达（两个入口 / 让 id 自带命名空间前缀），**现在提**；放过之后再改就是跨车道返工。
+>
+> **v8 退休（2026-10-07）**：判据改为「`egressId` × 60s 滑动窗口内 ≥3 个不同账号」（决策 10）后，
+> `scope` 的**唯一理由**（把 `distinctKeysFailed429` 参数化为"当前作用域内"）随之消失 —— 判据不按相关单元分桶，
+> 保留它就是一个**没有消费者的字段**，正是本 ADR 反复引用的那条「禁止先加字段、后补生产者」。
+> ⇒ **字段删除**，`correlationId` 保留（ADR-0014 关联 + 证据面）。
+> （反向入口留档：若实现面更愿意留 `scope` 作**纯证据标注**、不进判据，回一句即可，那是改一处注释、不动结构。）
 
 - **同步**（`reserve` 不返回 Promise）：与 `src/gateway/ports.ts` 已写死的原则同源 ——
   "端口签名刻意设计成同步，把异步挡在实现侧"。热路径上一个 async 的闸等于给引擎开了一道
@@ -268,8 +289,9 @@ export function createEgressFetch(gate: EgressGate, inner?: typeof fetch): typeo
 
 两条理由，第二条是硬故障：
 
-1. **归因所需的信息装饰器手上没有。** `observeLimited` 的判据是"**同一相关单元内第 2 把不同 key**
-   吃到 429"，需要 `subject`（哪把 key / 哪个账号）与 `correlationId`（哪一轮 / 哪一批）。装饰器只拿到
+1. **归因所需的信息装饰器手上没有。** `observeLimited` 的判据是"**同一出口 60s 滑动窗口内 ≥3 个不同账号**
+   吃到 429"（决策 10，v8 前的口径是"同一相关单元内第 2 把不同 key"），需要 `subject`（这次 429 是哪把
+   key / 哪个账号）与 `correlationId`（哪一轮 / 哪一批）。装饰器只拿到
    一个 URL；照字面在装饰器里调它，参数是编的 —— 把 key 塞进请求头去凑参数，是把凭据散进更低的层
    （ADR-0006 同纪律，不做）。
 2. **合成的 429 会被内核当成上游证据。** 引擎的 429 分支起（路由者工作树行号 `:438`）先
@@ -279,17 +301,19 @@ export function createEgressFetch(gate: EgressGate, inner?: typeof fetch): typeo
 
 因此归因**只有一份判据、一个调用点，都在闸里**，由调用方喂：
 
-| 消费方 | 谁调 `observeLimited` | `correlationId` / `scope` |
+| 消费方 | 谁调 `observeLimited` | `correlationId`（v8：只作证据关联） |
 |---|---|---|
-| `/v1/*` 数据面 | 引擎 429 分支那处**既有的** `egressKeys429` 位置（原本就在算"同一请求内第几把不同 key"） | ADR-0014 的关联键；引擎内取不到时退化为该次调用作用域 id；`scope: 'request'` |
-| §14 刷新 / 自测 | `balance-refresh.ts` / `balance-selftest.ts` 的循环 | 一轮刷新 = 一个 id；`scope: 'batch'` |
-| §15.2 四个批量端点 | 各自的逐项循环 | 一个批量任务 = 一个 id；`scope: 'batch'` |
+| `/v1/*` 数据面 | 引擎 429 分支那处**既有的** `egressKeys429` 位置（原本就在算"同一请求内第几把不同 key"） | ADR-0014 的关联键；引擎内取不到时退化为该次调用作用域 id |
+| §14 刷新 / 自测 | `balance-refresh.ts` / `balance-selftest.ts` 的循环 | 一轮刷新 = 一个 id |
+| §15.2 四个批量端点 | 各自的逐项循环 | 一个批量任务 = 一个 id |
 
 **连带（PM 2026-10-07 已明文放行，登记在 ADR-0017 补遗 5 第 9 条）**：`classify.ts` 的 `neverEgressLimited`
 与 `egressLimitedOnSecondKey` **两个识别器随之退休**，判据唯一化到闸内，内核不再保留第二份；
-**两处必须改**：① 默认值从 `neverEgressLimited` 换掉；② 判据入参 `distinctKeysFailed429` 从
-"**本客户端请求内**"**参数化为"当前作用域内"**（`'request'` / `'batch'`，即上面的 `scope`）——
-否则管理面那侧根本喂不出这个量。`EgressLimitDetector` 这个缝在 Tier 1.5 落地后不再有第二个消费者
+**两处必须改**：① 默认值从 `neverEgressLimited` 换掉；② 判据入参从 `distinctKeysFailed429`
+（"**本客户端请求内**第几把不同 key"）换成**窗口化的 `distinctAccounts`**
+（决策 10：同一 `egressId` 的 60s 滑动窗口内的不同 `accountId` 个数）——
+v3 那句"**参数化为'当前作用域内'**（`scope`）"**随 `scope` 退休一并作废**：管理面那侧喂不出"作用域"这个量，
+喂得出的是**账号数**。`EgressLimitDetector` 这个缝在 Tier 1.5 落地后不再有第二个消费者
 —— 这一点要写进实现回执，别留成"两个地方都能判、只是默认关着"。
 
 **标记头的第二重作用**：数据面凭它**不换 key**（决策 5 / 决策 6）。本地拒绝落在同一个出口上，
@@ -384,8 +408,8 @@ export type EgressFetchFor = (egressId: string | null, consumer: EgressConsumer)
 | 证据 | 谁发现 | 动作 |
 |---|---|---|
 | 本窗口配额已尽（**主动**，我们自己拒绝的） | `reserve` 返回 `allowed:false` | **合成带标记头的 429 + `Retry-After`（= 到下一枚 token 的时间）；不 `cool()`、不推进阶梯、不发射 §7 帧、不记 key 失败** |
-| 上游回 429，同出口**第 2 把不同 key**（**被动**，`egressLimitedOnSecondKey` 转正） | `observeLimited` 返回 `scope:'egress'` | `cool(egressId, retryAfterMs)`，**不记 key 失败** |
-| 上游回 429，同出口**第 1 把** key | `observeLimited` 返回 `scope:'key'` | 沿用既有路径记该 key 失败（**代价照 §16.7 登记**：受害者 27→1，不是零成本） |
+| 上游回 429，同出口 **60s 滑动窗口内 ≥3 个不同账号**同型失败（**被动**，决策 10） | `observeLimited` 返回 `scope:'egress'` | `cool(egressId, retryAfterMs)` —— **一次命中的全部动作**：阶梯只推**一档**、**不摘除**、**不记 key 失败** |
+| 上游回 429，窗口未达 N（第 1 把 / 同账号多把 / 无主 key） | `observeLimited` 返回 `scope:'key'` | 沿用既有路径记该 key 失败（**代价随 v8 订正**：凑齐 N 之前先行的那几把 key **各记一次**失败 ⇒ 受害者 **27→N−1**，不是 27→1） |
 
 **PM 2026-10-07 裁定的三条语义（照此写）**：
 
@@ -405,6 +429,9 @@ export type EgressFetchFor = (egressId: string | null, consumer: EgressConsumer)
   否则一次 VPS 重启就能把"上游确实在限我们"的证据洗掉，与决策 5 第 1 条（阶梯只由上游证据推进）直接冲突。
 - 合成宜落在**一个读面函数**里，不新造第二套健康语义；节点摘除的粒度是节点、冷却的粒度是出口，
   两者**不是**同一个集合（一个节点可能承运多个出口，反之亦然）。
+- **帧里的 `cooldownUntil` 必须取 `cooldownUntil(egressId)` 的同源值**（与 `EgressVerdict.cooldownUntilMs`
+  同一个读面），**发射侧不得再算一份**（v8，路由者）—— 否则帧和裁决会各说各话，而这两处正是画师
+  与引擎各读一边的对象。
 
 **为什么不能照 v1 原案"拒绝即 `cool()`"实现**（保留此段是为了让后面的人知道那条路具体坏在哪一步）：
 `cool()` 每次调用都 `consecutive += 1`、**每次各推一档**；阶梯 `[0, 1m, 5m, 15m, 30m]`、429 基础冷却 60s
@@ -423,6 +450,9 @@ export type EgressFetchFor = (egressId: string | null, consumer: EgressConsumer)
 - **连带**：检测器转正后，**上游确认**的出口级 429 会真的置起冷却 ⇒ §7 的 `egress_cooldown` 帧
   **从此开始发射**，§16.7 v1.4.9 的「本期不发射 / 前端不得接线」随之失效（见影响表）。
   **注意口径**：帧的成因只有"上游确认"一种，**本地拒绝不发射帧**。
+  **v8 补**：起点是**判据真正启用**（shadow 校准完、判定打开）那一刻，**不是**放行笔一落 ——
+  shadow 期间 `wouldFire` **只记不动**（不 `cool`、不发帧），放行笔只让形状到位。
+  ⇒ 画师侧接线的前置因此是"**判据启用**"，不是"放行"，别把放行当成帧会来的信号。
 
 ## 决策 6：拿不到配额时，各消费方怎么办（**不等**是默认，等待是例外）
 
@@ -530,9 +560,22 @@ export type EgressFetchFor = (egressId: string | null, consumer: EgressConsumer)
 **第二套健康语义**（决策 5 已裁定"读面合并 ≠ 状态机合并"，此处同一把刀）。⇒ **库里的 `retired` 只表达
 人工报废这一件事**；"节点活不活"永远不进表。
 
-**(5) 池空是显式终态，不回落宿主直连。** 池中**选不出任何可用出口**（全退役 / 全冷却 / 无预算）时：
+**(5) 池空是显式终态，不回落宿主直连。** 池中**选不出任何可用出口**（**只算"候选集合为空"**：
+未绑出口 / 全部 `retired` / 全部在冷却 —— **不含"无预算"**，理由见本节第三条）时：
 - `/v1/*` 回 **`503 NO_AVAILABLE_EGRESS`**（`GATEWAY_ERROR_CODES` **10 → 11**），**不得**静默回落宿主出口。
   回落破"独享"前提与上游 IP 白名单，而且**没有人看得见** —— 是"静默故障"的教科书形状。
+- **两个成因靠 `Retry-After` 的「有无」分开，不靠码名归因**（v8，路由者）：`Retry-After`
+  **当且仅当存在"只因冷却而不可用"的出口**时带上，值 = 这些出口 `cooldownUntil` 的**最小值 − now**；
+  候选集合**为空**（未绑出口 / 全部 `retired`）时**不带** —— 那种情况下重试**永远没用**，
+  给一个 `Retry-After` 是假承诺，还会把"该去改配置"误导成"等一会儿就好"。
+- **"无预算"不进 503**（v8 订正 v7 列的三种成因）：预算耗尽时出口**存在、也没在冷却**，只是这一枚 token
+  没拿到 ⇒ 按决策 4 / 6 走**本地 `429 RATE_LIMITED` + `Retry-After`（到下一枚 token）**。
+  同一个事实拆成 429 与 503 两枚码，等于让画师按码猜"该等几秒还是该改配置"；而
+  `503 server_error` 这个分型对"几秒后就能重试"的场景本身就是**错的语义**。
+- **一条实现约束（选择器侧）**：若要"先滤掉无额度的出口、再在剩下的里按延迟选"，
+  **不得用 `reserve()` 去试** —— `reserve` 有副作用：扣掉一枚 token，而这次预留**无人认领**
+  （等于替一个没用上的出口白扣一份，是决策 8 第 1 点那笔账目事故的小号版）。要么不做这一步过滤、
+  把预算判断留给选中后的那一次 `reserve`，要么走只读探针 —— **新增端口方法是跨车道形状，先回本文确认**。
 - 码名**不叫** `EGRESS_POOL_EXHAUSTED`：码值描述"选不出出口"这个**事实**，不描述**归因**（谁限的、谁的责任）。
   这与 §16.7 自己那条「不越证据」是同一把刀，也与补遗 3 那条码名争议同一个理由。
 - **§10 那句「不新增错误码、不新增 HTTP 状态」不冲突**，边界要写死：那句管的是**出口被上游限流**
@@ -573,29 +616,109 @@ CREATE TABLE IF NOT EXISTS egress_proxies (
 
 2. 契约 §16.7：`egress_proxies` 列清单（`enabled` → `status`/`retired_reason`/`retired_at`，`url` 标唯一）
    + 新增「v1.7.0 裁定：退役是状态不是删除」一节（上述 6 条）。
-3. 契约 §10：新增行 `NO_AVAILABLE_EGRESS | 503 | server_error | 候选为空：绑定的出口全部 retired / 冷却中 /
-   无预算，**不回落宿主直连**` + 那条与「不新增错误码」的边界说明。
+3. 契约 §10：新增行 `NO_AVAILABLE_EGRESS | 503 | server_error | 候选为空：绑定的出口全部 retired /
+   冷却中，**不回落宿主直连**；全因冷却时带 `Retry-After = min(cooldownUntil) − now`，候选集合为空时不带`
+   + 那条与「不新增错误码」的边界说明 + **「无预算走 429、不进本码」**一句（v8 订正）。
 4. 契约 §0.4：新增行 `EGRESS_HAS_ACCOUNTS | 409 | 退役仍被账号引用的出口，details: {accountCount}`（**无 force**）。
    —— 3 与 4 落地时，`src/api/balance-sync.spec.ts` 的两行长度断言（`ERROR_CODES` **16**、
    `GATEWAY_ERROR_CODES` **10**）**必须同笔改**：那两行是**契约侧钉码表长度**的快照，漏改即红。
 
-**未决一格（交路由者，本 ADR 不替其定）**：判"出口被限"的判据从"同一出口第 2 把**不同 key** 也 429"
-升级为"同一出口**短窗口内 ≥N 把不同账号的 key** 同型失败"（同账号内全挂更可能是**账号额度尽**，
-不算出口级）。要定两个数：**N（2 / 3）与窗口长度**；且 `EgressLimitedInput.subject` 需**带账号身份**
-（决策 3 现写 `keyId / accountId`，实现喂的是 `keyId`）。在 N 与窗口定死前：决策 3 的形状**不动**、
-裁定 ①「识别器默认关闭」**不变**、§7 帧**仍不发射**。
+**未决一格已结清（v8）**：判"出口被限"的判据从"同一出口第 2 把**不同 key** 也 429"升级为
+"同一出口 **60s 滑动窗口内 ≥3 个不同账号**同型失败"。路由者 2026-10-07 已交回**两个数**
+（N=3 / 窗口 60s **滑动**）与 `subject` 形状（带账号身份）⇒ **全部落进决策 10**，本文不再有未决项。
+裁定 ①「识别器默认关闭」**不变** —— 但"关闭"现在的形态是 **shadow 观察模式**（只记不动），
+§7 帧仍不发射。
+
+## 决策 10：出口级归因判据 = 「同出口 60s 滑动窗口内 ≥3 个不同账号同型 429」（v8，路由者交回）
+
+**触发**：v7 把这格的**两个数**交回路由者（"我不猜，按真实失败率"）。路由者 2026-10-07 交回 N、窗口、
+`subject` 形状与标定方法。一句话形状：**同一出口上，60s 滑动窗口内出现 ≥N 个不同账号的 429 ⇒ 归因出口**。
+（同账号内全挂更可能是**账号额度尽**，不算 —— 这正是"跨账号相关性"能区分、而裸 429 不能的地方。）
+
+**(1) 两个数：N = 3、窗口 = 60s 滑动。**
+
+- **滑动，不是翻滚**：两枚事件隔 1ms 落在翻滚边界两侧会被算成 0 次，**池越忙漏得越多** ——
+  漏报的代价（继续烧好 key）比误报贵。
+- **N = 3 个不同账号**（不是 3 把 key）：N=2 是数学下限，但**去重到账号之后**剩下唯一的误报源是**巧合**
+  （N 个账号各自撞各自的限额恰好落进同一窗口），池子忙时 60s 内的巧合不罕见 ⇒ 取保守起步值 3。
+- **窗口按出口、不按消费方分桶**：数据面与管理面共用同一个窗口。理由：上游按**来源 IP** 限流，
+  **本来就不区分**这两个 429 是谁发的；分桶只是把同一张出口账**劈成两张更小的样本**
+  （池小的那一侧可能长期凑不齐 N，判据在它上面等于不存在）。
+  代价：一轮管理面批量**可以**冷掉数据面。这是判据的固有代价，登记在「已知缺口」。
+- **N 是初值，不是结论**：标定方法见第 (6) 条，**校准回来只改数、不改结构**。
+
+**(2) 计数的键是 `accountId`，不是 `keyId`。**
+
+- `subject: { accountId: string | null; keyId: string }`（决策 3，v8 改）。**计数按 `accountId` 去重**：
+  同一账号 5 把 key 全挂 = **1** 个账号；`keyId` 只作足迹 / 日志。
+- `accountId === null`（`UNOWNED_KEY`）**贡献 0，不并入任何桶**：没有归属就没有"跨账号"这个命题；
+  把无主 key 算成独立账号，**两把无主 key 就能误退一个出口**。
+- **不现查**：`accountId` 与 `egressId` **由同一次 join 带出** —— 决策 4c 那条链
+  （`upstream_keys k → supplier_account_keys sak → supplier_accounts`）**已经穿过 `supplier_accounts`**，
+  `sak.account_id` 只是没被 `select` ⇒ **零额外查询、零热路径开销**。放到报告点现查 = 热路径上多一次 DB 往返。
+- **谓词逐字复用 `UNOWNED_KEY` 的形状**（`src/db/balance.ts:112`：`pooled_key_id = k.id AND account_id IS NOT NULL`）。
+  今天 `supplier_account_keys.account_id` 是 `NOT NULL`，那句看着冗余；要求的是**两处判据同形**，
+  以便该列将来可空时不劈叉 —— 钱按它算一次，出口也按它算一次。
+- `accountId` 与 `egressId` 走**同一条决议**（决策 4c 的"存在即可 + 确定性单值" + 部分唯一索引）
+  ⇒ 一把 key 不可能"余额算在这个账号、出口算在另一个账号"。
+
+**(3) 数据结构：每出口一张 `Map<accountId, { lastTs, types }>`，不是事件列表。**
+
+- 判据只问"窗口内**有几个不同账号**"⇒ 不必为每个 429 存一条事件：`Map` + 每次 `observeLimited` 时
+  惰性剪掉 `lastTs < now − windowMs` 的条目即可，`Map.size` 就是 `distinctAccounts`。
+  **内存上界 = 该出口上的账号数**，与 429 事件数无关 —— 否则一次 429 风暴（触发条件恰恰是风暴）
+  会把内存打成事件条数。
+- `types` 是**诊断**字段（shadow 用），**不进判据**：本期 `observeLimited` **只在 429 路径被调用**，
+  事件天然同型；把"同型"实现成一个滤波器，只会造出一个恒真的条件。
+
+**(4) 首次命中 ≠ 摘除。**
+
+- 首次命中只给 **`scope: 'egress'`** 裁决（**当场停止烧 key**）并 `cool()` **一次** = 阶梯**第一档**
+  （基数 60s），**不摘除**。要不要最终退出候选，由**后续窗口**把阶梯推向顶决定 —— 复用 `egress.ts`
+  既有阶梯，**不新造机制、不新拍阈值**。
+- **"推到顶"不落成一个新状态**：阶梯顶 ≈ 30min 冷却，而选择器**第一条就滤掉冷却中的出口**
+  ⇒ 出口已经天然退出候选，不需要在池健康机上再加一个"已摘除"位（那是决策 9(4) 明令禁止的
+  第二套健康语义，落库后还会与回池滞回对不上）。**出口"在不在候选里"是过滤器的并集**：
+  `retired` ∪ `冷却中` ∪ 选中后那一次 `reserve` 的预算判断；池健康机只管**节点连通性**（探活）。
+- **代价是设计的一部分**：误报的代价从"误退出口"降到"错了一次短冷却"，而漏报（继续烧好 key）
+  仍在第一时间被掐住 —— 这正是 N 可以取保守起步值的前提。
+- 裁决为 `egress` 后**该 key 不记失败**；同一次请求要不要继续轮换候选仍按既有选池走
+  （刚冷掉的出口会被过滤器滤掉 ⇒ 单出口下不会在同一条出口上再撞一遍，池化下换出口才有意义）。
+
+**(5) 排除面：本地 reject 在构造上不进观察面，shadow 也必须同源。**
+
+- 装饰器**只** `reserve`、**不** `observeLimited`（决策 4a）⇒ 我们自己合成的 429 **压根不进观察面**。
+  不为它开"排除"分支：**一个分支就是一个会被漏掉的地方**。
+- **shadow 计数必须与判据同源**（同一处 `observeLimited`），**不得旁路第二个计数器** ——
+  旁路等于让一个被打空预算的出口，拿**自己拒出来的** N 张脸判成"被上游限"，然后摘掉自己：
+  决策 8 那个自伤最直接的**闭合成环**形态。
+- **账号数不足 ⇒ 判据结构上不可能触发**：单账号出口（或全无主 key 的出口）上"跨账号相关性"这个
+  **前提**不成立。这不是 bug，但必须承认；shadow 里**单独记 `insufficientAccounts`**、不混进"未命中"——
+  免得以后拿"判据没响"当成"出口没问题"。
+
+**(6) 标定 = shadow 观察模式（判据默认关，"关"的形态是只记不动）。**
+
+- 每窗口输出 `{ egressId, distinctAccounts, types, wouldFire, insufficientAccounts }`，
+  **不 `cool`、不摘除、不发射 §7 帧**。这是 v3 裁定 ① 的延续，不是死代码。
+- **sustained / ambiguous**：命中后**跨过一个完整窗口**（`now − lastFireAt ≥ windowMs`）再次命中 ⇒ 记
+  **sustained**（真问题）；孤立命中记 **ambiguous**（多为巧合）。取 **ambiguous 占比足够低的最小 N**。
+- 校准回来**只改数、不改结构**（§16.7 原文口径，与决策 8 的 `capacity` 回填同规矩）。
+- 观察模式**不改变缺省行为**：`permissiveEgressGate` 仍是恒放行 / 恒 `key`（决策 7），
+  shadow 输出只是日志 —— **回执里不得写成"判据已生效"**。
+
+**(7) 验证面**：验证清单第 19 / 20 条（判据的区分力与 shadow 的同源性）。
 
 ## 影响
 
 | 落点 | 车道 | 内容 |
 |---|---|---|
-| `src/egress/`（新目录：`port.ts` + `fetch-gate.ts`） | 管家 | 端口、`egressIdOfUrl`（唯一归一化，**解析失败 → `null` 且放行**）、缺省闸、fetch 装饰器（含 `x-sub2api-egress-local: 1` 常量）。只依赖标准库 |
-| `src/gateway/egress.ts` | 路由者 | 令牌桶 + 冷却态**同一个实例**；`egressHostOf` **退化为 `egressIdOfUrl` 的薄封装或删除**；`egressLimitedOnSecondKey` 的判据**转正进闸内**（默认值替换 + `distinctKeysFailed429` 按 `scope` 参数化）；`snapshot()` 签名保持不动 |
-| `src/gateway/classify.ts` | 路由者 | `neverEgressLimited` / `egressLimitedOnSecondKey` **两个识别器退休**，`EgressLimitDetector` 缝随之关闭；**不得留成"两处都能判、只是默认关着"** |
-| `src/gateway/engine.ts` | 路由者 | ① 429 分支对**带标记头的本地拒绝**新增分支：不进 `egressKeys429`、不 `reportFailure`、终止候选轮换；② **`attempts` 减回 1**（决策 4b，终态 429 不是 502）；③ 该处既有的"同一请求内第几把不同 key"改为喂 `observeLimited`（`scope:'request'`） |
+| `src/egress/`（新目录：`port.ts` + `fetch-gate.ts`） | 管家 | 端口（**v8：`subject: {accountId, keyId}`，`scope` 退休**）、`egressIdOfUrl`（唯一归一化，**解析失败 → `null` 且放行**）、缺省闸、fetch 装饰器（含 `x-sub2api-egress-local: 1` 常量）。只依赖标准库 |
+| `src/gateway/egress.ts` | 路由者 | 令牌桶 + 冷却态**同一个实例**；`egressHostOf` **退化为 `egressIdOfUrl` 的薄封装或删除**；`egressLimitedOnSecondKey` 的判据**转正进闸内**（默认值替换 + 判据入参改**窗口化 `distinctAccounts`**）；**v8 新增**：每出口 60s 滑动窗口计数器（`Map<accountId, {lastTs, types}>`，惰性剪枝）+ **shadow 观察模式（默认关、只记不动）**；`snapshot()` 签名保持不动 |
+| `src/gateway/classify.ts` | 路由者 | `neverEgressLimited` / `egressLimitedOnSecondKey` **两个识别器退休**，`EgressLimitDetector` 缝随之关闭；判据入参由 `distinctKeysFailed429` 换成**窗口化的 `distinctAccounts`**（v8，决策 10）；**不得留成"两处都能判、只是默认关着"** |
+| `src/gateway/engine.ts` | 路由者 | ① 429 分支对**带标记头的本地拒绝**新增分支：不进 `egressKeys429`、不 `reportFailure`、终止候选轮换；② **`attempts` 减回 1**（决策 4b，终态 429 不是 502）；③ 该处既有的"同一请求内第几把不同 key"改为喂 `observeLimited`（**v8：`subject: {accountId, keyId}`，`scope` 退休**） |
 | `src/api/app.ts`（`ApiContext.egress` + `BuildAppOptions.egress`） | 管家 | 注入缝，缺省 `permissiveEgressGate`（形状同 `assistant`） |
-| `src/api/services/supplier-accounts.ts` / `balance-refresh.ts` / `balance-selftest.ts` / `balance-query.ts` / `model-sync.ts` / `src/supplier/tierflow.ts` / `src/balance/template.ts` | 管家 | `fetchImpl` **兜底全拆、改必填注入**（8 处见决策 4c；只改外层等于没改）；各循环喂 `observeLimited`（`scope:'batch'`）与 `observeSuccess` |
-| `src/wiring/store.ts` / `src/wiring/secrets.ts` / `src/db/repo/keys.ts` | 管家 | 出口**贴着 key 走**：`KEYS_SQL` 快照 join 台账带出 `egress_id` → `SecretRow` → `UpstreamTarget.egressId`；`update()` 的 skip 判据**不得**让出口变更被跳过（决策 4c 末条） |
+| `src/api/services/supplier-accounts.ts` / `balance-refresh.ts` / `balance-selftest.ts` / `balance-query.ts` / `model-sync.ts` / `src/supplier/tierflow.ts` / `src/balance/template.ts` | 管家 | `fetchImpl` **兜底全拆、改必填注入**（8 处见决策 4c；只改外层等于没改）；各循环喂 `observeLimited`（**v8：`subject.accountId` 由 key 的台账归属带出**）与 `observeSuccess` |
+| `src/wiring/store.ts` / `src/wiring/secrets.ts` / `src/db/repo/keys.ts` | 管家 | 出口**贴着 key 走**：`KEYS_SQL` 快照 join 台账带出 `egress_id` **与 `sak.account_id`**（v8，同一次 join、零额外查询）→ `SecretRow` → `UpstreamTarget.egressId` / `subject.accountId`；`update()` 的 skip 判据**不得**让出口变更被跳过（决策 4c 末条） |
 | `src/db/schema.ts` | 管家 | `supplier_account_keys(pooled_key_id)` **部分唯一索引**（`WHERE pooled_key_id IS NOT NULL`），幂等守卫同 `hasColumn()`；fan-out 自检恒 0 |
 | `src/server.ts` | 接线 | **造一次、注入两处**（`buildApp` + 网关装配）；一条 spec 走生产装配路径断言两侧拿到**同一个**实例 |
 | `docs/api-contract.md` §16.7 / §15.5 / §7 | 管家 | 按 ADR-0017 **补遗 5** 的九条落正文，并随契约 **v1.7.0** 同批 |
@@ -615,8 +738,10 @@ CREATE TABLE IF NOT EXISTS egress_proxies (
 6. **保留额度**（决策 8）：`剩余 <= reserveForData` 时 `reserve(id, 'management')` 被拒、`reserve(id, 'data')` 仍放行；
    两侧消费之和 ≤ `capacity`。
 7. **归因判据只此一份**（决策 4a）：`classify.ts` 两个识别器退休后，全仓检测器只剩一个消费者（闸内）。
-8. **检测器**：同 `correlationId` 内第 1 把 key 429 → `scope:'key'`（仍记 key 失败）；第 2 把不同 key 429 →
-   `scope:'egress'`（**不记 key 失败**）；**同一把 key 重复 429 不升级**；管理面按 `scope:'batch'` 也能凑齐这个量。
+8. **检测器**（**v8 按决策 10 重写**）：同一出口 60s 窗口内 —— 第 1 / 2 个不同账号 429 ⇒ `scope:'key'`
+   （**各记一次 key 失败**，这是"受害者 27→N−1"的落点）；**第 3 个不同账号** 429 ⇒ `scope:'egress'`
+   （该 key **不记失败**、出口进冷却第一档）；**同一账号的 5 把 key 全 429 恒为 `scope:'key'`**、
+   出口`consecutive` 不动 —— 这是"账号额度尽"与"出口被限"的区分力，也正是这条判据存在的理由。
 9. **自伤回归**（决策 5）：管理面连撞 47 次拒绝 ⇒ 出口冷却**0 次写入**（`consecutive` / `until` 逐字节不变）、
    **§7 帧 0 次发射**（`snapshot()` 逐字不变）。
 10. **终态形状**（决策 4b，**验收必须断言"不是 502"** —— 只断言"零上游调用"会按 502 通过）：桶拒绝一次 ⇒
@@ -643,11 +768,32 @@ CREATE TABLE IF NOT EXISTS egress_proxies (
     ② `inner` fetch（真实网络）**零调用** —— 断言"没有回落到宿主出口"这件事只能在 fetch 层证；
     ③ `egress_id IS NULL` 的账号**照常**走宿主出口（这条是反向断言：别把配置事实当回落一起拦掉）；
     ④ 管理面退役一个仍被引用的出口 ⇒ **`409 EGRESS_HAS_ACCOUNTS`**、`details.accountCount` 准确、
-    **零副作用**（出口未退役、账号未改动）、且**不写成功审计**（同 §15.2 `ACCOUNT_HAS_KEYS` 的纪律）。
+    **零副作用**（出口未退役、账号未改动）、且**不写成功审计**（同 §15.2 `ACCOUNT_HAS_KEYS` 的纪律）；
+    ⑤ **`Retry-After` 的有无**（v8）：全池只因冷却而不可用 ⇒ **带**且值 = `min(cooldownUntil) − now`；
+    未绑出口 / 全部 `retired` ⇒ **不带**；**无预算是 429 不是 503**（同一场景断言码值分岔）。
+19. **判据窗口化**（决策 10，**断言的是区分力与"不漏"**）：① **滑动而非翻滚** —— 用假时钟把两枚事件放在
+    翻滚边界两侧（相隔 1ms）仍算同窗命中（翻滚实现会回 0 次，正是要防的漏报）；② `accountId === null`
+    的 key 反复 429 **恒不推进计数**（两把无主 key 不得凑出 1 个账号）；③ 账号数不足（单账号出口）⇒
+    判据**结构上不触发**，shadow 记 `insufficientAccounts` 而**不是**记成"未命中"；
+    ④ 剪枝后计数器规模不随事件数增长（429 风暴下内存上界 = 该出口上的账号数）。
+20. **首次命中只第一档 + shadow 同源**（决策 10）：① 首次命中 ⇒ `cool()` 只推**一档**（60s 基数、
+    `consecutive === 1`）、**不摘除**（池健康机的节点状态逐字节不变）；② 观察模式下**不 `cool`、
+    不发 §7 帧、`snapshot()` 逐字不变**，但每窗口产出一条判决记录，且 `wouldFire` 与真实判决**同源**
+    （同一处 `observeLimited`，无第二个计数器）；③ **本地 reject 零进入观察面**：合成 429 反复打满窗口 ⇒
+    窗口内 `distinctAccounts` 恒 0、判据**不会**据此摘掉自己（与第 9 条自伤回归同一条断言的两个面）。
 
 ## 已知缺口 / 未决
 
 - **数值未标定**（窗口长度、是否分档、5–6 是否为干净 IP 的产能地板）—— 占位见决策 8；标定输入仍是 §16.7 登记的第 3 样。
+  **N 与窗口同样是初值**（决策 10 第 (1) 条）：N=3 / 60s 滑动是**保守起步值**，按 shadow 观察模式的
+  ambiguous / sustained 占比回填，**只改数、不改结构**。
+- **判据的两个固有盲面**（v8，决策 10 的两条代价，写在这里免得被当成"没发生过"）：
+  ① **无主 key 在出口上不受出口级保护** —— `accountId === null` 贡献 0，若某个出口上只有无主 key，
+     "跨账号相关性"这个前提不成立、判据恒不触发，这些 key 只受 key 级处置（决策 5 第 3 行）。
+  ② **窗口按出口、不按消费方分桶** ⇒ 一轮管理面批量**可以**冷掉数据面（首次命中 = 一档 60s 基数）。
+     分桶的代价更贵（把同一张出口账劈成两张小样本，池小的那侧可能长期凑不齐 N），故**不修**，只登记。
+- **`scope` 字段退休**（v8）：v3 为"把计数参数化为当前作用域内"而加，窗口化判据不需要它 ⇒ 删除。
+  留档于此，免得后来人把"曾经有过 `scope`"重新发明一遍。
 - **同一出口承运多个上游 ⇒ 一份额度**（v6，决策 8 标定口径 ③ 的另一面）：桶键不含上游维度，
   跨上游共用**偏保守**（不会超发），但"某个上游够不够"这个问题在这套账上**答不出来** ——
   要按上游分别看，得靠标定与 §7 帧之外的观测，别从 `capacity` 反推。

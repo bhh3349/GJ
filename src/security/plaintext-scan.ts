@@ -66,6 +66,9 @@ const TEXT_EXT: ReadonlySet<string> = new Set([
   '.css',
   '.txt',
   '.sh',
+  // 出口节点清单（deploy/vps-egress/nodes.example.tsv）：**设计上就是要放 `user:pass@host:port` 的文件**。
+  // 不把它纳入扫描面，等于「仓库里唯一注定含凭据的文件类型」正好是扫描器从不看的那一类。
+  '.tsv',
 ]);
 
 const MAX_BYTES = 2 * 1024 * 1024;

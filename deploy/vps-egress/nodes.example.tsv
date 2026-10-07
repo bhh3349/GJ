@@ -1,0 +1,12 @@
+# 出口池节点清单 —— 示例（TSV，字段之间是**制表符**，不是空格）
+#
+# 用法：cp nodes.example.tsv /etc/sub2api/egress-nodes.tsv 再填真值，权限 600，**不入仓库**。
+# 列：name <TAB> proxy_url <TAB> expected_ip(可空) <TAB> region(可空)
+#
+# 每台 VPS 跑完 install.sh 后，把 SUMMARY 里那条 URL 抄成一行。
+# 口令一律用占位符写在仓库里；真口令只存在于 /etc/sub2api/egress-nodes.tsv 与后台出口条目里。
+# expected_ip 填了就做回显校验：curl 从该出口出去回显的 IP 必须等于它，否则报 ip_mismatch。
+#
+# 下面两个 IP 属 RFC 5737 文档专用段（203.0.113.0/24），不是真实主机，直接照抄连不上是正常的。
+hk-1	http://sub2api:CHANGE_ME@203.0.113.10:8080	203.0.113.10	hk
+hk-2	http://sub2api:CHANGE_ME@203.0.113.11:8080	203.0.113.11	hk

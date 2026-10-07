@@ -23,6 +23,10 @@ const ID_PREFIX = {
   // 台账行（§15.1 `supplier_account_keys`）。它**不出现在任何响应体里** ——
   // §15 对外只见掩码，归属关系靠 `pooled_key_id` 表达。前缀在这里纯为日志可读性。
   supplierAccountKey: 'sak',
+  // 套餐行（§15.1 `supplier_account_subscriptions`）。与台账行同一条理由：
+  // 不出响应体，前缀只为日志可读。**不共用 `sak_`** —— 两种行会同时出现在
+  // 同一个账号的写入日志里，共用前缀会让"这一行到底是 key 还是套餐"要靠翻 SQL 才分得清。
+  supplierSubscription: 'sas',
 } as const;
 
 export type IdKind = keyof typeof ID_PREFIX;

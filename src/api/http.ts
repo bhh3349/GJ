@@ -118,6 +118,24 @@ export function auditWrite(
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
+/**
+ * "谁、从哪个 IP 做的" —— **在这一刻**取下来，供**异步**收尾写审计用。
+ *
+ * 为什么要有它：批量端点（§15.2 的 import / refresh / keys / keys/sync）回 `202` 时
+ * 才知道任务号，而"干了多少、成了几行"要等任务跑完（27 个号 ≈ 1 分钟）才有 ——
+ * 那时 `req` 早过了它的一生。把 `auditWrite(db, req, …)` 的调用点推迟到那一刻，
+ * 读的是响应发出之后的请求对象；把两个字段先取下来，语义才确定。
+ *
+ * 这也是 `auditWrite` 本身**不改**的原因：它服务的是同步 handler（绝大多数），
+ * 异步收尾是少数派，给多数派加一个 `req | captured` 联合类型去迁就它不划算。
+ */
+export function captureAuditActor(
+  req: FastifyRequest,
+  config: AppConfig,
+): { actor: string; ip: string } {
+  return { actor: actorOf(req), ip: clientIp(req, config.trustProxy) };
+}
+
 export function isWriteMethod(method: string): boolean {
   return !SAFE_METHODS.has(method.toUpperCase());
 }

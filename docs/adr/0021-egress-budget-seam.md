@@ -1,6 +1,25 @@
 # 21. 出口（IP）预算：跨车道共享令牌桶与统一注入缝
 
-- 状态：**草案 v9（待 PM 过目；PM 四条裁定 + 路由者终版对账 + Bo 的出口 IP / 代理池约束 + Bo 的出口报废口径 + 路由者交回的判据两个数 + 路由者的 `scope` 三条回执已落，放行后生效）** —— 放行前不改契约正文、不改代码
+- 状态：**草案 v10（待 PM 过目；PM 四条裁定 + 路由者终版对账 + Bo 的出口 IP / 代理池约束 + Bo 的出口报废口径 + 路由者交回的判据两个数 + 路由者的 `scope` 三条回执 + 路由者的「`Retry-After` 码值限定 / `observeLimited` 全域化」两条回执已落，放行后生效）** —— 放行前不改契约正文、不改代码
+  - **v10 变更（2026-10-07，路由者「429/503 终态形状 + shadow 可区分性」两条回执）**：
+    1. **`Retry-After` 的不变量钉在码值上，不钉在状态码上**（路由者订正 —— 那是 v9 自己新开的洞）：
+       v9 那句无条件写的「`503` ⟺ 永不出现」在 §10 **全表**上不成立 —— **§10 已有一枚可重试的 503**：
+       `NO_AVAILABLE_KEY`（`docs/api-contract.md:1083`），成因之一（全候选并发打满，`:1087`）**转瞬即逝**，
+       而 v1.2.1 / §13.4（`:1403`）把「"请稍后重试"必须同时覆盖 `429 RATE_LIMITED` 与 `503 NO_AVAILABLE_KEY`」写死。
+       照"503 ⇒ 只能改配置、拿不到 `Retry-After` ⇒ 等待无效"实现，画师会把**并发打满误判成配置故障**，
+       正好撞掉 v1.2.1 那条硬要求。
+       ⇒ 不变量**限定到本决策产出的两枚终态**，写成码值句：
+       **「`503 NO_AVAILABLE_EGRESS` 永不带 `Retry-After`，且是 §10 里唯一"只能改配置"的 503」**
+       ＋ **「出口面 `429 RATE_LIMITED` 恒带」**；⟸ 那半边**引用既有规则、不新造等价表述**
+       （§10 补遗 v1.0.4 `:15` ＋ §10 正文 `:1088`「**429 一律带 `Retry-After`**」）。
+       （决策 9(5) / 落点清单第 3 条 / 影响表 / 验证第 18 条同批改。）
+    2. **`observeLimited` 是全域函数（total）**：任何分支都**不返回 `undefined`、不抛** ——
+       内部异常**就地降级为 `attribution:'key'`**，并在 shadow 记录里打 **`degraded`**。
+       理由不是防御式编程，是**标定本身**：**"判据开着但每次都炸"与"开着且什么都没发现"必须在 shadow
+       输出里可区分**，否则 N 会标定在一个**已经死掉的判据**上 —— 与「缺省不是证据」同一把刀。
+       **"默认关"的表达式同理**：默认关 = **恒回 `'key'` 且照常产出 shadow 记录**，**不是"不调用"** ——
+       "不调用"会让"影子没响"同时意味着**未接线 / 判据没发现 / 判据炸了**三件不同的事。
+       （决策 3 端口注释与注记 / 决策 10 第 (6) 条 / 影响表 / 验证第 20 条同批改。）
   - **v9 变更（2026-10-07，路由者「`scope` 默认退休」三条回执）**：
     1. **判决侧的 `scope` 不再叫 `scope`**：`EgressVerdict.scope: 'key' | 'egress'` → **`attribution: 'key' | 'egress'`**。
        两处同名不同物**分开处理**：入参 `EgressLimitedInput.scope` **删除**（无消费者，v8）；
@@ -12,6 +31,8 @@
     3. **`Retry-After` 判据泛化**（路由者选项 1，替掉 v8 的"只因冷却"）：**"该不可用态带确定性恢复时刻" ⇒ 带** ——
        冷却 → `min(cooldownUntil) − now`、预算耗尽 → 到下一枚 token；**未绑出口 / 全部 `retired` ⇒ 不带**（重试永远没用）。
        连带把「**全部在冷却**」从 503 挪到 **429**，于是两个信号不再打架：**有 `Retry-After` ⟺ 429；503 ⟺ 永不带**（决策 9(5)）。
+       （**v10 订正**：后半句"503 ⟺ 永不带"是**状态码级**断言，在 §10 全表上**不成立** ——
+       `NO_AVAILABLE_KEY` 就是一枚可重试 503；不变量已按 v10 改为**码值级**，见上。）
     4. **选择器口径定案**（路由者）：**只滤冷却、不滤预算**，本轮**不做只读探针**；
        预算留到选中之后那**一次** `reserve()` 按 429 处置（决策 9(5) 末条）。
   - **v8 变更（2026-10-07，路由者交回判据两个数 + `subject` 形状）**：
@@ -207,7 +228,10 @@ export interface EgressGate {
    */
   reserve(egressId: string, consumer: EgressConsumer): EgressReservation;
   /** 收到 429 时报告，拿回归因结论。**同一 `egressId` 的 60s 滑动窗口内第 N 个不同账号 ⇒ 出口级**
-   *  （N=3，决策 10；窗口按出口、不按消费方分桶）。`accountId` 为 `null` 的事件贡献 0。 */
+   *  （N=3，决策 10；窗口按出口、不按消费方分桶）。`accountId` 为 `null` 的事件贡献 0。
+   *  **v10 全域（total）**：任何分支都**不返回 `undefined`、不抛** —— 内部异常**就地降级**为
+   *  `attribution:'key'` 并在 shadow 记录里打 `degraded`（"判据炸了"必须与"判据什么都没发现"在
+   *  shadow 里可区分，否则 N 会标定在一个死掉的判据上）。 */
   observeLimited(input: EgressLimitedInput): EgressVerdict;
   /**
    * 出口**真的答了**（仅上游证据）→ 清连续计数、退出升档阶梯。与内核既有 `noteSuccess()` 同义。
@@ -251,7 +275,9 @@ export type EgressVerdict = {
 };
 
 /** 缺省闸：`reserve` 恒放行、`observeLimited` 恒回 `attribution:'key'`、`observeSuccess` 空操作。
- *  **逐字节同现状**（决策 7）。 */
+ *  **逐字节同现状**（决策 7）。
+ *  **v10**：「恒回 `'key'`」**不等于"不调用"** —— 缺省闸照常产出 shadow 记录（`degraded: false`），
+ *  否则"影子没响"会同时意味着"未接线""判据没发现""判据炸了"三件不同的事（决策 10 第 (6) 条）。 */
 export const permissiveEgressGate: EgressGate;
 ```
 
@@ -271,6 +297,14 @@ export const permissiveEgressGate: EgressGate;
 > **不是恒值字段**，而且它是 `observeLimited` 的**全部返回值**：删掉它，调用方就无从判断"这次该不该记 key 失败"。
 > ⇒ v9 的处理是**改名 `attribution`**（让端口上不再有第二个叫 `scope` 的东西），**不是删除**。
 > 两处一起读成"退休"，就会把一个还在用的返回值删掉。
+>
+> **v10 全域化（2026-10-07，路由者「阴影里必须能区分'炸了'与'没发现'」）**：`observeLimited` 是**全域函数** ——
+> **任何分支都不返回 `undefined`、不抛**；**内部异常就地降级**为 `attribution:'key'`，并在 shadow 记录里打
+> **`degraded`**。"判据开着但每次都炸"与"开着且什么都没发现"必须在 shadow 输出里**可区分**，否则标定会把
+> N 建在一个**已经死掉的判据**上 —— 与「缺省不是证据」是同一把刀。缺省闸那句"恒回 `'key'`"同理：
+> **默认关 = 恒回 `'key'` 且照常产出 shadow 记录，不是"不调用"**。
+> 这**不改变**本 ADR 既有的"本轮不新增端口方法"纪律（决策 9(5) 末条）—— 全域化是**既有方法的语义收紧**：
+> 不加方法、不加字段、不改签名。
 
 - **同步**（`reserve` 不返回 Promise）：与 `src/gateway/ports.ts` 已写死的原则同源 ——
   "端口签名刻意设计成同步，把异步挡在实现侧"。热路径上一个 async 的闸等于给引擎开了一道
@@ -583,7 +617,7 @@ export type EgressFetchFor = (egressId: string | null, consumer: EgressConsumer)
 **第二套健康语义**（决策 5 已裁定"读面合并 ≠ 状态机合并"，此处同一把刀）。⇒ **库里的 `retired` 只表达
 人工报废这一件事**；"节点活不活"永远不进表。
 
-**(5) 池空是显式终态，不回落宿主直连 —— 但"永远选不出"与"现在用不了"是两枚不同的码（v9 定案）。**
+**(5) 池空是显式终态，不回落宿主直连 —— 但"永远选不出"与"现在用不了"是两枚不同的码（v9 定案；v10 把 `Retry-After` 不变量限定到码值）。**
 池中**选不出任何可用出口**时，先分**能不能等**：
 
 - **只能去改配置（等待无效）⇒ `503 NO_AVAILABLE_EGRESS`**（`GATEWAY_ERROR_CODES` **10 → 11**）：
@@ -593,16 +627,25 @@ export type EgressFetchFor = (egressId: string | null, consumer: EgressConsumer)
   **不得**静默回落宿主出口 ——
   回落破"独享"前提与上游 IP 白名单，而且**没有人看得见** —— 是"静默故障"的教科书形状。
   本码**不带 `Retry-After`**：给一个 `Retry-After` 是假承诺，还会把"该去改配置"误导成"等一会儿就好"。
+  （**v10**：这句是**码值级永真**，且**只有本码**享有"§10 里唯一只能改配置的 503"这个读法 —— 见本节第三条。）
 - **等一会儿就能用 ⇒ `429 RATE_LIMITED` + `Retry-After`，不进 503**：成因是**预算耗尽**（v8 移出）
   与**绑定的出口全部在冷却**（**v9 移出** —— v7/v8 曾把"全部在冷却"列在 503 的成因里）。
   这两者都不是"池子坏了"：出口**存在**、也曾经可用，缺的只是"**现在**"；而 `503 server_error` 这个分型
   对"几秒 / 几分钟后就能重试"的场景本身就是**错的语义** —— v8 已用这句话把「无预算」移出，
   v9 只是把同一把刀切到冷却上（在这一点上，冷却与预算**没有**区别）。
-- **`Retry-After` 的判据就此泛化为「该不可用态是否带确定性恢复时刻」**（v9，路由者选项 1，替掉 v8 的"只因冷却"）：
+- **`Retry-After` 的判据**（v9 泛化、**v10 限定定义域**）：判据是「该不可用态**是否带确定性恢复时刻**」（v9，替掉 v8 的"只因冷却"）——
   **冷却 → `min(cooldownUntil) − now`；预算耗尽 → 到下一枚 token 的时间；未绑出口 / 全部 `retired` → 不带**
-  （重试永远没用）。原设计里最有用的那条性质（**用 `Retry-After` 的有无把两类终态分开**）原样保住，
-  而且 v9 之后**两个信号不再打架**：**出现 `Retry-After` ⟺ `429`（可以等）；`503` ⟺ 永不出现**（该去改配置）。
-  一句话口径：**`Retry-After` 回答"等多久"；没有它，等待就是无效的。**
+  （重试永远没用）。原设计里最有用的那条性质（**用 `Retry-After` 的有无把两类终态分开**）原样保住。
+  **但 v9 把它写成状态码级断言（"`503` ⟺ 永不出现"）是错的 —— 那是 v9 自己新开的洞**（v10 订正）：
+  §10 **已经有一枚可重试的 503** `NO_AVAILABLE_KEY`（`docs/api-contract.md:1083`），成因之一（全候选并发打满，
+  `:1087`）**转瞬即逝**，而 v1.2.1 / §13.4（`:1403`）把「"请稍后重试"必须同时覆盖 `429 RATE_LIMITED` 与
+  `503 NO_AVAILABLE_KEY`」写死 ⇒ 按状态码实现，画师会把**并发打满误判成配置故障**，正好撞掉那条硬要求。
+  ⇒ **不变量限定到本决策产出的两枚码值**（定义域写死，**不覆盖 §10 既有码值**）：
+  **① `503 NO_AVAILABLE_EGRESS` 永不带 `Retry-After`，是 §10 里唯一"只能改配置"的 503；
+  ② 出口面 `429 RATE_LIMITED` 恒带**。② 那半边**引用既有规则、不新造等价表述**：
+  §10 补遗 v1.0.4（`:15`）＋ §10 正文（`:1088`）「**429 一律带 `Retry-After`**」。
+  一句话口径：**`Retry-After` 回答"等多久"；没有它，等待就是无效的** —— 但那句话是**出口面这两枚码**的口径，
+  **不得**拿去对 §10 全表做全局断言（`NO_AVAILABLE_KEY` 就是那枚反例）。
 - **终态形状与决策 4b 同款**：这两条路径都**没敲过上游** ⇒ `attempts` 恒 **0**、**不写 key 失败行**、
   客户端拿到的是 `429` **不是** `502`（断言见验证第 10 / 18 条）。
 - **一条实现约束（选择器侧，v9 定案）**：**只滤冷却，不滤预算**。
@@ -658,6 +701,9 @@ CREATE TABLE IF NOT EXISTS egress_proxies (
    ＋ **「无预算」与「全部在冷却」都走 `429 RATE_LIMITED` + `Retry-After`、不进本码**（v8 / v9 两处订正）。
    **同笔在 §10 的 `RATE_LIMITED` 行补一句**：出口预算耗尽 / 出口全部冷却时的 `Retry-After` =
    **确定性恢复时刻**（泛化为"等多久"口径，见决策 9(5) v9）。
+   **v10 补注**：`NO_AVAILABLE_EGRESS` 的"不带 `Retry-After`"是**码值级**不变量，且**只有本码**
+   享有"§10 里唯一只能改配置的 503"这个读法 —— §10 既有的 `NO_AVAILABLE_KEY`（`:1083`）是**可重试** 503
+   （v1.2.1 / §13.4 `:1403`），**不适用**该不变量。落笔时**不得**把这条写成"503 一律不带"。
 4. 契约 §0.4：新增行 `EGRESS_HAS_ACCOUNTS | 409 | 退役仍被账号引用的出口，details: {accountCount}`（**无 force**）。
    —— 3 与 4 落地时，`src/api/balance-sync.spec.ts` 的两行长度断言（`ERROR_CODES` **16**、
    `GATEWAY_ERROR_CODES` **10**）**必须同笔改**：那两行是**契约侧钉码表长度**的快照，漏改即红。
@@ -744,8 +790,14 @@ CREATE TABLE IF NOT EXISTS egress_proxies (
 
 **(6) 标定 = shadow 观察模式（判据默认关，"关"的形态是只记不动）。**
 
-- 每窗口输出 `{ egressId, distinctAccounts, types, wouldFire, insufficientAccounts }`，
+- 每窗口输出 `{ egressId, distinctAccounts, types, wouldFire, insufficientAccounts, degraded }`，
   **不 `cool`、不摘除、不发射 §7 帧**。这是 v3 裁定 ① 的延续，不是死代码。
+- **`degraded` 是必填位，不是可选诊断（v10）** —— `observeLimited` 是**全域函数**（决策 3 / 4a）：
+  任何分支**不返回 `undefined`、不抛**；**内部异常就地降级为 `attribution:'key'` 并置 `degraded: true`**。
+  标定吃的就是这个位：**"判据开着但每次都炸"与"开着且什么都没发现"必须在输出里可区分**，
+  否则 N 会建在一个**已经死掉的判据**上 —— 与「缺省不是证据」同一把刀。
+- **"默认关"的表达式 = 恒回 `'key'` 且照常产出 shadow 记录（`degraded: false`），不是"不调用"** ——
+  "不调用"会让"影子没响"同时意味着**未接线 / 判据没发现 / 判据炸了**三件不同的事，标定无从分辨。
 - **sustained / ambiguous**：命中后**跨过一个完整窗口**（`now − lastFireAt ≥ windowMs`）再次命中 ⇒ 记
   **sustained**（真问题）；孤立命中记 **ambiguous**（多为巧合）。取 **ambiguous 占比足够低的最小 N**。
 - 校准回来**只改数、不改结构**（§16.7 原文口径，与决策 8 的 `capacity` 回填同规矩）。
@@ -758,7 +810,7 @@ CREATE TABLE IF NOT EXISTS egress_proxies (
 
 | 落点 | 车道 | 内容 |
 |---|---|---|
-| `src/egress/`（新目录：`port.ts` + `fetch-gate.ts`） | 管家 | 端口（**v8：`subject: {accountId, keyId}`、入参 `scope` 退休；v9：`EgressVerdict.scope` 改名 `attribution`**）、`egressIdOfUrl`（唯一归一化，**解析失败 → `null` 且放行**）、缺省闸、fetch 装饰器（含 `x-sub2api-egress-local: 1` 常量）。只依赖标准库 |
+| `src/egress/`（新目录：`port.ts` + `fetch-gate.ts`） | 管家 | 端口（**v8：`subject: {accountId, keyId}`、入参 `scope` 退休；v9：`EgressVerdict.scope` 改名 `attribution`；v10：`observeLimited` 全域 —— 不返回 `undefined`、不抛，内部异常降级 `attribution:'key'` + shadow `degraded`**）、`egressIdOfUrl`（唯一归一化，**解析失败 → `null` 且放行**）、缺省闸、fetch 装饰器（含 `x-sub2api-egress-local: 1` 常量）。只依赖标准库 |
 | `src/gateway/egress.ts` | 路由者 | 令牌桶 + 冷却态**同一个实例**；`egressHostOf` **退化为 `egressIdOfUrl` 的薄封装或删除**；`egressLimitedOnSecondKey` 的判据**转正进闸内**（默认值替换 + 判据入参改**窗口化 `distinctAccounts`**）；**v8 新增**：每出口 60s 滑动窗口计数器（`Map<accountId, {lastTs, types}>`，惰性剪枝）+ **shadow 观察模式（默认关、只记不动）**；`snapshot()` 签名保持不动 |
 | `src/gateway/classify.ts` | 路由者 | `neverEgressLimited` / `egressLimitedOnSecondKey` **两个识别器退休**，`EgressLimitDetector` 缝随之关闭；判据入参由 `distinctKeysFailed429` 换成**窗口化的 `distinctAccounts`**（v8，决策 10）；**不得留成"两处都能判、只是默认关着"** |
 | `src/gateway/engine.ts` | 路由者 | ① 429 分支对**带标记头的本地拒绝**新增分支：不进 `egressKeys429`、不 `reportFailure`、终止候选轮换；② **`attempts` 减回 1**（决策 4b，终态 429 不是 502）；③ 该处既有的"同一请求内第几把不同 key"改为喂 `observeLimited`（**v8：`subject: {accountId, keyId}`，入参 `scope` 退休**）；④ 选择器侧（**v9**）：**只滤冷却、不滤预算**，预算留到选中后那一次 `reserve()`；候选集合为空时按决策 9(5) 分型 —— **未绑 / 全 `retired` ⇒ `503 NO_AVAILABLE_EGRESS` 且不带 `Retry-After`；全部冷却 ⇒ `429` + `Retry-After = min(cooldownUntil) − now`** |
@@ -815,7 +867,10 @@ CREATE TABLE IF NOT EXISTS egress_proxies (
     **`503 NO_AVAILABLE_EGRESS`**，**不带 `Retry-After`**（重试永远没用）；
     ② 绑定的出口**全部在冷却** ⇒ **`429 RATE_LIMITED` + `Retry-After = min(cooldownUntil) − now`**，
     **不是 503**（v9 移出）；③ 预算耗尽 ⇒ **`429` + `Retry-After`（到下一枚 token）**，**也不是 503**
-    —— ②③ 与 ① 是同一场景下的**码值分岔断言**，另举证 `Retry-After` 的**出现 ⟺ 429**；
+    —— ②③ 与 ① 是同一场景下的**码值分岔断言**；另举证 **v10 的码值不变量**（**不得**写成"503 ⟺ 永不出现"）：
+    **`NO_AVAILABLE_EGRESS` 的响应恒无 `Retry-After`，出口面 `RATE_LIMITED` 恒有**；
+    反例对照：§10 既有的 `503 NO_AVAILABLE_KEY`（`docs/api-contract.md:1083`）按 v1.2.1 / §13.4（`:1403`）
+    **是可重试 503**，**不在本断言的定义域内**（拿状态码当判据就会把"并发打满"误判成"配置故障"）；
     ④ ①②③ 三条路径均 `attempts` 恒 0、不写 key 失败行，且 `inner` fetch（真实网络）**零调用** ——
     断言"没有回落到宿主出口"这件事只能在 fetch 层证；
     ⑤ `egress_id IS NULL` 的账号**照常**走宿主出口（这条是反向断言：别把配置事实当回落一起拦掉）；
@@ -830,7 +885,10 @@ CREATE TABLE IF NOT EXISTS egress_proxies (
     `consecutive === 1`）、**不摘除**（池健康机的节点状态逐字节不变）；② 观察模式下**不 `cool`、
     不发 §7 帧、`snapshot()` 逐字不变**，但每窗口产出一条判决记录，且 `wouldFire` 与真实判决**同源**
     （同一处 `observeLimited`，无第二个计数器）；③ **本地 reject 零进入观察面**：合成 429 反复打满窗口 ⇒
-    窗口内 `distinctAccounts` 恒 0、判据**不会**据此摘掉自己（与第 9 条自伤回归同一条断言的两个面）。
+    窗口内 `distinctAccounts` 恒 0、判据**不会**据此摘掉自己（与第 9 条自伤回归同一条断言的两个面）；
+    ④ **全域（v10）**：判据内部抛异常 ⇒ 端口**不抛、不返回 `undefined`**，就地回 `attribution:'key'`，
+    且 shadow 记录带 `degraded`；**"默认关"的断言是"照常产出记录"**（恒回 `'key'` + `degraded: false`），
+    **不是"零记录"** —— 否则"判据炸了却沉默"与"判据什么都没发现"在标定里分不开。
 
 ## 已知缺口 / 未决
 

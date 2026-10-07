@@ -1,7 +1,8 @@
 # 出口代理接入方案：VPS 一键部署 + 管理面自填
 
-- 状态：**提案（VPS 侧脚本已落 `deploy/vps-egress/`；网关未接线、`src/` 零改动）**
-- 日期：2026-10-07（v2 —— Bo 已答「Ubuntu / 不用 Docker / 尽量多出口」，VPS 侧成品见 `deploy/vps-egress/README.md`）
+- 状态：**提案 v3（VPS 侧脚本已落 `deploy/vps-egress/`；网关未接线、`src/` 零改动）**
+- 日期：2026-10-07（v3 —— Bo「已占用的出口不再使用，换其他出口」口径落地：出口生命周期两态 + 池空终态；
+  v2 —— Bo 已答「Ubuntu / 不用 Docker / 尽量多出口」，VPS 侧成品见 `deploy/vps-egress/README.md`）
 - 提出：Bo ——「独享的，我希望可以用户自己填写代理信息。因为可能后期 IP 会有变化，
   请提供一个快捷的方式，包括在 VPS 那边部署什么程序，方便项目是填 IP 信息就能通过 IP 出口」
 - 车道：**管家**（`src/db` / `src/api` / 部署脚本）；数据面接线 = 路由者；管理界面 = 画师
@@ -130,7 +131,7 @@ curl -x http://sub2api:<口令>@<VPS_IP>:8080 -s https://api.ipify.org; echo
 
 ---
 
-## 3. 数据模型：表已经有了，零 DDL
+## 3. 数据模型：表已在，**放行时改列**（v7 起不再是「零 DDL」）
 
 `egress_proxies` 表与 `supplier_accounts.egress_id` 列**已在 `dev/api` 的 `src/db/schema.ts`**
 （`egress_proxies` 在 `:338`，`egress_id` 在 `:320`），Tier 2 落地时按「纯加表 + 加列」写的。字段够用：
@@ -142,7 +143,16 @@ curl -x http://sub2api:<口令>@<VPS_IP>:8080 -s https://api.ipify.org; echo
 | `url` | **只放 `scheme://host:port`，不放凭据** |
 | `secret` | 代理认证，**aes-256-gcm 密文 BLOB**，与 `upstream_keys.secret` 同形（复用 `src/db/crypto.ts:69` 的 `encryptSecret`） |
 | `region` / `note` | 备注（`hk` / `cn-bj` …，给用户自己看） |
-| `enabled` | 停用即从候选出口里摘掉，不删数据 |
+| `status` | **单轴两态 `active` / `retired`**（v7 改口径，见下）。`retired` = 「不用了」，**不删行**：`egressId` 要活得比 IP 久，否则历史用量 / 统计 / §7 帧失去宿主 |
+| `retired_reason` / `retired_at` | 退役原因（`replaced` 人工换新 / `manual` 人工停用）与时刻；`retired` 必填（CHECK 约束）。**回池不清** `retired_at` |
+
+> **v7 口径改动（Bo 已拍 / 路由者终版）**：原设计的 `enabled: 0/1` **换成 `status` 单轴**。
+> 不用「`enabled` + 退役标记」两列 —— 两列能组合出矛盾态（`enabled=0` 且未退役），
+> 选择器就得在两处过滤，迟早漏一处。表未放行、零行数据 ⇒ **改列免迁移**（`SCHEMA_VERSION` 仍为 2）。
+> **`url` 加 `UNIQUE`**（归一化后）：堵两个洞 ——
+> （a）同一出口建两行 = 两个桶 = 吞吐被悄悄翻倍（ADR-0021 决策 8 第 1 条的原始形状）；
+> （b）退役后「照原 URL 再建一条」会拿到**新 `egressId` + 满桶** = 改个名白拿一次额度。
+> 因此**回池的唯一路径是「原 `egressId` 从 `retired` 改回 `active`」**，不是新建。
 
 > **订正**（落脚本时回核 `src/db/schema.ts:338` 发现）：表里**没有 `revision` 列**，
 > 而 §4 的 `GET`/`PUT /api/egress` 写了 `revision` 做乐观锁。两种落法二选一，S2 实现前定：
@@ -168,18 +178,29 @@ curl -x http://sub2api:<口令>@<VPS_IP>:8080 -s https://api.ipify.org; echo
 
 | 方法 | 路径 | 用途 | 说明 |
 |---|---|---|---|
-| `GET` | `/api/egress` | 出口列表 | 返回 `{id, name, url, region, note, enabled, authSet, lastTestAt, lastTestOk, revision}`；**不含明文** |
-| `POST` | `/api/egress` | 新建 | body `{name, url, username?, password?, region?, note?}`；`url` 只给 `scheme://host:port`，凭据分字段传 |
-| `PUT` | `/api/egress/:id` | 改 | 任一字段改动 → `revision` 自增（沿用既有乐观锁）；**改 `host:port` 触发出口指纹变化**（§5） |
-| `DELETE` | `/api/egress/:id` | 删 | 仍被账号引用 ⇒ `409 CONFLICT` + `details.refCount`；**不级联**（`egress_id` 落 `NULL` = 回宿主出口是可接受的降级，但需用户显式确认，见下） |
+| `GET` | `/api/egress` | 出口列表 | 返回 `{id, name, url, region, note, status, retiredReason, retiredAt, authSet, lastTestAt, lastTestOk}`；**不含明文**（`revision` 见下方「纸面字段」订正） |
+| `POST` | `/api/egress` | 新建 | body `{name, url, username?, password?, region?, note?}`；`url` 只给 `scheme://host:port`，凭据分字段传；`url` 归一化后**全表唯一**，撞了 ⇒ `409 CONFLICT` + `details.field='url'`（同 URL = 同出口，两条行就是两个桶） |
+| `PUT` | `/api/egress/:id` | 改 | 改 `region` / `note` / 凭据走此路；**改 `url` 等于换出口**，见下。`status` 只接受 `active`（回池），退役走 `retire` |
+| `POST` | `/api/egress/:id/retire` | **退役**（v7 替代 `DELETE`） | body `{reason: 'replaced' \| 'manual'}`；仍被账号引用 ⇒ **`409 EGRESS_HAS_ACCOUNTS`** + `details.accountCount`，**不级联、无 `force`**（`force` 只能意味着把账号甩回宿主出口 —— 正是决策 9 禁掉的静默回落）。退役后行与桶都留着当证据，只是不再被选 |
+| `POST` | `/api/egress/:id/reactivate` | 回池 | 仅 `retired` → `active`；**必须复用原 `egressId`**，桶按 `(egressId, fingerprint)` 接回旧的（§5），`retired_at` 不清 |
 | `POST` | `/api/egress/:id/test` | **测试连接** | 经该代理请求一次上游轻量端点，回 `{ok, egressIp, latencyMs, error?}` —— **`egressIp` 就是 Bo 要的「填了就能通过这个 IP 出去」的证明** |
 
 **错误码：优先复用，不新开。** 本仓对 `ERROR_CODES` 增长的克制是有记录的（多次「零新增」），
-而这三种失败在既有码表里都有形状：
+所以先穷举证成形状：
 
 - 连不上 / 超时 ⇒ `UPSTREAM_UNREACHABLE`（502），`details.stage = 'egress'`
 - 代理认证失败（407）⇒ `UNPROCESSABLE`（422），`details.field = 'password'`
-- 仍被引用 ⇒ `CONFLICT`（409），`details.refCount`
+- ~~仍被引用 ⇒ `CONFLICT`（409），`details.refCount`~~ —— **v7 已被下面这条取代**
+
+**v7 订正：上面第三条改口，新增 `EGRESS_HAS_ACCOUNTS`（409，`details.accountCount`），
+`ERROR_CODES` 16 → 17。** 理由：泛 `CONFLICT` 让画师只能靠 `message` 猜分支，
+而这条要走的引导分支（「先去改绑账号，再来退役」）与其它 `CONFLICT`（乐观锁 / 重名）完全不同。
+按「码描述可观测事实」的口径，这条事实就是「还有 N 个账号挂在这个出口上」，够格单独成码。
+**不带 `force`**：`force` 的唯一语义是把账号甩回宿主出口 = 静默回落，与决策 9 第 5 条正面冲突。
+
+**另一枚码不在本车道**：全池无可选出口时的终态 `NO_AVAILABLE_EGRESS`（503）属于 `GATEWAY_ERROR_CODES`
+（`/v1/*`，§10），`10 → 11`，归路由者；形状已钉在 ADR-0021 v7 决策 9 第 5 条。
+两处码表增长**必须同批**带上 `src/api/balance-sync.spec.ts` 的长度断言（16 / 10），否则套件直接红。
 
 只有当「代理认证失败」需要前端走**独立引导分支**时，才加专用码 —— 那时按 §0.4 走契约升版，不偷偷加。
 
@@ -204,16 +225,30 @@ curl -x http://sub2api:<口令>@<VPS_IP>:8080 -s https://api.ipify.org; echo
 - 新增 **`egressFingerprint` = `sha256(scheme://host:port)`**（归一化：小写、含非默认端口）
 - **桶键与冷却键 = `egressId` + `egressFingerprint`**
 
-效果：用户在后台改一个 `url` 字段 ⇒ 绑定不动、帧 id 不动、旧桶与旧冷却**自动作废**、
-新出口从满桶开始。**不需要管理人肉记得"改完 IP 要重置冷却"**。
+效果：用户在后台改一个 `url` 字段 ⇒ 绑定不动、帧 id 不动、新出口从满桶开始。
+**不需要管理人肉记得"改完 IP 要重置冷却"**。
 
-**需裁定（二选一）**：
+**v7 补的两句**（路由者终版，ADR-0021 决策 2 已落）：
 
-- **(a)** 按本文写「桶键 = `egressId#fingerprint`」，改 ADR-0021 决策 2/8 一句；
-- **(b)** 保持「桶键 = `egressId`」字面不变，规定 PUT 改 host 时**经注入缝同步重置**桶与冷却 ——
-  多一次跨车道调用，且失败模式是"忘了重置"。
+1. **桶实例本身也不因指纹变化被丢弃** —— 注册表键是 `(egressId, fingerprint)`，
+   于是 **A→B→A 必须接回 A 的那个旧桶**（连同它当时的剩余 token 与冷却态）。
+   只说「旧桶作废」会漏掉这半边：丢弃旧桶 = 给「改配置 → 改回来」发一次满桶，
+   把上面那句「一次手滑」升级成一条**可重复执行**的刷额度路径。换到**新** IP 天然满桶（Bo 要的），
+   换**回**旧 IP 接旧桶（不白拿），两件事同时成立。
+2. **退役出口的桶同样保留** —— 旧桶就是那条 429 的证据，抹了就没人能复盘"当时为什么退它"。
 
-**我的建议是 (a)**：纯函数式、无跨车道调用，失败模式从"状态错"降级为"多一个空桶"，安全侧。
+**订正（落脚本时回核）**：`egress_proxies` 表里**没有 `revision` 列**，而上面的 `GET` 写了 `revision`。
+两种落法二选一，S2 实现前定：① 加 `revision` 列（与 `supplier_accounts` 同形）；② 出口条目不做乐观锁
+（**我倾向 ②**：单管理员后台，出口条目改动频率低，乐观锁换来的是画师每个表单多一个 `If-Match` 分支）。
+**在定之前，`revision` 是纸面字段** —— 不改这一句，实现时只会静默少一个字段。
+
+**改 `url` 的语义 = 换出口（v7 收紧）**：`PUT` 改 `host:port` 不是"编辑一条记录"，
+它在账上是**一个新出口**（新指纹 = 新桶）。所以两条路分开：**换 IP 用「退役旧条目 + 新建条目」**
+（Bo 口径：旧出口报废），不要用 PUT 原地改。原地改留着只用于**写错地址的当场更正**。
+两种走法都必须由 `url UNIQUE` 兜底，否则就是上面 (b) 那条刷额度路径。
+
+**投票结果：采纳 (a)** —— 按「桶键 = `egressId#fingerprint`」写，ADR-0021 决策 2/8 已按此改字面；
+(b) 那条（PUT 时经注入缝同步重置）作废，跨车道调用与"忘了重置"的失败模式一起消掉。
 
 ---
 
@@ -233,10 +268,12 @@ curl -x http://sub2api:<口令>@<VPS_IP>:8080 -s https://api.ipify.org; echo
 | # | 连带 | 影响 |
 |---|---|---|
 | 1 | `egress_id` 进管理面 DTO | 反转 ADR-0020 决策 5 的「不进任何 DTO」，边界见 §3 |
-| 2 | 桶键加指纹 | 改 ADR-0021 决策 2/8 的字面（§5，需裁定） |
+| 2 | 桶键加指纹 | 改 ADR-0021 决策 2/8 的字面 —— **已裁定采纳 (a)**，字面已落在 ADR-0021 v7（§5） |
 | 3 | 多出口 ⇒ 容量逐出口回填 | ADR-0021 上轮已写死这条触发条件，**正好生效**；Bo 若最终只用 1 个出口则不受影响 |
-| 4 | 「每出口账号数上限 = 6」现在是**校验**不是注释 | 用户自填后由 `POST/PUT /api/egress` 与账号绑定处校验 |
+| 4 | 「每出口账号数上限 = 6」现在是**校验**不是注释 | 用户自填后由 `POST/PUT /api/egress` 与账号绑定处校验；`retire` 的 `EGRESS_HAS_ACCOUNTS` 同一处读这把尺 |
 | 5 | §7 帧 `egressId` 本期 = host、Tier 2 后 = 条目 id | 契约 v1.4.8 已冻结「前端不得解析其内容」，**这条纪律现在兑现了价值** —— 前端零改造 |
+| 6 | **（v7）自动摘除的状态不进 HTTP 状态位** | 30s 心跳 / 连续 3 次失败摘除 / 5min 滞回回池是**运行时瞬时态**，只读面是 §7 池级帧；落进 `status` 会造出第二套健康语义，还会让重启后的回池行为对不上路由者那条滞回规则。`status` 只有 `active`/`retired` 两个**人工**可写态 |
+| 7 | **（v7）`DELETE` 撤掉，改 `retire` + `reactivate`** | 拆除端点会让「不用了」= 删行，`egressId` 断档；账号引用时**不级联、不给 `force`** —— `force` 只能是把账号甩回宿主出口，正是决策 9 禁掉的静默回落 |
 
 ---
 
@@ -259,6 +296,20 @@ curl -x http://sub2api:<口令>@<VPS_IP>:8080 -s https://api.ipify.org; echo
 | **管家** | VPS 侧三件（`install.sh` / 30 秒自检 / `pool-probe.sh`） | `dev/api` → `deploy/vps-egress/` | **已落**：参数面 6 条分支自测 + 探测脚本六种分型对假代理端到端实测 |
 | **管家** | `check:secrets` 增一条「代理 URL 不含 `user:pass@`」断言（§6 承诺） | `dev/api` | 规则 + 正对照用例同批落，回命中数 |
 | **管家** | `pool-probe.sh` 的清单改为可从 `GET /api/egress` 取（DB 成为唯一事实源后） | `dev/api` | S2 落 `/api/egress` 时同批改，回命令与输出样例 |
-| **管家** | `src/api/routes/egress.ts` + `src/db/repo/egress.ts` + 加密复用 + SSRF 校验 + `test` 端点 | `dev/api` | S2，随契约字段表同批 |
-| **路由者** | 数据面接线（`ProxyAgent` + 指纹桶键 §5 + 出口单例 + 池化选路的摘除/回池滞回） | `dev/gateway-rotation` | 按 ADR-0021 §验证 |
-| **画师** | 出口管理页（列表 / 表单 / 测试连接按钮 + **出口 IP 回显** / 启用停用 / 账号绑定选择器） | `dev/web-m2` | S3 |
+| **管家** | `src/api/routes/egress.ts` + `src/db/repo/egress.ts` + 加密复用 + SSRF 校验 + `test` 端点 | `dev/api` | S2，随契约字段表同批；含 v7 的 `status`/`retire`/`reactivate` 与 `EGRESS_HAS_ACCOUNTS` |
+| **路由者** | 数据面接线（`ProxyAgent` + 指纹桶键 §5 + 出口单例 + 池化选路的摘除/回池滞回） | `dev/gateway-rotation` | 按 ADR-0021 §验证；v7 另加：**池空 ⇒ `503 NO_AVAILABLE_EGRESS` 终态、不得回落宿主直连**（决策 9 第 5 条），以及「已占用」的**跨账号相关性**判据 |
+| **画师** | 出口管理页（列表 / 表单 / 测试连接按钮 + **出口 IP 回显** / **退役·回池**两态切换 / 账号绑定选择器） | `dev/web-m2` | S3；v7 改口：页面上是「退役」（带原因），不是「停用」；退役被拒时按 `EGRESS_HAS_ACCOUNTS` 走「先改绑账号」引导分支 |
+
+---
+
+## 10. 待路由者回的两个数（v7 未决）
+
+「已占用 ⇒ 换出口」的判据是**跨账号相关性**：同一出口、短窗口内、**≥N 把不同账号的 key** 同型失败。
+形状已定，两个数值没定：
+
+1. **N 与窗口**填多少（候选：N=3、窗口 5min —— 待路由者按真实失败率定，我不猜）；
+2. `EgressLimitedInput.subject` 要能带**账号身份**，现在只有 `keyId` —— 不带账号就只能判出「多把 key 挂」，
+   判不出「不同账号」，而那正是这条判据与「裸 429 误退池」的分界。
+
+在这两项落地前：**判据默认关（detector 默认 off）、§7 帧不发**，
+决策 3 的形状按原样不动 —— 免得出现「照一个没参数的阈值摘出口」这种没人能复盘的动作。

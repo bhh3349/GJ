@@ -1,6 +1,17 @@
 # 21. 出口（IP）预算：跨车道共享令牌桶与统一注入缝
 
-- 状态：**草案 v6（待 PM 过目；PM 四条裁定 + 路由者终版对账 + Bo 的出口 IP / 代理池约束已落，放行后生效）** —— 放行前不改契约正文、不改代码
+- 状态：**草案 v7（待 PM 过目；PM 四条裁定 + 路由者终版对账 + Bo 的出口 IP / 代理池约束 + Bo 的出口报废口径已落，放行后生效）** —— 放行前不改契约正文、不改代码
+  - **v7 变更（2026-10-07，Bo「已经占用的出口肯定不再使用了啊，换其他的出口」+ 路由者两条形状交回本车道）**：
+    1. **新增决策 9：出口生命周期** —— 状态**单轴化**（`enabled` → `status`/`retired_reason`/`retired_at`）、
+       **退役不删行**（`egressId` 要比 IP 活得久）、**`url` 唯一（归一化后）**、**自动摘除不落库**（瞬时健康态）、
+       池空走**显式终态**（`503 NO_AVAILABLE_EGRESS`，**不回落宿主直连**）、退役被账号引用时拦下
+       （`409 EGRESS_HAS_ACCOUNTS`，**不提供 `force`**）。两枚码是本 ADR 唯一一次动码表。
+    2. **决策 2 补一格：桶实例按 `(egressId, fingerprint)` 保留**（路由者）—— 指纹 A→B→A 要**接回 A 的旧桶**，
+       不给新满桶；否则"改配置再改回来"就是一条**合法刷额度**的路子，与"改一次 IP 清一次额度"同一件事，
+       只是需要多按一次保存。
+    3. **一条判据升级登记为未决**（交路由者定 N 与窗口）：判"出口被限"从"第 2 把不同 key"升级为
+       "同一出口短窗口内 ≥N 把**不同账号**的 key 同型失败"。在 N / 窗口定死前，决策 3 的
+       `scope` / `subject` 形状**不动**、识别器**仍默认关闭**（裁定 ① 不变）。
   - **v6 变更（2026-10-07，路由者「池化下决策 4 不成立」两问 + Bo「代理池 / 按延迟最优调用」入文）**：
     1. **决策 2 补 `NULL` 的第二种含义**：Tier 2 下账号未绑出口（`supplier_accounts.egress_id IS NULL`，
        schema 注释原文"用宿主出口"）**不是** `egressId = null`（那是决策 2 的 fail-open ⇒ 退出账本），
@@ -152,6 +163,10 @@ export function egressIdOfUrl(url: string): string | null;
 指纹的 `host:port` 归一化**必须复用 `egressIdOfUrl` 那一份**（本节末尾的 grep 验收正好管这件事，不许长出第三份）。
 指纹变化 ⇒ **换桶对象、不换键**：在途 hold 必须引用它 `reserve()` 的那**一个桶实例**，
 不得回头按新键再查一次 —— 否则那次扣减落在新桶上（凭空多/少一枚），等于"改一次 IP 清一次额度"换个写法。
+**（v7，路由者）桶实例本身也不得因指纹变化被丢弃**：注册表键 = **`(egressId, fingerprint)`**，
+A→B→A 必须**接回 A 的那个旧桶**（连同它当时的剩余 token 与冷却态）。丢弃旧桶 = 给"改配置 → 改回来"
+发了一次满桶 —— 上面那句警告就从"一次手滑"升级成一条**可重复执行**的刷额度路径。
+退役出口的桶**同样保留**（旧桶是那条 429 的证据），只是不再被选。
 
 ## 决策 3：端口形状 —— 同步签名、不排队、数值全部注入
 
@@ -488,6 +503,88 @@ export type EgressFetchFor = (egressId: string | null, consumer: EgressConsumer)
   所以系统不会持续超速 —— 这是占位值可以被接受的前提。注意这条兜底的证据来源是**上游**，
   不是我们自己的拒绝（决策 5 第 1 行已裁定不写冷却）。
 
+## 决策 9：出口生命周期 —— 状态单轴、`url` 唯一、池空是显式终态（v7，Bo 已拍）
+
+**触发**：Bo 2026-10-07「**已经占用的出口肯定不再使用了啊，换其他的出口**」。这句把出口的生命周期说清了：
+**换 IP 是旧出口报废，不是同一个出口改了地址** —— 于是路由者上轮那条「改 IP 顺手清桶 = 合法重置」的反驳
+**自动消解**（旧出口不再复用，不是"同一个出口换了个地址"）。路由者据此给出三条（退役是状态不是删除 /
+桶按 `(egressId, fingerprint)` 持久化 / 判"已占用"不靠裸 429），并把两件不在其车道的形状交回本文。
+
+**(1) 状态是单轴，不是 `enabled` + 退役位两列。** `enabled` 与 `retired` 能组合出"启用且已退役"这种
+矛盾态，而选择器要滤**两处** ⇒ 漏一处就是一个**静默选错的出口**（与归因判据两处判定、hint 两处旁路计数
+是同一类形状）。表**未发布、零数据** ⇒ 改列此刻零成本。
+
+**(2) `retired` 不删行。** 删了它，历史用量、统计、§7 帧就**失去了宿主** —— `egressId` 必须**比 IP 活得久**。
+退役只让它退出候选，`retired_reason ∈ {'replaced','manual'}` 且**必填**（DDL `CHECK` 拦）：一行没有原因的
+`retired`，半年后没人能判断它能不能删。
+
+**(3) `url` 唯一（归一化后）。** 两个洞，第一个本 ADR 已经认识，第二个是新发现的：
+- 同一个 `scheme://host:port` 两行 = 两个 `egressId` = **两个桶** = 放行量翻倍（决策 8 第 1 点）；
+- **退役后重建一个同 URL 的出口** ⇒ 新 `egressId` ⇒ **桶是满的** —— 等于"改个名字白拿一次额度"，
+  而这条路径恰好由本次"旧出口报废、换新出口"这个**正常操作**触发。
+⇒ 回池**只有一条路：复用原 `egressId` 改回 `active`**，不新建行。归一化必须复用 `src/egress/egressIdOfUrl`
+那一份（验证第 1 条），否则 `UNIQUE` 拦不住 `HTTPS://A.EXAMPLE:443` 与 `https://a.example` 是同一个出口。
+
+**(4) 自动摘除不落库。** 「心跳 30s / 连续 3 次失败摘除 / 回池滞回 5min」是**瞬时健康态**，读面是 §7 池级帧
+（v1.6.2）。写进 `status` 的后果有三条：重启后不回来、回池滞回无处存活、与 §7 的 `health` 字段合成
+**第二套健康语义**（决策 5 已裁定"读面合并 ≠ 状态机合并"，此处同一把刀）。⇒ **库里的 `retired` 只表达
+人工报废这一件事**；"节点活不活"永远不进表。
+
+**(5) 池空是显式终态，不回落宿主直连。** 池中**选不出任何可用出口**（全退役 / 全冷却 / 无预算）时：
+- `/v1/*` 回 **`503 NO_AVAILABLE_EGRESS`**（`GATEWAY_ERROR_CODES` **10 → 11**），**不得**静默回落宿主出口。
+  回落破"独享"前提与上游 IP 白名单，而且**没有人看得见** —— 是"静默故障"的教科书形状。
+- 码名**不叫** `EGRESS_POOL_EXHAUSTED`：码值描述"选不出出口"这个**事实**，不描述**归因**（谁限的、谁的责任）。
+  这与 §16.7 自己那条「不越证据」是同一把刀，也与补遗 3 那条码名争议同一个理由。
+- **§10 那句「不新增错误码、不新增 HTTP 状态」不冲突**，边界要写死：那句管的是**出口被上游限流**
+  （调用方仍在"退避后可重试"语义内 ⇒ 照旧 `429 RATE_LIMITED`）；本码管的是**候选为空**，
+  与 `NO_AVAILABLE_KEY` 同族、同一个判据形状。
+- `egress_id IS NULL` 的账号**照常走宿主出口**：那是**配置事实**，不是回落（决策 2「`null` 的两种来源必须分开」）。
+- **§12.1 的 `category` 仍是 9 值**："出口选不出"与"key 选不出"是同一个分诊对象（候选为空、0 次真实尝试、
+  查池子与配置），精确值由 `gatewayCode` 承担；新增第 10 个分型要同时动契约枚举、`observability-params.ts`
+  的 9 分型、画师筛选器与两条断言，信息量为零。§13.5 助手的终止帧码值表同批补入。
+
+**(6) 退役被引用 ⇒ 拦下，且没有 `force`。** 管理面新增 **`409 EGRESS_HAS_ACCOUNTS`**
+（`ERROR_CODES` **16 → 17**，`details: {accountCount}`）。**这条不提供 `force`** —— `force` 在这里只能表达
+"把这些账号丢回宿主出口"，而那正是 (5) 禁止的静默回落；迁移必须走**显式动作**（把账号 `egressId`
+改到另一个 `active` 出口）。同族：`UPSTREAM_HAS_KEYS` / `ACCOUNT_HAS_KEYS`（"删之前先把依赖摆出来"）。
+账号侧对称一条：`POST/PATCH /api/supplier-accounts` 传**不存在或已 retired** 的 `egressId` ⇒
+`400 INVALID_PARAM`（`details.field = 'egressId'`），不留"绑上去了但永远发不出去"的账号。
+
+**放行笔要落的四处（本轮**不落**：本 ADR 自己那句"放行前不改契约正文、不改代码"照旧管着本轮）**
+
+1. `src/db/schema.ts` 的 `egress_proxies` 建表语句（逐字替换；表未发布 ⇒ **零迁移**、`SCHEMA_VERSION` 仍为 2）：
+
+```sql
+CREATE TABLE IF NOT EXISTS egress_proxies (
+  id             TEXT PRIMARY KEY,
+  name           TEXT NOT NULL UNIQUE,
+  url            TEXT NOT NULL UNIQUE,              -- scheme://host:port（落库前归一化），不含 user:pass
+  secret         BLOB,                              -- aes-256-gcm；NULL = 免认证
+  region         TEXT,
+  note           TEXT,
+  status         TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','retired')),
+  retired_reason TEXT CHECK (retired_reason IS NULL OR retired_reason IN ('replaced','manual')),
+  retired_at     TEXT,                              -- ISO8601；退役即写，回池不清
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  CHECK (status <> 'retired' OR retired_reason IS NOT NULL)
+);
+```
+
+2. 契约 §16.7：`egress_proxies` 列清单（`enabled` → `status`/`retired_reason`/`retired_at`，`url` 标唯一）
+   + 新增「v1.7.0 裁定：退役是状态不是删除」一节（上述 6 条）。
+3. 契约 §10：新增行 `NO_AVAILABLE_EGRESS | 503 | server_error | 候选为空：绑定的出口全部 retired / 冷却中 /
+   无预算，**不回落宿主直连**` + 那条与「不新增错误码」的边界说明。
+4. 契约 §0.4：新增行 `EGRESS_HAS_ACCOUNTS | 409 | 退役仍被账号引用的出口，details: {accountCount}`（**无 force**）。
+   —— 3 与 4 落地时，`src/api/balance-sync.spec.ts` 的两行长度断言（`ERROR_CODES` **16**、
+   `GATEWAY_ERROR_CODES` **10**）**必须同笔改**：那两行是**契约侧钉码表长度**的快照，漏改即红。
+
+**未决一格（交路由者，本 ADR 不替其定）**：判"出口被限"的判据从"同一出口第 2 把**不同 key** 也 429"
+升级为"同一出口**短窗口内 ≥N 把不同账号的 key** 同型失败"（同账号内全挂更可能是**账号额度尽**，
+不算出口级）。要定两个数：**N（2 / 3）与窗口长度**；且 `EgressLimitedInput.subject` 需**带账号身份**
+（决策 3 现写 `keyId / accountId`，实现喂的是 `keyId`）。在 N 与窗口定死前：决策 3 的形状**不动**、
+裁定 ①「识别器默认关闭」**不变**、§7 帧**仍不发射**。
+
 ## 影响
 
 | 落点 | 车道 | 内容 |
@@ -503,7 +600,7 @@ export type EgressFetchFor = (egressId: string | null, consumer: EgressConsumer)
 | `src/server.ts` | 接线 | **造一次、注入两处**（`buildApp` + 网关装配）；一条 spec 走生产装配路径断言两侧拿到**同一个**实例 |
 | `docs/api-contract.md` §16.7 / §15.5 / §7 | 管家 | 按 ADR-0017 **补遗 5** 的九条落正文，并随契约 **v1.7.0** 同批 |
 | `web/` | 画师 | ① `HINT_CONFIG` 第 5 项 **+ 兜底**（见 ADR-0017 补遗 3，**同批硬依赖**）；② §7 `egress_cooldown` 帧接线（出口限流提示位）；③ 手动刷新二次确认 |
-| `ERROR_CODES` / DTO / `SCHEMA_VERSION` | — | **零新增、零变更**（唯一枚举新增是 `HintCode`，见补遗 3） |
+| `ERROR_CODES` / DTO / `SCHEMA_VERSION` | — | 决策 1–8 **零新增、零变更**（唯一枚举新增是 `HintCode`，见补遗 3）。**决策 9（v7）另加两枚码**：`GATEWAY_ERROR_CODES` **10 → 11**（`NO_AVAILABLE_EGRESS`）、`ERROR_CODES` **16 → 17**（`EGRESS_HAS_ACCOUNTS`）；`SCHEMA_VERSION` **仍为 2** —— 改的是**未发布新表** `egress_proxies` 的建表语句，**零迁移**。两处码表与两行长度断言**同笔落**（决策 9 放行笔清单） |
 
 ## 验证（用例清单，随实现提交）
 
@@ -537,6 +634,16 @@ export type EgressFetchFor = (egressId: string | null, consumer: EgressConsumer)
     （大小写 / 默认端口 / 尾斜杠 / 带 query）**只占一个桶**，连续取 `capacity` 枚后第 `capacity+1` 次即被拒
     （**"一个出口两个键 ⇒ 放行量翻倍"这件事的回归锁**，与第 1 / 2 条同源但落在额度上）；
     ② 两个不同 `egressId` **各自独立记账**：出口 A 耗尽不影响出口 B 取 token，反之亦然。
+17. **出口唯一性**（决策 9，Bo 的"换出口"口径）：① 落库同 `scheme://host:port`（含大小写 / 默认端口等
+    等价写法）的第二行**被拒**（`UNIQUE` + 归一化，不是靠调用方自觉）；② 把某 `egressId` 置 `retired`
+    **不删行**（历史用量 / 统计 / §7 帧仍查得到它）；③ 想换回同一个出口时**只能复用原 `egressId`**
+    改回 `active` —— **不得**新建一行来拿一个满桶；④ 退役**必带原因**（无原因的直接 `CHECK` 违约）。
+18. **池空终态**（决策 9 第 5 条）—— 与第 10 条同款"**必须断言不是 502、也不是宿主直连**"：
+    ① 账号绑的出口 `retired`（或全池无可用出口）⇒ `/v1/*` 回 **`503 NO_AVAILABLE_EGRESS`**；
+    ② `inner` fetch（真实网络）**零调用** —— 断言"没有回落到宿主出口"这件事只能在 fetch 层证；
+    ③ `egress_id IS NULL` 的账号**照常**走宿主出口（这条是反向断言：别把配置事实当回落一起拦掉）；
+    ④ 管理面退役一个仍被引用的出口 ⇒ **`409 EGRESS_HAS_ACCOUNTS`**、`details.accountCount` 准确、
+    **零副作用**（出口未退役、账号未改动）、且**不写成功审计**（同 §15.2 `ACCOUNT_HAS_KEYS` 的纪律）。
 
 ## 已知缺口 / 未决
 

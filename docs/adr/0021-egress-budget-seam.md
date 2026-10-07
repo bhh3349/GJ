@@ -1,6 +1,21 @@
 # 21. 出口（IP）预算：跨车道共享令牌桶与统一注入缝
 
-- 状态：**草案 v5（待 PM 过目；PM 四条裁定 + 路由者终版对账 + Bo 的出口 IP 约束已落，放行后生效）** —— 放行前不改契约正文、不改代码
+- 状态：**草案 v6（待 PM 过目；PM 四条裁定 + 路由者终版对账 + Bo 的出口 IP / 代理池约束已落，放行后生效）** —— 放行前不改契约正文、不改代码
+  - **v6 变更（2026-10-07，路由者「池化下决策 4 不成立」两问 + Bo「代理池 / 按延迟最优调用」入文）**：
+    1. **决策 2 补 `NULL` 的第二种含义**：Tier 2 下账号未绑出口（`supplier_accounts.egress_id IS NULL`，
+       schema 注释原文"用宿主出口"）**不是** `egressId = null`（那是决策 2 的 fail-open ⇒ 退出账本），
+       而是**退回 Tier 1 推导** `egressIdOfUrl(baseUrl)`。写成 `null` 会让本期全部直连流量静默退出出口账 ——
+       不是降级，是决策 8 第 1 点那个「一个出口两个桶 ⇒ 放行量翻倍」的镜像。
+    2. **决策 4「零调用点改动」的作用域收窄为 Tier 1**（路由者 2026-10-07）：Tier 2 下出口是**账号级**的，
+       而 `UpstreamTarget` 只有 `upstreamId / baseUrl / apiKey` ⇒ 同一 baseUrl、两个账号、两个出口时，
+       装饰器既 `reserve()` 不出桶、也选不了走哪个 proxy。池化把这条从"两账号"放大成「任意账号 × 任意节点」，
+       且选择是**每请求动态**的，而装饰器是静态包一层。
+    3. **新增决策 4c**：出口传递形状 `fetchFor(egressId, consumer)`；`UpstreamTarget` 扩**只放稳定 id** 的出口字段
+       （代理 URL 与凭据**不进**，别开第二个明文通道）；管理面必填注入的**8 处落点**（不是 3 处，含双层默认）；
+       出口解析链（三表台账 + `pooled_key_id` 的 fan-out 风险）；`secrets.ts` 缓存刷新的触发条件。
+    4. **决策 5 补「读面合并 ≠ 状态机合并」**：池化心跳的节点摘除与出口冷却阶梯是同一出口上的两台状态机，
+       §7 帧只出一份（取两者较晚的 `until`），但**写面各自独立**。
+    5. **决策 8 标定补一格**：同一出口承运多个上游时，逐出口标定要**按该出口上每个上游分别量、取最保守**。
   - **v5 变更（2026-10-07，Bo「别忘了我有出口 IP」这条约束入文）**：
     1. **决策 8 新增「容量是每个出口的数」** —— 桶键 = `egressId`（决策 2 / 5）⇒ `{capacity:5, windowMs:60s}`
        是**每出口**口径，不是全站口径。这条把决策 2 的"同一出口两个键"从**代码整洁度**升成**额度事故**：
@@ -51,8 +66,8 @@
 ## 背景与问题
 
 出口预算是**全进程共享**的一条约束：同一个出口 IP 上，数据面转发、余额刷新、账号面批量、自测、探活
-打出去的每一个请求**都在同一张配额表上扣**（§16.7 实测：连账号/key 都不区分）。而现在这五类请求
-由两个车道、四个模块各自用各自的 `fetch` 发出去：
+打出去的每一个请求**都在同一张配额表上扣**（§16.7 实测：连账号/key 都不区分）。而现在这七类请求
+由两个车道的多个模块各自用各自的 `fetch` 发出去（v6 补两行，见下表末两条）：
 
 | 消费方 | 现状发请求的位置 | 车道 |
 |---|---|---|
@@ -60,6 +75,8 @@
 | §14 余额刷新（自动 + 三个手动端点） | `src/api/services/balance-refresh.ts` → `executePlan(plan, target, fetchImpl)` | 管家 |
 | 余额自测 / 探活 | `src/api/services/balance-selftest.ts`（同一条 `executePlan`） | 管家 |
 | §15.2 六个端点（`import`/`refresh`/`login`/`test`/`keys`/`keys/sync`） | `src/supplier/tierflow.ts` 的 client（`fetchImpl` 来自 `SupplierSeams`） | 管家 |
+| §9 模型档案同步（`POST /api/models/sync`） | `src/api/services/model-sync.ts`（`fetchImpl` 默认值，v6 补登） | 管家 |
+| 出口自检（`/api/egress/:id/test`，本批新增） | 与 `deploy/vps-egress/pool-probe.sh` 同一条通路（**必须回显真实出口 IP**，v6 补登） | 管家 |
 | key 健康探活（§16.4） | 内核侧 | 路由者 |
 
 各自为政的后果正好是实测到的那一个：**26 把 key 的自动同步一轮就把窗口烧干，数据面随后 429**，
@@ -118,6 +135,23 @@ export function egressIdOfUrl(url: string): string | null;
 
 留着 `egressHostOf` 的代价不是"某个实现者将来会粗心"，是**这条决策自己当场成立的反例**：
 一根出口两个键 ⇒ 冷却各冷一半、预算各扣一份，正好把 5–6 变成 10–12。
+
+**`null` 的两种来源必须分开**（v6，路由者"池化下决策 4 不成立"这条的下游）：
+
+1. **解析不出出口**（拿不到 URL / 不是 URL）⇒ `egressIdOfUrl` 回 `null` ⇒ fail-open，不做出口级裁决（上一段）；
+2. **出口就是宿主**（Tier 2 下 `supplier_accounts.egress_id IS NULL`）⇒ **不是 `null`**，
+   而是 `egressIdOfUrl(baseUrl)` 的 Tier 1 推导值，**直连流量仍占同一个桶**。
+
+混成一个 `null` 的后果不是降级，是**决策 8 第 1 点那个"放行量翻倍"的镜像**：
+一个出口两个桶 ⇒ 翻倍；**一个出口零个桶 ⇒ 无上限**。所以 Tier 2 落地时，
+`egress_id IS NULL` 的账号必须落到 Tier 1 的桶里，不是从账本上消失。
+
+**运行时桶键 vs 账本键（v6，路由者订正）**：桶 / 冷却用 `egressId#fingerprint`
+（指纹 `sha256(scheme://host:port)`，**不含凭据** ⇒ 改代理口令不得清桶，否则"改密码"变成一次合法的额度重置，
+还会抹掉上游 429 的证据）；统计 / 日志 / §7 帧**只用稳定 `egressId`** ⇒ 改一次 IP，历史用量不断成两条。
+指纹的 `host:port` 归一化**必须复用 `egressIdOfUrl` 那一份**（本节末尾的 grep 验收正好管这件事，不许长出第三份）。
+指纹变化 ⇒ **换桶对象、不换键**：在途 hold 必须引用它 `reserve()` 的那**一个桶实例**，
+不得回头按新键再查一次 —— 否则那次扣减落在新桶上（凭空多/少一枚），等于"改一次 IP 清一次额度"换个写法。
 
 ## 决策 3：端口形状 —— 同步签名、不排队、数值全部注入
 
@@ -199,7 +233,8 @@ export function createEgressFetch(gate: EgressGate, inner?: typeof fetch): typeo
 放在装饰器里而不是让每个调用方手写 `reserve`，是因为两条车道**都已经有单一出口**：
 内核是 `engine.ts` 的 `doFetch`（**路由者逐行核对后为 `:154`；v2 写的 `:141` 作废**），
 管理面是 `SupplierOps.fetchImpl` / `RefreshOptions.fetchImpl`（默认值都在 `buildApp` 一处填）。
-装饰器一包，覆盖数据面 / 刷新 / 自测 / 批量 / 探活五类，**零调用点改动**。
+装饰器一包，覆盖数据面 / 刷新 / 自测 / 批量 / 探活 / 模型同步 / 出口自检七类，**零调用点改动**
+（**v6 订正：这条只在 Tier 1 成立** —— Tier 2 下出口是账号级的，装饰器拿不到它，见决策 4c）。
 
 拒绝时不抛异常、不发请求，而是**合成一个 `429` Response（带 `Retry-After`）** 返回给调用方。这样：
 
@@ -274,6 +309,58 @@ export function createEgressFetch(gate: EgressGate, inner?: typeof fetch): typeo
   ④ `inner` fetch **零调用** 且出口 `consecutive` / `until` **逐字节不变**。契约面那一半见
   ADR-0017 补遗 5 ⑧ 与补遗的新增「验收口径」一节。
 
+### 决策 4c：Tier 2 的出口传递形状 + 管理面必填注入的落点（v6）
+
+**决策 4 的"零调用点改动"只在 Tier 1 成立**（路由者 2026-10-07 实测 + 逐行核对；Bo 拍"代理池 + 按延迟最优"
+之后这条从"可选"顶成"必须"）。Tier 1 下出口 = `upstream.host`，能从 `(input, init)` 的 URL 推出来 ⇒ 装饰器闭包够用；
+Tier 2 下出口是**账号级**的，装饰器拿不到它。
+
+**定形（管家侧接线，路由者侧类型）**：
+
+```ts
+/** 一次注入、按已知出口取绑定 fetch。`consumer` 决定能否动用数据面保留额（决策 8）。 */
+export type EgressFetchFor = (egressId: string | null, consumer: EgressConsumer) => typeof fetch;
+```
+
+- **`UpstreamTarget` 扩的出口字段只放稳定 id**（Tier 1 = `egressIdOfUrl(baseUrl)`，Tier 2 = `egress_proxies.id`）。
+  **代理 URL 与代理凭据不进 `UpstreamTarget`**：它的文件头纪律是"`apiKey` 是本进程内唯一的明文出口"
+  （`src/gateway/ports.ts`），再塞一条代理口令进去等于开第二个明文通道，且绕开 ADR-0006 的扫描面。
+- **解析链是台账、不是列**（`upstream_keys` 上**没有** `account_id`；ADR-0018 决策 2 那句已按此订正）：
+  归属由 `supplier_account_keys.pooled_key_id` 表达 ⇒ 出口 =
+  `upstream_keys k → supplier_account_keys sak (sak.pooled_key_id = k.id) → supplier_accounts.egress_id`。
+  **复用 `src/db/balance.ts` 的 `UNOWNED_KEY` 判据**，不许长出第二份"这把 key 归不归账号"的定义 ——
+  钱按它算一次，出口也按它算一次；两处判据一旦分叉，就会出现"余额算在账号上、出口还按宿主走"的错配。
+- **`pooled_key_id` 的 fan-out 是这条链上的真风险**：该列**无 UNIQUE**，同一把池内 key 被两条台账行引用时，
+  `JOIN` 回两个 `egress_id` ⇒ 同一次 `resolve(keyId)` 拿到哪个取决于行序（每次快照重建还可能换一个），
+  正好复现本节开头那个"一个出口两个桶"的额度事故，只是形态更隐蔽。两条要求：
+  ① 出口解析**必须"存在即可 + 确定性单值"**，不得裸 `JOIN` 后取首行；
+  ② 落一条**部分唯一索引** `UNIQUE(pooled_key_id) WHERE pooled_key_id IS NOT NULL`
+  （`src/db/schema.ts`，幂等守卫同 `hasColumn()`），把"一把 key 最多归一个账号"从约定变成约束；
+  fan-out 计数进自检，**恒 0**。
+
+**管理面必填注入的落点：不是 3 处，是 8 处**（`grep` 实测，含**双层默认**）：
+
+| # | 落点 | 现状 | 备注 |
+|---|---|---|---|
+| 1 | `src/api/services/balance-refresh.ts:174` | `options.fetchImpl ?? fetch` | §14 自动同步 + 手动刷新 |
+| 2 | `src/api/services/balance-query.ts:246` | `fetchImpl: typeof fetch = fetch` | 单上游查询 |
+| 3·4 | `src/api/services/balance-selftest.ts:247` / `:295` | 同上 | 自测 / 探活（两个入参各一处） |
+| 5 | `src/api/services/model-sync.ts:162` | 同上 | **本文背景表那五行漏了它**：`POST /api/models/sync` 同样打上游 |
+| 6 | `src/api/services/supplier-accounts.ts:163` | `seams.fetchImpl ?? fetch` | **外层** |
+| 7 | `src/supplier/tierflow.ts:360` | `options.fetchImpl ?? fetch` | **内层**：只改外层 ⇒ 内层兜底照旧静默生效，"改了"是假的 |
+| 8 | `src/balance/template.ts:167` | `fetchImpl: typeof fetch = fetch` | 模板引擎执行点（最终出站层） |
+
+- **"必填"要落到每一层**：漏传 = 编译错误（`ports.ts` 已有的必填纪律）。装饰器 `inner` 缺省 = 全局 fetch
+  那条**相反，保留**（决策 4：测试注入假 fetch 时**仍要经过闸**）。
+- **Tier 2 下单一个 `fetchImpl` 字段本身也不够**：一轮刷新里不同 key 可能绑不同出口 ⇒ 管理面要的是
+  `fetchFor(egressId, 'management')`，而出口得**贴着 key 走**：`DecryptedKeyRef`（`src/db/repo/keys.ts:526`）
+  补 `egressId`，`KEYS_SQL`（`src/wiring/store.ts:59`）快照 join 台账带出，各循环按 `ref.egressId` 取 fetch。
+- **`src/wiring/secrets.ts` 的缓存刷新必须纳入 `egressId`，且不得挂在 `revision` 上**：`update()` 的 skip 判据
+  现为 `cached.revision === row.revision && cached.upstreamId === row.upstream_id`（`:64`）——
+  账号改了出口而 key 行 `revision` 未变时缓存**不更新** ⇒ 流量继续走旧出口 / 宿主 IP，而桶已按新 id 记账：
+  **账实两分**，且症状正是"配了代理但流量仍走宿主 IP"这类最贵的静默故障。
+  `egressId` 变更因此走"直接改写缓存条目"的轻路径（**不需要重新解密**），与 skip 判据解耦。
+
 ## 决策 5：预算拒绝与上游 429 在**证据面同形**；冷却**只由上游证据写入**（PM 已裁定）
 
 这是 PM 裁决里"与 §14 的 429 特判共用一个检测器"的落法。判据唯一化到闸内（决策 4a）后，
@@ -293,6 +380,16 @@ export function createEgressFetch(gate: EgressGate, inner?: typeof fetch): typeo
    不是 30 分钟），且保留额保证数据面在桶里永远有得取；写冷却才会把数据面一起挡在门外、
    §7 帧播报"上游限流中"，假信号放大。
 3. **§7 帧含义随动**：桶拒绝**不发射** §7 帧；**§7 帧只保留给上游证据**，与决策 8 的保留额配套成立。
+
+**读面合并 ≠ 状态机合并**（v6，Bo 的代理池落地后新增的一台状态机）：池化的节点心跳（30s / 3 连败摘除 /
+回池滞回 5min）管"节点活不活"，本决策的冷却阶梯管"上游还限不限我们"，**两者作用在同一个出口上**。口径：
+
+- **§7 帧只出一份**：该出口对外可见的 `until` = 两者中较晚的那个 —— 各播一份会出现
+  "池说存活、冷却说还冷着"的自相矛盾帧（§7 帧的读面契约不允许）。
+- **写面各自独立、互不清零**：节点摘除**不得**推进上游冷却阶梯，节点回池**也不得**清零它 ——
+  否则一次 VPS 重启就能把"上游确实在限我们"的证据洗掉，与决策 5 第 1 条（阶梯只由上游证据推进）直接冲突。
+- 合成宜落在**一个读面函数**里，不新造第二套健康语义；节点摘除的粒度是节点、冷却的粒度是出口，
+  两者**不是**同一个集合（一个节点可能承运多个出口，反之亦然）。
 
 **为什么不能照 v1 原案"拒绝即 `cool()`"实现**（保留此段是为了让后面的人知道那条路具体坏在哪一步）：
 `cool()` 每次调用都 `consecutive += 1`、**每次各推一档**；阶梯 `[0, 1m, 5m, 15m, 30m]`、429 基础冷却 60s
@@ -381,7 +478,11 @@ export function createEgressFetch(gate: EgressGate, inner?: typeof fetch): typeo
   **标定的两条硬约束（随 S4 前置项的验收一并写死，否则"标定通过"可能量的是别处）**：
   ① **必须从承运那 26 把 key 的同一个出口 IP 打** —— 从别的机器 / 别的出口量出来的数字，量的是
   **另一个桶**，与 §14 的自动同步额度无关；② **多出口 ⇒ 逐出口分别记**，`capacity` **逐出口回填**
-  （单出口下二者同值，但**记账口径必须按出口写**，否则 Tier 2 一到就是一次返工）。
+  （单出口下二者同值，但**记账口径必须按出口写**，否则 Tier 2 一到就是一次返工）；
+  ③ **同一出口承运多个上游时，按每个上游分别量、取最保守值回填** —— 桶键是 `egressId`、
+  **不含上游维度**，而真实限流是"每个上游各按来源 IP 算"：单键共用一份额度在跨上游时**偏保守**
+  （不会超发），但把两个上游的产能当成一个数回填，会让 `capacity` 既不是任何一个上游的真实地板、
+  也不是共享后的和，标定结论直接失效。
   配套断言见验证清单第 16 条。
 - **自适应兜底**：即便占位偏乐观（capacity 比真实地板大），**任何一次上游 429 都会置起冷却**（决策 5 被动两行），
   所以系统不会持续超速 —— 这是占位值可以被接受的前提。注意这条兜底的证据来源是**上游**，
@@ -396,7 +497,9 @@ export function createEgressFetch(gate: EgressGate, inner?: typeof fetch): typeo
 | `src/gateway/classify.ts` | 路由者 | `neverEgressLimited` / `egressLimitedOnSecondKey` **两个识别器退休**，`EgressLimitDetector` 缝随之关闭；**不得留成"两处都能判、只是默认关着"** |
 | `src/gateway/engine.ts` | 路由者 | ① 429 分支对**带标记头的本地拒绝**新增分支：不进 `egressKeys429`、不 `reportFailure`、终止候选轮换；② **`attempts` 减回 1**（决策 4b，终态 429 不是 502）；③ 该处既有的"同一请求内第几把不同 key"改为喂 `observeLimited`（`scope:'request'`） |
 | `src/api/app.ts`（`ApiContext.egress` + `BuildAppOptions.egress`） | 管家 | 注入缝，缺省 `permissiveEgressGate`（形状同 `assistant`） |
-| `src/api/services/supplier-accounts.ts` / `balance-refresh.ts` / `balance-selftest.ts` | 管家 | `fetchImpl` 默认值外面套 `createEgressFetch`；**调用点零改动**；各循环喂 `observeLimited`（`scope:'batch'`）与 `observeSuccess` |
+| `src/api/services/supplier-accounts.ts` / `balance-refresh.ts` / `balance-selftest.ts` / `balance-query.ts` / `model-sync.ts` / `src/supplier/tierflow.ts` / `src/balance/template.ts` | 管家 | `fetchImpl` **兜底全拆、改必填注入**（8 处见决策 4c；只改外层等于没改）；各循环喂 `observeLimited`（`scope:'batch'`）与 `observeSuccess` |
+| `src/wiring/store.ts` / `src/wiring/secrets.ts` / `src/db/repo/keys.ts` | 管家 | 出口**贴着 key 走**：`KEYS_SQL` 快照 join 台账带出 `egress_id` → `SecretRow` → `UpstreamTarget.egressId`；`update()` 的 skip 判据**不得**让出口变更被跳过（决策 4c 末条） |
+| `src/db/schema.ts` | 管家 | `supplier_account_keys(pooled_key_id)` **部分唯一索引**（`WHERE pooled_key_id IS NOT NULL`），幂等守卫同 `hasColumn()`；fan-out 自检恒 0 |
 | `src/server.ts` | 接线 | **造一次、注入两处**（`buildApp` + 网关装配）；一条 spec 走生产装配路径断言两侧拿到**同一个**实例 |
 | `docs/api-contract.md` §16.7 / §15.5 / §7 | 管家 | 按 ADR-0017 **补遗 5** 的九条落正文，并随契约 **v1.7.0** 同批 |
 | `web/` | 画师 | ① `HINT_CONFIG` 第 5 项 **+ 兜底**（见 ADR-0017 补遗 3，**同批硬依赖**）；② §7 `egress_cooldown` 帧接线（出口限流提示位）；③ 手动刷新二次确认 |
@@ -438,6 +541,9 @@ export function createEgressFetch(gate: EgressGate, inner?: typeof fetch): typeo
 ## 已知缺口 / 未决
 
 - **数值未标定**（窗口长度、是否分档、5–6 是否为干净 IP 的产能地板）—— 占位见决策 8；标定输入仍是 §16.7 登记的第 3 样。
+- **同一出口承运多个上游 ⇒ 一份额度**（v6，决策 8 标定口径 ③ 的另一面）：桶键不含上游维度，
+  跨上游共用**偏保守**（不会超发），但"某个上游够不够"这个问题在这套账上**答不出来** ——
+  要按上游分别看，得靠标定与 §7 帧之外的观测，别从 `capacity` 反推。
 - **单进程假设**：多进程部署会把同出口预算乘上进程数（决策 3 末条）；**独立脚本打的出口请求闸看不见**
   （Python 工作台已按 §15.10 退役，脚本这条口子仍在）。
 - **key 级 429 与出口级 429 在响应面上仍同形**（§16.7 v1.6.2：无专用码）；检测器只解决**归因**，不解决**可观测**。

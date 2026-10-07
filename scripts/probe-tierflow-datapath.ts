@@ -33,6 +33,22 @@
  *
  * 退出码：全部探针都跑完 → 0；有探针**没能执行**（网络/超时）→ 1。
  * 探针本身「探出问题」**不算失败**（它是诊断工具），结论打在报告末的 VERDICT 段。
+ *
+ * ── 已产出的结论（2026-10-07 带真 key 实测；临时 key 已按 token_no 对账删除）────
+ * 上面两个问题**都已答**，本脚本现在是回归工具，不是发现工具：
+ * 1. **路径存在、且是标准 OpenAI 兼容面**：`GET /v1/models` → 200，体是
+ *    `{data:[{id,object:"model",created,owned_by:"custom",...}]}`（7 个模型）。
+ *    「自有协议 / 接不进通用上游」这条分支**已排除**。
+ * 2. **数据面从不使用 200+`success:false`**：实测错误体一律非 2xx + OpenAI 形状
+ *    `{error:{code,message,type:"tierflow_error"}}`（401 `code:""` / 403
+ *    `routing_override_forbidden` / 404 `model_not_found` / 429 `rate_limit_exceeded`）。
+ *    `looksLikeFailureBody` 从未命中 ⇒ `classifyUpstreamStatus` 的纯状态码驱动**成立**。
+ * 3. **P3**：`stream:true` + 幻觉模型 → 404 普通 JSON、`sse:false`，错误体**在首包之前**到
+ *    ⇒ 若将来确需「首包前再分类」，技术上做得到。
+ * 4. **P4**：零余额 key → 401 `Invalid token`（`code` 为空），与「token 不存在」**同形状**，
+ *    上游不区分 ⇒ 现判定 `AUTH_INVALID` → 计失败 + 冷却，**当前处置正确，无需改 classify**。
+ * 5. ⚠ **出口 IP 次数预算 ~5–6 请求/窗口，成功请求同样计入且与账号/key 无关**（见 PACE_MS）。
+ *    这条是**项目级约束**：26 账号池不扩容吞吐。
  */
 
 import { classifyUpstreamStatus } from '../src/gateway/classify.js';
@@ -47,10 +63,14 @@ const MODEL = process.env.PROBE_MODEL ?? '';
 const DRY_RUN = process.env.PROBE_DRY_RUN === '1';
 const TIMEOUT_MS = intEnv('PROBE_TIMEOUT_MS', 15000, 1000);
 /**
- * 探针之间的间隔。**不是一个礼貌参数，是正确性参数**：
- * 实测该出口的 IP 级限流在**约 8 次急促请求**内即触发（见 §16.7），
- * 而本脚本一次全跑要发 7 次请求 —— 不留间隙的话，后半段探针会被
- * 429 污染成假结论（"链路上游回 429" 与 "我们自己把 IP 打限流了" 分不开）。
+ * 探针之间的间隔。
+ *
+ * ⚠ v2 实测订正（原注释说「≈8 次急促请求即触发」，据此以为**放慢就安全** —— 这是错的）：
+ * 该出口的 IP 级限流是**次数预算**，不是速率：
+ *   · 2.5s 间隔同样在第 6–7 条触发，放慢**不解决问题**；
+ *   · **成功请求同样计入**（真 key 连发 6 条 200 → 第 7 条 429）；
+ *   · 限流键是**出口 IP 聚合**，与账号/key 无关（两账号交错仍在第 6 条触发）。
+ * 所以 PACE_MS 只减少抖动，**不能**让「全跑」成立 —— 分片 + 冷却窗口才是（见 PROBE_ONLY）。
  */
 const PACE_MS = intEnv('PROBE_PACE_MS', 700, 0);
 /**

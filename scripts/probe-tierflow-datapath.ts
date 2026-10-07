@@ -41,6 +41,13 @@ const EXHAUSTED_KEY = process.env.PROBE_EXHAUSTED_KEY ?? '';
 const MODEL = process.env.PROBE_MODEL ?? '';
 const DRY_RUN = process.env.PROBE_DRY_RUN === '1';
 const TIMEOUT_MS = intEnv('PROBE_TIMEOUT_MS', 15000, 1000);
+/**
+ * 探针之间的间隔。**不是一个礼貌参数，是正确性参数**：
+ * 实测该出口的 IP 级限流在**约 8 次急促请求**内即触发（见 §16.7），
+ * 而本脚本一次全跑要发 7 次请求 —— 不留间隙的话，后半段探针会被
+ * 429 污染成假结论（"链路上游回 429" 与 "我们自己把 IP 打限流了" 分不开）。
+ */
+const PACE_MS = intEnv('PROBE_PACE_MS', 700, 0);
 
 /** 请求体里故意用一个不可能存在的模型，用来把「模型不存在」与「余额/鉴权」分开 */
 const BOGUS_MODEL = '__probe_model_that_does_not_exist__';
@@ -137,6 +144,8 @@ type ProbeSpec = {
   secret: string;
   /** 该探针要求的凭据缺口说明（缺了就跑不了，报告里显式标 SKIP，不静默跳过） */
   requires: string;
+  /** 无需任何凭据即可跑 —— 缺凭据时**不**跳过（`secret` 为空属正常） */
+  credentialFree?: boolean;
   run: (secret: string) => Promise<ProbeResult>;
 };
 
@@ -293,6 +302,77 @@ async function probeChatStream(id: string, title: string, goal: string, secret: 
   }
 }
 
+/* ------------------- 无凭据探针：路径存在性（不卡凭据） ------------------- */
+
+/**
+ * 单次请求、**不带任何真实凭据**，只判「这条路径在不在」。
+ *
+ * 判据是状态码本身：不存在的路径回 404，存在但要求鉴权的路径回 401/403。
+ * 于是「拿到 401/403 而不是 404」就是「服务端实现了这条路径」的直接证据 ——
+ * 这一条**不需要 key**。
+ *
+ * 为什么值得单列：§16.1 把「数据面 relay 路径存在吗」整条登记成凭据悬空件，
+ * 但那个问题里混了两件事 —— **路径存在性** 与 **已鉴权协议兼容性**。
+ * 前者不卡凭据，一起挂起会让整条 S1 无谓地等；本探针先把前一半判掉。
+ */
+async function probeGetShape(
+  id: string,
+  title: string,
+  goal: string,
+  path: string,
+  headers: Record<string, string>,
+  requires: string,
+): Promise<ProbeResult> {
+  const started = Date.now();
+  try {
+    const res = await fetch(`${BASE_URL}${path}`, {
+      method: 'GET',
+      headers,
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    const text = await res.text();
+    let parsed: unknown = null;
+    let parsedOk = false;
+    try {
+      parsed = JSON.parse(text);
+      parsedOk = true;
+    } catch {
+      /* 非 JSON */
+    }
+    return {
+      id,
+      title,
+      goal,
+      requires,
+      ran: true,
+      httpStatus: res.status,
+      contentType: res.headers.get('content-type'),
+      firstChunkMs: Date.now() - started,
+      sse: false,
+      body: parsedOk ? describe(parsed) : safe(text, 400),
+      networkError: null,
+      currentVerdict: classifyUpstreamStatus(res.status) ?? 'null（不计失败 / 不换 key）',
+      needsBodyRecognition: looksLikeFailureBody(res.status, parsedOk ? parsed : null),
+    } as ProbeResult & { goal: string; requires: string };
+  } catch (err) {
+    return {
+      id,
+      title,
+      goal,
+      requires,
+      ran: false,
+      httpStatus: null,
+      contentType: null,
+      firstChunkMs: null,
+      sse: false,
+      body: null,
+      networkError: safe(err instanceof Error ? `${err.name}: ${err.message}` : String(err)),
+      currentVerdict: null,
+      needsBodyRecognition: false,
+    } as ProbeResult & { goal: string; requires: string };
+  }
+}
+
 async function probeModels(secret: string): Promise<ProbeResult> {
   const started = Date.now();
   const goal = '数据面是否提供 OpenAI 兼容的 /v1/models —— 模型清单能否自动发现';
@@ -355,6 +435,27 @@ const FAKE_KEY = ['sk', 'probe', 'invalid', '0'.repeat(24)].join('-');
 
 function buildSpecs(): ProbeSpec[] {
   return [
+    /* —— 无凭据两条：先判「路径在不在」，再判「已鉴权面长什么样」 ——
+       401/403 而不是 404 ⇒ 路径被实现且后面挡着鉴权。拿到这一条，
+       §16.1 的判据表就不再是「两行都还是候选」（成功体仍是候选，路径不是）。 */
+    {
+      id: 'P0a',
+      title: 'GET /v1/models · 无 Authorization 头',
+      goal: '路径存在性：401/403 = 已实现并挡鉴权；404 = 不存在；网络错 = 未证实',
+      secret: '',
+      requires: '（无需凭据）',
+      credentialFree: true,
+      run: () => probeGetShape('P0a', 'GET /v1/models · 无 Authorization 头', '路径存在性（无凭据可判）', '/v1/models', {}, '（无需凭据）'),
+    },
+    {
+      id: 'P0b',
+      title: 'GET /v1/models · 畸形 sk-（形状合法、值必错）',
+      goal: '鉴权前是否有一层自有判定（上次旁证里的 403 routing_override_forbidden）—— 该分支由「有无 Bearer sk-」触发，不由路径触发',
+      secret: '',
+      requires: '（无需凭据）',
+      credentialFree: true,
+      run: () => probeGetShape('P0b', 'GET /v1/models · 畸形 sk-', '鉴权前置层是否存在（无凭据可判）', '/v1/models', { authorization: `Bearer ${FAKE_KEY}` }, '（无需凭据）'),
+    },
     {
       id: 'P0',
       title: 'GET /v1/models',
@@ -401,7 +502,7 @@ function buildSpecs(): ProbeSpec[] {
 function printPlan(specs: ProbeSpec[]): void {
   console.log('── 探针计划（DRY RUN，未发出任何请求）──');
   for (const s of specs) {
-    const ok = s.secret !== '';
+    const ok = s.secret !== '' || s.credentialFree === true;
     console.log(`  ${s.id}  ${s.title}`);
     console.log(`       目的：${s.goal}`);
     console.log(`       凭据：${s.requires}  → ${ok ? '就绪' : '缺失（将 SKIP）'}`);
@@ -411,6 +512,7 @@ function printPlan(specs: ProbeSpec[]): void {
   console.log(`PROBE_MODEL : ${MODEL === '' ? '(未提供 → P4 将 SKIP)' : safe(MODEL, 80)}`);
   console.log(`key         : ${maskOf(KEY)}`);
   console.log(`耗尽 key    : ${maskOf(EXHAUSTED_KEY)}`);
+  console.log(`探针间隔    : ${PACE_MS}ms（出口级 IP 限流实测 ≈8 次急促请求即触发，故每次之间留间隙）`);
 }
 
 async function main(): Promise<number> {
@@ -430,11 +532,12 @@ async function main(): Promise<number> {
   let skipped = 0;
 
   for (const spec of specs) {
-    if (spec.secret === '') {
+    if (spec.secret === '' && spec.credentialFree !== true) {
       console.log(`SKIP ${spec.id} ${spec.title} —— 缺 ${spec.requires}`);
       skipped += 1;
       continue;
     }
+    if (results.length + skipped > 0 && PACE_MS > 0) await new Promise((r) => setTimeout(r, PACE_MS));
     console.log(`RUN  ${spec.id} ${spec.title} …`);
     const r = await spec.run(spec.secret);
     results.push(r as ProbeResult & { goal: string; requires: string });
@@ -466,13 +569,27 @@ async function main(): Promise<number> {
   console.log('════════════════════ VERDICT ════════════════════════');
 
   const anyBodyRecognition = results.some((r) => r.needsBodyRecognition);
-  const modelsRan = results.find((r) => r.id === 'P0');
-  const openAiCompatible = modelsRan !== undefined && modelsRan.httpStatus !== null && modelsRan.httpStatus < 400;
+  const modelsAuthed = results.find((r) => r.id === 'P0');
+  const modelsAnon = results.find((r) => r.id === 'P0a');
+  const modelsFake = results.find((r) => r.id === 'P0b');
 
-  console.log(`数据面是否为 OpenAI 兼容面 : ${openAiCompatible ? '是（/v1/models 可用）' : '否 / 未证实'}`);
-  console.log(`是否需要「200 + 错误体」识别 : ${anyBodyRecognition ? '需要 —— classify.ts 必须加 pre-first-chunk 改判' : '本批探针未见 200+错误体'}`);
+  /** 401/403（而非 404）即可证明**路径被实现了** —— 这是无凭据也判得了的那一半 */
+  const implemented = (r: ProbeResult | undefined): boolean =>
+    r !== undefined && r.ran && r.httpStatus !== null && (r.httpStatus < 400 || r.httpStatus === 401 || r.httpStatus === 403);
+  /** 带 key 的成功往返 —— 这一半必须有凭据 */
+  const authedRoundTrip = modelsAuthed !== undefined && modelsAuthed.httpStatus !== null && modelsAuthed.httpStatus < 400;
+
+  console.log('── 路径存在性（无凭据即可判）──');
+  console.log(`  服务端实现了 /v1/models : ${implemented(modelsAnon) ? '是（无凭据下回 401/403 而非 404）' : '未证实'}`);
+  console.log(`  鉴权前自有判定层        : ${modelsFake?.httpStatus === 403 ? '是（畸形 sk- → 403，无头 → 401，分支由头决定不由路径决定）' : '未观测到'}`);
+  console.log('');
+  console.log('── 已鉴权协议兼容性（必须有 key 才能判）──');
+  console.log(`  带 key 的成功往返       : ${authedRoundTrip ? '是 —— P0 过线' : '未实测（缺 PROBE_KEY）'}`);
+  console.log(`  数据面是否 OpenAI 兼容面 : ${authedRoundTrip ? '是（/v1/models 可用）' : '路径已证实、成功体未证实'}`);
+  console.log(`  是否需要「200 + 错误体」识别 : ${anyBodyRecognition ? '需要 —— classify.ts 必须加 pre-first-chunk 改判' : '本批探针未见 200+错误体'}`);
   if (skipped > 0) {
-    console.log(`跳过 ${skipped} 条：缺凭据。结论不完整，补齐后重跑才能冻结契约。`);
+    console.log(`跳过 ${skipped} 条：缺凭据。**路径存在性那一半的结论仍然有效**，`);
+    console.log(`但「已鉴权协议兼容性」未实测 —— 补齐 PROBE_KEY 后重跑才能把 P0 推过线。`);
   }
   console.log('');
   console.log('报告请整段回贴到群/契约；本脚本不落盘任何文件。');

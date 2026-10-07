@@ -65,6 +65,7 @@ function input(over: Partial<BalanceSnapshotInput> = {}): BalanceSnapshotInput {
     totalBalanceCents: 12345,
     knownKeyCount: 2,
     unknownKeyCount: 1,
+    unlimitedKeyCount: 0,
     tokenPlanKeyCount: 3,
     trigger: 'auto',
     ...over,
@@ -86,6 +87,7 @@ describe('写入与读取（契约 §14.3）', () => {
       totalBalanceCents: 12345,
       knownKeyCount: 2,
       unknownKeyCount: 1,
+      unlimitedKeyCount: 0,
       tokenPlanKeyCount: 3,
       trigger: 'auto',
     });
@@ -245,6 +247,7 @@ describe('无外键 + 名字快照（对偶 ADR-0016 的物理删除）', () => 
       totalBalanceCents: 5000,
       knownKeyCount: 1,
       unknownKeyCount: 0,
+      unlimitedKeyCount: 0,
       tokenPlanKeyCount: 0,
       trigger: 'auto',
     });

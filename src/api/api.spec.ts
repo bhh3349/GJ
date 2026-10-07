@@ -944,3 +944,122 @@ describe('删上游：从属资源处置（契约 §2 / ADR-0016）', () => {
     await closeHarness(h);
   });
 });
+
+describe('§2 / §15.6：supplier 能力位与新聚合字段（HTTP 面）', () => {
+  it('POST 带 supplier=tierflow → 201 且回显；通用上游恒 null + 账号格全 0/null', async () => {
+    const h = await setup();
+
+    const generic = await h.app.inject({
+      method: 'POST',
+      url: '/api/upstreams',
+      headers: auth(h),
+      payload: { name: 'generic', baseUrl: 'https://generic.example.com' },
+    });
+    expect(generic.statusCode, generic.body).toBe(201);
+    const g = generic.json() as UpstreamFields;
+    // 省略 supplier == 通用上游，与加这一列之前逐字一致
+    expect(g.supplier).toBeNull();
+    expect(g.accountCount).toBe(0);
+    expect(g.accountsBalance).toBeNull();
+    expect(g.accountsBalanceUnknownCount).toBe(0);
+    expect(g.unlimitedKeyCount).toBe(0);
+
+    const tf = await h.app.inject({
+      method: 'POST',
+      url: '/api/upstreams',
+      headers: auth(h),
+      payload: { name: 'tf', baseUrl: 'https://tierflow.cn', supplier: 'tierflow' },
+    });
+    expect(tf.statusCode, tf.body).toBe(201);
+    expect((tf.json() as UpstreamFields).supplier).toBe('tierflow');
+    await closeHarness(h);
+  });
+
+  it('supplier 是枚举不是自由文本（写错一个字的后果是静默走错驱动器）', async () => {
+    const h = await setup();
+    const bad = await h.app.inject({
+      method: 'POST',
+      url: '/api/upstreams',
+      headers: auth(h),
+      payload: { name: 'oops', baseUrl: 'https://oops.example.com', supplier: 'tierflow-cn' },
+    });
+    expect(bad.statusCode).toBe(400);
+    await closeHarness(h);
+  });
+
+  it('PATCH supplier 可置回 null（显式降级），且省略时不动它', async () => {
+    const h = await setup();
+    const created = await h.app.inject({
+      method: 'POST',
+      url: '/api/upstreams',
+      headers: auth(h),
+      payload: { name: 'tf', baseUrl: 'https://tierflow.cn', supplier: 'tierflow' },
+    });
+    const { id, revision } = created.json() as { id: string; revision: number };
+
+    // 只改名字：supplier 必须原封不动（省略 ≠ 清空）
+    const renamed = await h.app.inject({
+      method: 'PATCH',
+      url: `/api/upstreams/${id}`,
+      headers: auth(h),
+      payload: { name: 'tf2', revision },
+    });
+    expect(renamed.statusCode, renamed.body).toBe(200);
+    expect((renamed.json() as UpstreamFields).supplier).toBe('tierflow');
+
+    const downgraded = await h.app.inject({
+      method: 'PATCH',
+      url: `/api/upstreams/${id}`,
+      headers: auth(h),
+      payload: { supplier: null, revision: revision + 1 },
+    });
+    expect(downgraded.statusCode, downgraded.body).toBe(200);
+    expect((downgraded.json() as UpstreamFields).supplier).toBeNull();
+    await closeHarness(h);
+  });
+
+  it('§6 两个统计端点都带新字段，且 keysBalance 与 totalBalance 无账号时相等', async () => {
+    const h = await setup();
+    const upstreamId = await createUpstream(h);
+    await createKey(h, upstreamId, { key: probeSecret(), balance: 2400 });
+
+    const overview = await h.app.inject({ method: 'GET', url: '/api/stats/overview', headers: auth(h) });
+    const og = (overview.json() as {
+      balance: { global: { totalBalance: number | null; unlimitedKeyCount: number; accountsBalanceUnknownCount: number; byUpstream: UpstreamFields[] } };
+    }).balance.global;
+    expect(og.totalBalance).toBe(2400);
+    expect(og.unlimitedKeyCount).toBe(0);
+    expect(og.accountsBalanceUnknownCount).toBe(0);
+    expect(og.byUpstream[0]?.keysBalance).toBe(2400);
+    expect(og.byUpstream[0]?.accountCount).toBe(0);
+
+    const balance = await h.app.inject({ method: 'GET', url: '/api/stats/balance', headers: auth(h) });
+    const bg = (balance.json() as {
+      global: { totalBalance: number | null; unlimitedKeyCount: number; accountsBalanceUnknownCount: number; byUpstream: UpstreamFields[] };
+    }).global;
+    expect(bg.totalBalance).toBe(2400);
+    expect(bg.byUpstream[0]?.accountsBalance).toBeNull();
+  });
+
+  it('§3 KeyDto 出口带 unlimited（老 key 恒 false，且 balance 仍是数值）', async () => {
+    const h = await setup();
+    const upstreamId = await createUpstream(h);
+    const key = await createKey(h, upstreamId, { key: probeSecret(), balance: 500 });
+
+    const res = await h.app.inject({ method: 'GET', url: `/api/keys/${key.id}`, headers: auth(h) });
+    const dto = res.json() as { unlimited: boolean; balance: number | null };
+    expect(dto.unlimited).toBe(false);
+    expect(dto.balance).toBe(500);
+    await closeHarness(h);
+  });
+});
+
+/** 只声明本组断言要用的字段，避免把整个 DTO 抄一遍后跟着漂。 */
+interface UpstreamFields {
+  supplier: string | null;
+  accountCount: number;
+  accountsBalance: number | null;
+  accountsBalanceUnknownCount: number;
+  unlimitedKeyCount: number;
+  keysBalance: number | null;
+}

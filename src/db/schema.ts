@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS upstreams (
   name          TEXT NOT NULL UNIQUE,
   base_url      TEXT NOT NULL,
   enabled       INTEGER NOT NULL DEFAULT 1,
+  supplier      TEXT,                         -- 供应商能力位（本期唯一取值 'tierflow'）；NULL = 通用上游。能力位只看这一列，不猜 host（§2 / §15.6 / ADR-0018 决策 0）
   balance_query TEXT NOT NULL DEFAULT '{}',   -- JSON：{enabled,url,method,headers,body,parse,timeoutMs}
   revision      INTEGER NOT NULL DEFAULT 1,
   created_at    TEXT NOT NULL,
@@ -59,8 +60,10 @@ CREATE TABLE IF NOT EXISTS upstream_keys (
   masked_key          TEXT NOT NULL,
   secret              BLOB NOT NULL,          -- aes-256-gcm，见 src/db/crypto.ts
   category            TEXT NOT NULL CHECK (category IN ('balance','token-plan')),
+  unlimited           INTEGER NOT NULL DEFAULT 0,  -- 1 = 上游无限额度（unlimited_quota）。**此时 balance_cents 必须为 NULL**：上游给的 remain_quota 是无意义负数（如 -331119），落库就成了"已欠费"（§15.6 / ADR-0018 决策 8）
   enabled             INTEGER NOT NULL DEFAULT 1,
   weight              INTEGER NOT NULL DEFAULT 1,
+  model_limits        TEXT,                   -- 模型白名单 CSV（上游 model_limits，原样落盘，不解析）。NULL = 不限模型；空串/空 CSV 一律归一化为 NULL，**不落 ''**（§15.7 / ADR-0019 决策 2）
   balance_cents       INTEGER,                -- NULL = 未知（未知 != 0）
   balance_currency    TEXT,
   balance_updated_at  TEXT,
@@ -269,12 +272,132 @@ CREATE TABLE IF NOT EXISTS balance_snapshots (
   total_balance_cents  INTEGER,                   -- 分；null = 全未知（不是 0）
   known_key_count      INTEGER NOT NULL,
   unknown_key_count    INTEGER NOT NULL,
+  -- v1.6.0：无限额度 key 数。**加这一列不是为了好看** —— known 的口径是
+  -- 「总数 − 未知 − 无限额度」，少了它前端看到"已知 0 / 未知 0"而该上游有 27 把 key，
+  -- 却没有任何一格能解释那 27 把去哪了（§15.6：无限与未知永远是两个平行的计数）。
+  unlimited_key_count  INTEGER NOT NULL DEFAULT 0,
   token_plan_key_count INTEGER NOT NULL,
   trigger              TEXT NOT NULL CHECK (trigger IN ('auto','manual')),
   created_at           TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_balance_snapshots_ts ON balance_snapshots(ts);
 CREATE INDEX IF NOT EXISTS idx_balance_snapshots_upstream_ts ON balance_snapshots(upstream_id, ts);
+
+-- 供应商账号面（契约 §15 / ADR-0018）。**纯加表**，SCHEMA_VERSION 不递增 ——
+-- 同 balance_snapshots 那批，DDL 每次开库整体跑，旧库上照建。
+--
+-- 四条不是风格问题的取舍：
+--   1. **凭据一律 aes-256-gcm 密文 BLOB，明文永不落盘**（ADR-0006 同一条纪律）。
+--      encrypted_password 与 encrypted_session 是**两列**，不是一个 ——
+--      §15.1 的 credentialSource 与 hasSession 是正交的两个问题（有密码但当前无会话
+--      是合法过渡态），一列存不下这个状态。两个出参字段都由这两列**推导**，各自不单独存。
+--   2. **identifier 是掩码，identifier_hash 是归一化真值的 sha256**。真值不进库
+--      （"真值不出后端"），但同一上游内要能判重 —— 摘要是唯一同时满足这两件事的形状
+--      （同 sessions.token_hash / gateway_keys.key_hash）。
+--   3. **upstream_id 刻意不设外键**。删上游在 ADR-0016 之后是「按依赖序物理删整棵子树」，
+--      而 §2 的守卫只报 keyCount / modelCount —— 账号既不在守卫里、也不在删除里。
+--      此刻加外键，force=false 且名下只有账号时的那次删除会变成 **500**；
+--      此刻把账号塞进删除里，又等于**不经确认静默删掉整批账号凭据**。两条都是错的，
+--      所以先不加约束，把「删上游时账号怎么办」留作契约缺口，不在这里发明行为。
+--   4. **不存套餐价、不存单价**。quota_per_unit 每次从上游读（§15.1），落库的只有
+--      换算后的**分**。供应商改了换算比，我们的历史数不会跟着错。
+CREATE TABLE IF NOT EXISTS supplier_accounts (
+  id                 TEXT PRIMARY KEY,
+  upstream_id        TEXT NOT NULL,                 -- 抹名引用，刻意不设外键（见上）
+  supplier           TEXT NOT NULL,                 -- 'tierflow'（本期唯一取值）
+  identifier         TEXT NOT NULL,                 -- 掩码手机号 / 邮箱，列表直接展示这个
+  identifier_hash    TEXT NOT NULL,                 -- 归一化真值 sha256，同一上游内判重
+  username           TEXT,
+  uid                TEXT,
+  encrypted_password BLOB,                          -- 非空 ⇒ credentialSource = 'password'
+  encrypted_session  BLOB,                          -- 非空 ⇒ hasSession = true
+  session_expires_at TEXT,
+  status             TEXT NOT NULL CHECK (status IN ('active','login_failed','session_expired','unknown')),
+  status_message     TEXT,                          -- 面向人的一句话；只放供应商错误码，不含凭据
+  balance_cents      INTEGER,                       -- 分；NULL = 未知（未知 != 0，ADR-0003）
+  balance_currency   TEXT,
+  balance_updated_at TEXT,                          -- 只在**真查到**时写；查失败不动（§14.2 同纪律）
+  egress_id          TEXT,                          -- §16.7 Tier 2；NULL = 用宿主出口
+  revision           INTEGER NOT NULL DEFAULT 1,
+  created_at         TEXT NOT NULL,
+  updated_at         TEXT NOT NULL,
+  UNIQUE (upstream_id, identifier_hash),            -- §15.9「一个账号只建一行」，两路凭据汇入同一行
+  -- 「至少持有一路凭据」。这条不是洁癖：credentialSource 由这两列**推导**，
+  -- 两列全空时它无值可推 —— 那种行在 DTO 里只能瞎猜一个，而它是永远登不上的死行。
+  -- 会话过期**不清 BLOB**（只把 status 落 session_expired），所以这条不变量长期成立。
+  CHECK (encrypted_password IS NOT NULL OR encrypted_session IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS idx_supplier_accounts_upstream ON supplier_accounts(upstream_id);
+CREATE INDEX IF NOT EXISTS idx_supplier_accounts_status ON supplier_accounts(status);
+
+-- 出口 IP 池（契约 §16.7 Tier 2 / ADR-0020）。**纯加表**。
+--
+-- url 只放 scheme://host:port，**不放凭据**；代理认证走 secret（aes-256-gcm 密文 BLOB，
+-- 与 upstream_keys.secret 同一形状）。"凭据不存值"的正确落法是**不存明文** ——
+-- 一个连不上的代理不是出口，所以这里存的是可用凭据，但明文永不落盘、永不出后端。
+CREATE TABLE IF NOT EXISTS egress_proxies (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL UNIQUE,
+  url        TEXT NOT NULL,                         -- scheme://host:port，不含 user:pass
+  secret     BLOB,                                  -- aes-256-gcm：代理认证；NULL = 免认证
+  region     TEXT,                                  -- 备注用：hk / cn-bj / us
+  note       TEXT,
+  enabled    INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+-- 账号套餐（契约 §15.1 subscriptions）。**纯加表**。
+--
+-- 套餐**不建成 key**、不引入 token-plan 新行（ADR-0018 决策 7）：它的余额是**账号级**的，
+-- 且上游给的是 N 个套餐各带掩码。金额一律 …_cents(int 分) —— 上游 paid_money 是
+-- **浮点元**（29.9 * 100 = 2989.9999999999995），换算必须 Math.round，截断会系统性少算一分。
+-- 顺带：套餐摘要也是**冷读**来源（§15.3 说套餐刷新走 /api/subscription/self 且**不消耗限流**）。
+CREATE TABLE IF NOT EXISTS supplier_account_subscriptions (
+  id                 TEXT PRIMARY KEY,
+  account_id         TEXT NOT NULL REFERENCES supplier_accounts(id),
+  sub_no             TEXT NOT NULL,                 -- 上游套餐号（SB…），稳定标识
+  plan_title         TEXT,
+  plan_slug          TEXT,
+  amount_total_cents INTEGER,
+  amount_used_cents  INTEGER,
+  paid_cents         INTEGER,
+  basic_token_total  INTEGER,
+  basic_token_used   INTEGER,
+  status             TEXT,
+  source             TEXT,
+  start_at           TEXT,
+  end_at             TEXT,
+  auto_renew         INTEGER,                       -- 0/1；NULL = 上游没给（不是 false）
+  has_key            INTEGER NOT NULL DEFAULT 0,
+  key_masked         TEXT,                          -- 套餐 key 只有掩码，进不了池
+  updated_at         TEXT NOT NULL,
+  UNIQUE (account_id, sub_no)
+);
+CREATE INDEX IF NOT EXISTS idx_supplier_subs_account ON supplier_account_subscriptions(account_id);
+
+-- 账号名下的 key（契约 §15.1 keyCount / unlimitedKeyCount / maskedKeyCount）。**纯加表**。
+--
+-- pooled_key_id 非空 = 已入池（keyCount 那一格）；空 = 只拿到掩码、进不了池
+-- （maskedKeyCount 那一格，**不得与 keyCount 相加**）。unlimitedKeyCount 不在这里存 ——
+-- 它按 §15.7 从 upstream_keys.unlimited 现算，两个数各存一份早晚会对不上。
+--
+-- 两条刻意不做的事：
+--   1. **masked_key 不加 UNIQUE**。掩码只有后 4 位，两把不同的 key 撞后 4 位是正常事件，
+--      加了它等于把一次正常同步变成约束报错。判重是同步写入方的责任（按账号整体替换，
+--      §15.2 keys/sync），不是这一列的职责。
+--   2. **pooled_key_id 不设外键**。upstream_keys 会被 deleteUpstream 整批物理删除，
+--      加了外键就把那条已冻结、已被测的删除路径变成 500 —— 与 upstream_id 同一个理由。
+CREATE TABLE IF NOT EXISTS supplier_account_keys (
+  id            TEXT PRIMARY KEY,
+  account_id    TEXT NOT NULL REFERENCES supplier_accounts(id),
+  masked_key    TEXT NOT NULL,
+  pooled_key_id TEXT,                               -- NULL = 只拿到掩码，进不了池
+  note          TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_supplier_keys_account ON supplier_account_keys(account_id);
 `;
 
 /** 列是否存在。删列是"只做一次"的搬迁，靠它判幂等 —— 版本号只当记账用。 */
@@ -324,6 +447,37 @@ export function migrate(db: SqliteDatabase): void {
     // 而 upstream_id / key_id 那种低基数列必须带 ts，否则一个 key 会拖出全表。
     db.exec('CREATE INDEX IF NOT EXISTS idx_logs_request_id ON usage_logs(request_id)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_err_request_id ON gateway_error_events(request_id)');
+  })();
+
+  // v1.4.x：供应商能力位 + key 模型白名单（契约 §15.7，ADR-0018 / ADR-0019）。**纯加列**，SCHEMA_VERSION 不递增。
+  //
+  // 与 ADR-0013 那批（纯加表）的区别同 v1.1.1：这三列是加给**既有表**的。
+  // 只改上面的 DDL 文本对已经在跑的库**没有任何作用** —— `CREATE TABLE IF NOT EXISTS` 撞上
+  // 已存在的表是空操作，`upstreams` / `upstream_keys` 正是这种表：老库里它们早就存在，
+  // 于是"新列"永远进不来，而下一次 `SELECT model_limits` 才炸。必须真发 ALTER。
+  //
+  // 守卫必须是 hasColumn() 而非 user_version：ADD COLUMN **不幂等**，重复执行抛
+  // `duplicate column name`，而这段跑在每次 openDatabase() 里，会把开库一起带走。
+  // 判据也用"列在不在"而非"库新不新"：新库建表时已带这三列 → 跳过；老库没有 → 补。
+  // 同一句代码覆盖两种库，中间状态（用户版本号被写过但列没加）也不会永久漏迁。
+  db.transaction(() => {
+    const added: [table: string, column: string, decl: string][] = [
+      // 可空、无默认：老行 NULL = 不走供应商能力位，与加列前逐字一致（§15.6：不猜 host，只看这一列）。
+      ['upstreams', 'supplier', 'TEXT'],
+      // 有默认值：老行填 0 == "非无限额度"，正是我们要的语义（§15.6 / 决策 8）。
+      ['upstream_keys', 'unlimited', 'INTEGER NOT NULL DEFAULT 0'],
+      // 可空、无默认：老行 NULL == "不限模型"，与加列前逐字一致（§3：null 与 [] 同义，库里不出现 ''）。
+      ['upstream_keys', 'model_limits', 'TEXT'],
+      // 有默认值：老快照行填 0 == "那一刻没有无限额度 key"。**这个 0 是有依据的**，
+      // 不是补一个好看的空缺：`unlimited` 这一列本身就是 v1.4.0 才有的，
+      // 比它更早的快照里不可能存在无限额度 key。
+      ['balance_snapshots', 'unlimited_key_count', 'INTEGER NOT NULL DEFAULT 0'],
+    ];
+    for (const [table, column, decl] of added) {
+      if (!hasColumn(db, table, column)) {
+        db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+      }
+    }
   })();
 
   const current = db.pragma('user_version', { simple: true }) as number;

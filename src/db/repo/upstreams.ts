@@ -10,7 +10,7 @@ import { ApiError } from '../../api/errors.js';
 import type { BalancePresetDto, Page, UpstreamDto } from '../../api/dto.js';
 import { findPresetByBaseUrl } from '../../balance/preset.js';
 import { nowIso } from '../../util/time.js';
-import { computeGlobalBalance } from '../balance.js';
+import { computeGlobalBalance, type UpstreamBalance } from '../balance.js';
 import {
   DEFAULT_BALANCE_QUERY,
   normalizeBalanceQuery,
@@ -27,6 +27,7 @@ interface UpstreamRow {
   name: string;
   base_url: string;
   enabled: number;
+  supplier: string | null;
   balance_query: string;
   revision: number;
   created_at: string;
@@ -56,21 +57,27 @@ function countsByUpstream(db: Db): Map<string, { keyCount: number; enabledKeyCou
 function toDto(
   row: UpstreamRow,
   counts: Map<string, { keyCount: number; enabledKeyCount: number }>,
-  balance: Map<string, { totalBalance: number | null; unknown: number; tokenPlan: number }>,
+  balance: Map<string, UpstreamBalance>,
 ): UpstreamDto {
   const c = counts.get(row.id) ?? { keyCount: 0, enabledKeyCount: 0 };
-  const b = balance.get(row.id) ?? { totalBalance: null, unknown: 0, tokenPlan: 0 };
+  const b = balance.get(row.id);
   const template = normalizeBalanceQuery(JSON.parse(row.balance_query) as unknown);
   return {
     id: row.id,
     name: row.name,
     baseUrl: row.base_url,
     enabled: row.enabled === 1,
+    supplier: row.supplier,
     keyCount: c.keyCount,
     enabledKeyCount: c.enabledKeyCount,
-    totalBalance: b.totalBalance,
-    balanceUnknownKeyCount: b.unknown,
-    tokenPlanKeyCount: b.tokenPlan,
+    totalBalance: b?.totalBalance ?? null,
+    balanceUnknownKeyCount: b?.balanceUnknownKeyCount ?? 0,
+    unlimitedKeyCount: b?.unlimitedKeyCount ?? 0,
+    tokenPlanKeyCount: b?.tokenPlanKeyCount ?? 0,
+    accountCount: b?.accountCount ?? 0,
+    accountsBalance: b?.accountsBalance ?? null,
+    accountsBalanceUnknownCount: b?.accountsBalanceUnknownCount ?? 0,
+    keysBalance: b?.keysBalance ?? null,
     balanceQuery: template,
     // 只读、可推导：preset 从不落库，这里每次现算。命中与否只看 host，
     // `effective` 才是"当前真正生效的是它吗"——用户模板一启用，它就变成 false。
@@ -87,14 +94,15 @@ function balancePresetOf(baseUrl: string, template: BalanceQueryTemplate): Balan
   return { id: preset.id, label: preset.label, matchedBy: 'host', effective: !template.enabled };
 }
 
-function balanceIndex(db: Db): Map<string, { totalBalance: number | null; unknown: number; tokenPlan: number }> {
+/**
+ * 上游余额索引。**直接存整个 `UpstreamBalance`**，不再手工挑三个字段 ——
+ * 上一版是 `{totalBalance, unknown, tokenPlan}` 的小对象，于是 §15 加账号格时
+ * 新字段（`accountCount` / `accountsBalance` / …）会被这一层**静默吞掉**：
+ * 聚合算对了，DTO 却是 0/null。少一层手抄就少一处这种漂移。
+ */
+function balanceIndex(db: Db): Map<string, UpstreamBalance> {
   const all = computeGlobalBalance(db);
-  return new Map(
-    all.byUpstream.map((u) => [
-      u.upstreamId,
-      { totalBalance: u.totalBalance, unknown: u.balanceUnknownKeyCount, tokenPlan: u.tokenPlanKeyCount },
-    ]),
-  );
+  return new Map(all.byUpstream.map((u) => [u.upstreamId, u]));
 }
 
 export function getUpstreamRow(db: Db, id: string): UpstreamRow | null {
@@ -166,6 +174,8 @@ export interface CreateUpstreamInput {
   name: string;
   baseUrl: string;
   enabled?: boolean | undefined;
+  /** §2：`null` = 通用上游；`"tierflow"` = 走 §15 账号面。省略同 `null`。 */
+  supplier?: string | null | undefined;
   balanceQuery?: unknown;
 }
 
@@ -179,9 +189,18 @@ export function createUpstream(db: Db, input: CreateUpstreamInput): UpstreamDto 
 
   try {
     db.prepare(
-      `INSERT INTO upstreams (id, name, base_url, enabled, balance_query, revision, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
-    ).run(id, input.name, input.baseUrl, input.enabled === false ? 0 : 1, serializeBalanceQuery(template), at, at);
+      `INSERT INTO upstreams (id, name, base_url, enabled, supplier, balance_query, revision, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+    ).run(
+      id,
+      input.name,
+      input.baseUrl,
+      input.enabled === false ? 0 : 1,
+      input.supplier ?? null,
+      serializeBalanceQuery(template),
+      at,
+      at,
+    );
   } catch (err) {
     throw translateWriteError(err, 'name');
   }
@@ -195,6 +214,8 @@ export interface UpdateUpstreamInput {
   name?: string | undefined;
   baseUrl?: string | undefined;
   enabled?: boolean | undefined;
+  /** `undefined` = 不改；`null` = **显式降回通用上游**（这两个必须分得开，见 §2） */
+  supplier?: string | null | undefined;
   balanceQuery?: unknown;
   revision: number;
 }
@@ -217,6 +238,11 @@ export function updateUpstream(db: Db, id: string, patch: UpdateUpstreamInput): 
   if (patch.enabled !== undefined) {
     sets.push('enabled = ?');
     params.push(patch.enabled ? 1 : 0);
+  }
+  // `null` 是有意义的取值（降回通用上游），所以判据是 `!== undefined` 而不是真值判断
+  if (patch.supplier !== undefined) {
+    sets.push('supplier = ?');
+    params.push(patch.supplier);
   }
   if (patch.balanceQuery !== undefined) {
     sets.push('balance_query = ?');

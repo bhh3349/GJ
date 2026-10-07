@@ -36,7 +36,9 @@ import { registerMiscRoutes } from './routes/misc.js';
 import { registerModelRoutes } from './routes/models.js';
 import { registerObservabilityRoutes } from './routes/observability.js';
 import { registerStatsRoutes } from './routes/stats.js';
+import { registerSupplierAccountRoutes } from './routes/supplier-accounts.js';
 import { registerUpstreamRoutes } from './routes/upstreams.js';
+import { supplierOps, type SupplierOps, type SupplierSeams } from './services/supplier-accounts.js';
 
 declare module 'fastify' {
   interface FastifyRequest {
@@ -76,6 +78,15 @@ export interface ApiContext {
    * 关了之后历史快照仍然可读，而那正是"关掉自动同步"的人最想确认的东西。
    */
   balanceSync: BalanceSync;
+  /**
+   * §15.2 六个"要打上游"的端点的注入缝（HTTP 出口 / 排除名单 / 账号级节奏）。
+   *
+   * 默认值在 `buildApp` 里填好，所以用例拿到的 `ctx.supplier` 是**可直接用**的完整对象。
+   * 之所以要有这层缝：那六个端点的验收要求里有一条"排除名单里的号永不参与任何测试"，
+   * 而名单是运行时环境变量给的真实手机号。没有缝的话，验证这条纪律的唯一办法是
+   * 拿真号去跑 —— 那正好是这条纪律禁止的事。
+   */
+  supplier: SupplierOps;
 }
 
 /** 唯一免鉴权路径（契约 §0.5）。用 method+path 精确匹配，不用前缀。 */
@@ -196,6 +207,14 @@ export interface BuildAppOptions {
   balanceSyncTickMs?: number;
   /** 快照裁剪拍节，仅测试用（默认 1h） */
   balanceSyncPruneIntervalMs?: number;
+  /**
+   * §15.2 管理面端点的注入缝（见 `ApiContext.supplier`）。缺省：全局 `fetch`、
+   * 运行时环境里的排除名单、§15.5 的 0.6s 节奏。
+   *
+   * 测试注入假 `fetchImpl` ⇒ 六个端点的全部用例**零网络**；注入 `pacing: {gapMs: 0}`
+   * ⇒ 不必真的等 0.6s × N。
+   */
+  supplier?: SupplierSeams;
 }
 
 export function buildApp(opts: BuildAppOptions): FastifyInstance {
@@ -231,6 +250,10 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     assistant: opts.assistant ?? unwiredAssistantInvoker,
     assistantMetrics: opts.assistantMetrics ?? NO_ASSISTANT_METRICS,
     balanceSync,
+    // 六个管理面端点的缝。这里**只填默认值**，业务代码拿到的永远是填好的对象 ——
+    // 于是"排除名单没接上"这种事只可能发生在这一个表达式里，不可能发生在某个 handler 里。
+    // `fetch` 是**延迟**取全局的：写成模块级常量会在 import 那一刻绑死，测试就换不掉了。
+    supplier: supplierOps(db, config.masterKey, opts.supplier ?? {}),
   };
 
   app.decorateRequest('auth', null);
@@ -337,6 +360,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   registerGroupRoutes(app, ctx);
   registerModelRoutes(app, ctx);
   registerStatsRoutes(app, ctx);
+  registerSupplierAccountRoutes(app, ctx);
   registerMiscRoutes(app, ctx);
   registerObservabilityRoutes(app, ctx);
   registerAssistantRoutes(app, ctx);

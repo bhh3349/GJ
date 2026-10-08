@@ -236,8 +236,8 @@ export function findPresetByBaseUrl(baseUrl: string): BalancePresetSpec | null {
   // 这里曾经自己又写了一遍 host 归一（语义与它逐字相同，含解析失败 → null），
   // 但同一件事写两遍就是漂移的起点 —— 出口桶键与 preset 匹配一旦分叉，会出现
   // "钱按这个 host 算、出口按另一个 host 记账"的错配。
-  // （照 ADR 验收口径 `grep -rn "new URL(.*)\.host" src/` 只许命中 `src/egress/port.ts` 一处 ——
-  //   本注释因此刻意不把那行旧写法逐字抄进来。）
+  // （ADR 验收口径见 `docs/adr/0021-egress-budget-seam.md:189`：扫 `src/` 全集，只许命中
+  //   `src/egress/port.ts` 一处 —— 本注释因此刻意不把那行旧写法逐字抄进来。）
   const host = egressIdOfUrl(baseUrl);
   if (host === null) return null;
   return BALANCE_PRESETS.find((p) => p.hosts.includes(host)) ?? null;

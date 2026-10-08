@@ -901,10 +901,14 @@ describe('判据 9 / 10 —— 热路径零回退与零新增枚举', () => {
     // **本断言是**本版（v1.3.0 余额同步）**的**快照：它要钉的是"加余额同步没有新增任何枚举"。
     // v1.4.0 给 §15 账号面加了 `ACCOUNT_HAS_KEYS`（契约明写"`ERROR_CODES` 首次新增 1 个"），
     // 故这里的绝对值随之 15 → 16 —— **加的是别人那一版的，不是本版的**。
+    // v1.7.0 再各加一枚（ADR-0021 决策 9，契约 §0.4 / §10 同批登记）：16 → 17（`EGRESS_HAS_ACCOUNTS`）、
+    // 10 → 11（`NO_AVAILABLE_EGRESS`）—— 同样**不是本版（余额同步）加的**。
     // 改动这里时请一并确认：新增的那个码有契约与 ADR 背书，不是因为顺手。
-    expect(ERROR_CODES).toHaveLength(16);
+    expect(ERROR_CODES).toHaveLength(17);
     expect(ERROR_CODES).toContain('ACCOUNT_HAS_KEYS');
-    expect(Object.keys(GATEWAY_ERROR_CODES)).toHaveLength(10);
+    expect(ERROR_CODES).toContain('EGRESS_HAS_ACCOUNTS');
+    expect(Object.keys(GATEWAY_ERROR_CODES)).toHaveLength(11);
+    expect(GATEWAY_ERROR_CODES.NO_AVAILABLE_EGRESS).toBe('NO_AVAILABLE_EGRESS');
     expect(SCHEMA_VERSION).toBe(2);
 
     // 漂移码的地位同 `hintCode`：进码表就等于给它开了 HTTP 状态与拦截能力

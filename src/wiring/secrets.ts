@@ -49,8 +49,9 @@ interface CachedSecret {
   /**
    * 归一化后的出口 id：`account_egress_id ?? egressIdOfUrl(baseUrl)`。
    *
-   * 在 `update()`（= 快照重建）里算**一次**，热路径只读 —— 于是全仓的 `new URL(...).host`
-   * 只剩 `src/egress/port.ts` 那一处（ADR-0021 决策 2 的验收口径）。
+   * 在 `update()`（= 快照重建）里算**一次**，热路径只读 —— 于是归一化在全仓只有
+   * `egressIdOfUrl` 一个实现（ADR-0021 决策 2 的验收口径，见
+   * `docs/adr/0021-egress-budget-seam.md:189`）。
    */
   egressId: string | null;
 }

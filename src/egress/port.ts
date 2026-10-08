@@ -141,7 +141,13 @@ export interface EgressShadowRecord {
   types: readonly string[];
   /** 判据若**真生效**会不会挂钩。观察模式下它只是记录，不改任何状态 */
   wouldFire: boolean;
-  /** 账号数不足 ⇒ 判据**结构上**不可能触发（决策 10 第 (5) 条）；**不得**混进"未命中" */
+  /**
+   * 账号数不足 ⇒ 判据**结构上**不可能触发（决策 10 第 (5) 条）；**不得**混进"未命中"。
+   *
+   * 此处「账号数」= 该出口**累计见过**的账号数（进程内存、只增不剪），与上一行那个
+   * **窗口级** `distinctAccounts` **不是同一个量**：按窗口级读，任何一条 `wouldFire=false`
+   * 都必然同时 `insufficientAccounts=true` —— "未命中"被整体吞进"没前提"，可区分性当场失效。
+   */
   insufficientAccounts: boolean;
   /** v10：内部异常就地降级。**必填位，不是可选诊断**（"判据炸了"与"什么都没发现"必须可区分） */
   degraded: boolean;
@@ -170,7 +176,8 @@ export type EgressFetchFor = (egressId: string | null, consumer: EgressConsumer)
  *
  * 它的用途有两重：
  *   1. 数据面凭它**不换 key**（本地拒绝落在同一个出口上，换一把再试必然再撞）；
- *   2. 引擎 429 分支凭它**不进** `egressKeys429`、**不** `reportFailure`（决策 4a 第 2 条硬故障：
+ *   2. 引擎 429 分支凭它**不进台账归因**（判据只在闸内一处 —— `EgressGate.observeLimited`
+ *      的返回 `attribution === 'egress'`）、**不** `reportFailure`（决策 4a 第 2 条硬故障：
  *      否则一次**本地**预算拒绝会被记成"这把 key 失败一次"，几轮下来真的把好 key 停掉）。
  *
  * **不得泄漏**：仅出现在进程内合成的响应上，**不上行、不透给客户端**，由 spec 守。
@@ -201,7 +208,7 @@ export function retryAfterSecOf(remainingMs: number): number {
  * Tier 2 下 `supplier_accounts.egress_id IS NULL`（账号本就直连）**不是** `null` ——
  * 它要退回 Tier 1 推导，直连流量仍占同一个桶。混成一个 `null` 的后果不是降级，是**无上限**。
  *
- * 落地验收：`grep -rn "new URL(.*)\.host" src/` 只允许命中本文件一处。
+ * 落地验收口径见 `docs/adr/0021-egress-budget-seam.md:189`：扫 `src/` 全集，本函数是**唯一**实现。
  */
 export function egressIdOfUrl(url: string): string | null {
   try {

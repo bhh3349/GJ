@@ -13,7 +13,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import type { AppConfig } from '../config.js';
 import { openDatabase, type Db } from '../db/database.js';
 import { sha256Hex } from '../db/crypto.js';
@@ -98,12 +98,19 @@ function makeConfig(dbPath: string): AppConfig {
   };
 }
 
-async function setup(): Promise<Harness> {
+async function setup(opts: { fetchImpl?: typeof fetch } = {}): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'api-probe-'));
   dirs.push(dir);
   const dbPath = join(dir, 'gateway.db');
   const db = openDatabase({ path: dbPath });
-  const app = buildApp({ db, config: makeConfig(dbPath) });
+  const app = buildApp({
+    db,
+    config: makeConfig(dbPath),
+    // 出站缝在 `buildApp` 那一刻定格。要换掉它只能从这里注入，**不能**事后
+    // `vi.stubGlobal('fetch', …)`：那对已经拿定重放的缺省值无效，用例会打到真网络上，
+    // 然后以"超时"的形式红 —— 红得与契约毫无关系。
+    ...(opts.fetchImpl === undefined ? {} : { supplier: { fetchImpl: opts.fetchImpl } }),
+  });
   bootstrapAdmin(db, { ADMIN_USERNAME: ADMIN_USER, ADMIN_PASSWORD: ADMIN_PASS });
 
   const res = await app.inject({
@@ -624,12 +631,20 @@ describe('用户组与网关 key（契约 §4，C1）', () => {
  * 只实现 queryBalance 真正用到的三个成员（`ok`/`status`/`text`），
  * 不去凑一个完整的 Response：凑出来的假 Response 反而会掩盖真实的读取路径缺陷。
  */
-function fakeUpstreamFetch(body: unknown, status = 200): void {
-  vi.stubGlobal('fetch', async () => ({
+/**
+ * 一个假的出站 fetch：把 `body` 当上游响应原样回。
+ *
+ * **返回假 fetch，而不是 `vi.stubGlobal('fetch', …)`**：自测两条端点走的是
+ * `ctx.supplier.fetchImpl`（`balance-selftest.ts` 的 `fetchImpl` 已改必填注入），
+ * 而那条缝在 `buildApp` 里就取定了 —— 事后改全局对它无效。硬要 stub 全局，用例就会
+ * 静默打到真实上游，然后以"超时"的形式红。
+ */
+function fakeUpstreamFetch(body: unknown, status = 200): typeof fetch {
+  return (async () => ({
     ok: status >= 200 && status < 300,
     status,
     text: async (): Promise<string> => (typeof body === 'string' ? body : JSON.stringify(body)),
-  }));
+  })) as unknown as typeof fetch;
 }
 
 /** 自测草稿的默认形状：一个 GET + 直接取值路径。 */
@@ -652,17 +667,15 @@ function draft(overrides: Record<string, unknown> = {}): Record<string, unknown>
 }
 
 describe('余额自测（契约 §2 · M6-A）：同步、诊断语义、绝不写库', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
+  // 本 describe **没有** afterEach/`unstubAllGlobals`：出站全部由 `setup({ fetchImpl })` 注入，
+  // 不碰全局。少了这条解除动作本身就是一条断言 —— 有全局兜底的路子才需要解除。
 
   it('上游级自测用草稿打真实查询：200 + 诊断全量，且不改动已有余额', async () => {
-    const h = await setup();
+    const h = await setup({ fetchImpl: fakeUpstreamFetch({ data: { balance: '123.45', currency: 'CNY' } }) });
     const upstreamId = await createUpstream(h);
     // 先人工录入一个余额，用来证明"自测只是预览"
     const key = await createKey(h, upstreamId, { key: probeSecret(), balance: 8888 });
 
-    fakeUpstreamFetch({ data: { balance: '123.45', currency: 'CNY' } });
     const res = await h.app.inject({
       method: 'POST',
       url: `/api/upstreams/${upstreamId}/balance-template/test`,
@@ -698,12 +711,11 @@ describe('余额自测（契约 §2 · M6-A）：同步、诊断语义、绝不�
   });
 
   it('取不到值时 200 + ok:false + 引导码，且 raw 已抹掉明文 key', async () => {
-    const h = await setup();
+    // 上游正常返回，但字段路径取不到数；同时把 key 明文回显在报错体里（上游常见行为）
+    const h = await setup({ fetchImpl: fakeUpstreamFetch({ data: { currency: 'CNY' }, echo: `invalid api key ${probeSecret()}` }) });
     const upstreamId = await createUpstream(h);
     const key = await createKey(h, upstreamId, { key: probeSecret(), balance: 8888 });
 
-    // 上游正常返回，但字段路径取不到数；同时把 key 明文回显在报错体里（上游常见行为）
-    fakeUpstreamFetch({ data: { currency: 'CNY' }, echo: `invalid api key ${probeSecret()}` });
     const res = await h.app.inject({
       method: 'POST',
       url: `/api/upstreams/${upstreamId}/balance-template/test`,
@@ -726,11 +738,10 @@ describe('余额自测（契约 §2 · M6-A）：同步、诊断语义、绝不�
   });
 
   it('上游返回 401 时引导码是"鉴权被拒"，而不是"上游不可达"', async () => {
-    const h = await setup();
+    const h = await setup({ fetchImpl: fakeUpstreamFetch({ error: 'unauthorized' }, 401) });
     const upstreamId = await createUpstream(h);
     const key = await createKey(h, upstreamId, { key: probeSecret() });
 
-    fakeUpstreamFetch({ error: 'unauthorized' }, 401);
     const res = await h.app.inject({
       method: 'POST',
       url: `/api/upstreams/${upstreamId}/balance-template/test`,
@@ -783,7 +794,13 @@ describe('余额自测（契约 §2 · M6-A）：同步、诊断语义、绝不�
   });
 
   it('命中内置 preset 的上游，key 级自测走 preset（无需用户配模板）', async () => {
-    const h = await setup();
+    // preset 是一个**两跳**查询（subscription + usage），所以这个假 fetch 按 URL 分型回不同 body
+    const presetFetch = (async (input: unknown) => {
+      const url = String(input);
+      const body = url.includes('/subscription') ? { hard_limit_usd: 50 } : { total_usage: 1000 };
+      return { ok: true, status: 200, text: async (): Promise<string> => JSON.stringify(body) };
+    }) as unknown as typeof fetch;
+    const h = await setup({ fetchImpl: presetFetch });
     const created = await h.app.inject({
       method: 'POST',
       url: '/api/upstreams',
@@ -797,11 +814,6 @@ describe('余额自测（契约 §2 · M6-A）：同步、诊断语义、绝不�
     expect((created.json() as { balancePreset: { effective: boolean } | null }).balancePreset?.effective).toBe(true);
 
     const key = await createKey(h, upstreamId, { key: probeSecret() });
-    vi.stubGlobal('fetch', async (input: unknown) => {
-      const url = String(input);
-      const body = url.includes('/subscription') ? { hard_limit_usd: 50 } : { total_usage: 1000 };
-      return { ok: true, status: 200, text: async (): Promise<string> => JSON.stringify(body) };
-    });
 
     const res = await h.app.inject({
       method: 'POST',

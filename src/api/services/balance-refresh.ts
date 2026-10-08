@@ -94,8 +94,14 @@ export interface RefreshDone {
 }
 
 export interface RefreshOptions {
-  /** 覆盖 fetch，仅测试用。 */
-  fetchImpl?: typeof fetch | undefined;
+  /**
+   * 出站 fetch。**必填、无兜底**（ADR-0021 决策 4c「8 处 fetchImpl 兜底全拆」）。
+   *
+   * 原为 `options.fetchImpl ?? fetch`：那正是"外层注入了闸包装、内层静默回落全局 fetch"
+   * 的那一类 —— 接线看起来改了，流量照旧绕开闸，且**没有任何报错**。
+   * 现在漏传 = 编译错误；生产值由 `buildApp` 一处解析（`ApiContext.supplier.fetchImpl`）。
+   */
+  fetchImpl: typeof fetch;
   /**
    * 触发方。只影响快照行的 `trigger` 列与它在同步状态里的归类，
    * **不改变任何刷新行为** —— 三个手动端点的语义零变更（契约 §14.1）。
@@ -169,9 +175,9 @@ export async function refreshBalances(
   masterKey: Buffer,
   scope: RefreshScope,
   reporter: TaskReporter,
-  options: RefreshOptions = {},
+  options: RefreshOptions,
 ): Promise<RefreshSummary> {
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = options.fetchImpl;
   const refs = decryptedKeyRefs(db, scope, masterKey);
   reporter.setTotal(refs.length);
 

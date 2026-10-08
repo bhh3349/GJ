@@ -259,7 +259,8 @@ export interface ExecuteOptions {
 export async function executePlan(
   plan: ExecutableQueryPlan,
   target: QueryTarget,
-  fetchImpl: typeof fetch = fetch,
+  /** **必填、无兜底**（ADR-0021 决策 4c）：两个分支（模板 / preset）都往下透传，缺一层就是静默绕闸。 */
+  fetchImpl: typeof fetch,
   options: ExecuteOptions = {},
 ): Promise<QueryExecution> {
   const captureRaw = options.captureRaw === true;

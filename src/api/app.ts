@@ -225,6 +225,9 @@ export interface BuildAppOptions {
    * §15.2 管理面端点的注入缝（见 `ApiContext.supplier`）。缺省：全局 `fetch`、
    * 运行时环境里的排除名单、§15.5 的 0.6s 节奏。
    *
+   * `fetchImpl` 的缺省**只在本函数里解析一次**（ADR-0021 决策 4c）：它是管理面唯一的出站口，
+   * 拆了逐层兜底之后，`fetchImpl` 在本结构里仍可选（测试不必人人传），但**下游每一层都必填**。
+   *
    * 测试注入假 `fetchImpl` ⇒ 六个端点的全部用例**零网络**；注入 `pacing: {gapMs: 0}`
    * ⇒ 不必真的等 0.6s × N。
    */
@@ -264,6 +267,15 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   const startedAt = opts.startedAt ?? new Date();
   const droppedEvents = opts.droppedEvents ?? (() => 0);
 
+  // 管理面出站 fetch 的**唯一**填充点（ADR-0021 决策 4c：8 处兜底全拆、逐层必填）。
+  // 与 `resolveEgressGate` 同一条纪律：默认值只在这一处填，业务代码拿到的永远是填好的 ——
+  // 于是"忘了接出站缝"只可能发生在这一个表达式里，不可能发生在某个 handler 或某层循环里。
+  // `fetch` 是**延迟**取全局的：写成模块级常量会在 import 那一刻绑死，测试就换不掉了。
+  const supplier = supplierOps(db, config.masterKey, {
+    ...opts.supplier,
+    fetchImpl: opts.supplier?.fetchImpl ?? fetch,
+  });
+
   // 余额自动同步调度器（契约 §14 / ADR-0017）。**先建对象、后起步**：
   // 路由与刷新收尾钩子都要拿到同一个实例，而"要不要注册定时器"是启动那一步的事。
   const balanceSync = createBalanceSync({
@@ -274,6 +286,8 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     log: app.log,
     tickMs: opts.balanceSyncTickMs,
     pruneIntervalMs: opts.balanceSyncPruneIntervalMs,
+    // 自动同步与手动三端点走**同一把**出站 fetch（否则"自动那条线绕开闸"没有任何症状）。
+    fetchImpl: supplier.fetchImpl,
   });
 
   const ctx: ApiContext = {
@@ -287,8 +301,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     balanceSync,
     // 六个管理面端点的缝。这里**只填默认值**，业务代码拿到的永远是填好的对象 ——
     // 于是"排除名单没接上"这种事只可能发生在这一个表达式里，不可能发生在某个 handler 里。
-    // `fetch` 是**延迟**取全局的：写成模块级常量会在 import 那一刻绑死，测试就换不掉了。
-    supplier: supplierOps(db, config.masterKey, opts.supplier ?? {}),
+    supplier,
     // 同一条纪律：默认值只在这一处填，业务代码拿到的永远是填好的闸。
     egress: resolveEgressGate(opts.egress),
   };

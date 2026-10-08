@@ -270,6 +270,7 @@ export function registerUpstreamRoutes(app: FastifyInstance, ctx: ApiContext): v
         req.params.id,
         req.body,
         config.masterKey,
+        ctx.supplier.fetchImpl,
       );
       // 审计只记"测了什么来源、成没成"：草稿模板里有 `{key}` 占位符与端点地址，
       // 不该被抄进审计表（替换后的串更不行）。

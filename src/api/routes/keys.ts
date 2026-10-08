@@ -309,7 +309,7 @@ export function registerKeyRoutes(app: FastifyInstance, ctx: ApiContext): void {
     '/api/keys/:id/test-balance',
     { schema: { params: idParam } },
     async (req, reply) => {
-      const result = await runKeyBalanceTest(db, req.params.id, config.masterKey);
+      const result = await runKeyBalanceTest(db, req.params.id, config.masterKey, ctx.supplier.fetchImpl);
       auditWrite(db, req, config, {
         action: 'key.balance_selftest',
         targetType: 'key',

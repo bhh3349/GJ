@@ -246,3 +246,77 @@ describe('v1.4.x 加列（supplier / unlimited / model_limits）', () => {
     expect(columnsOf(db, 'upstream_keys').filter((c) => c === 'unlimited')).toHaveLength(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 台账 pooled_key_id 的部分唯一索引（ADR-0021 决策 5 的 E 接缝）
+// ---------------------------------------------------------------------------
+//
+// 网关的 KEYS_SQL 要 join 这张台账才知道"这把 key 属于谁"，一对一是那条 join 的前提。
+// 这里钉两件事：索引的**部分**语义（纯掩码行允许重复），以及库里已经有 fan-out 时的
+// fail-closed —— 那种库必须开不了门，且报出来的得是**具体的 pooled_key_id**，
+// 而不是一句"服务起不来"背后翻 DDL 才找得到病根的 `SQLITE_CONSTRAINT`。
+
+function seedSupplierAccountForLedger(db: Db, id: string): void {
+  const at = '2026-10-08T00:00:00.000Z';
+  db.prepare(
+    `INSERT INTO supplier_accounts (id, upstream_id, supplier, identifier, identifier_hash,
+       status, encrypted_password, revision, created_at, updated_at)
+     VALUES (?, 'up_seed', 'tierflow', ?, ?, 'active', ?, 1, ?, ?)`,
+  ).run(id, id, sha256Hex(id), Buffer.alloc(16), at, at);
+}
+
+function seedLedgerRow(db: Db, id: string, accountId: string, pooledKeyId: string | null): void {
+  const at = '2026-10-08T00:00:00.000Z';
+  db.prepare(
+    `INSERT INTO supplier_account_keys (id, account_id, masked_key, pooled_key_id, note, created_at, updated_at)
+     VALUES (?, ?, 'sk-****0000', ?, NULL, ?, ?)`,
+  ).run(id, accountId, pooledKeyId, at, at);
+}
+
+function indexNames(db: Db): string[] {
+  return (db.prepare("SELECT name FROM sqlite_master WHERE type = 'index'").all() as { name: string }[]).map(
+    (r) => r.name,
+  );
+}
+
+describe('台账 pooled_key_id 部分唯一索引', () => {
+  it('入池行独占、纯掩码行可重复（部分索引，不是全局 UNIQUE）', () => {
+    const db = open(tempDbPath());
+    expect(indexNames(db)).toContain('uq_supplier_account_keys_pooled');
+
+    seedSupplierAccountForLedger(db, 'sa_1');
+    seedSupplierAccountForLedger(db, 'sa_2');
+    seedLedgerRow(db, 'sak_1', 'sa_1', null);
+    // 同一个掩码出现两次是**正常事件**（只有后 4 位，撞号天天有）—— 全局 UNIQUE 会把它变成约束报错
+    expect(() => seedLedgerRow(db, 'sak_2', 'sa_2', null)).not.toThrow();
+
+    seedLedgerRow(db, 'sak_3', 'sa_1', 'key_1');
+    // 同一把入池 key 被两条台账行引用 = 它在网关池里会出现两遍 → 必须拦下
+    expect(() => seedLedgerRow(db, 'sak_4', 'sa_2', 'key_1')).toThrow(/UNIQUE/);
+  });
+
+  it('库里已有 fan-out 行：开库 fail-closed，报出具体 pooled_key_id，不静默', () => {
+    const db = open(tempDbPath());
+    // 回到"索引还没落"的历史库态：删掉索引，再塞进重复的入池行
+    db.exec('DROP INDEX uq_supplier_account_keys_pooled');
+    seedSupplierAccountForLedger(db, 'sa_1');
+    seedSupplierAccountForLedger(db, 'sa_2');
+    seedLedgerRow(db, 'sak_1', 'sa_1', 'key_fanout');
+    seedLedgerRow(db, 'sak_2', 'sa_2', 'key_fanout');
+
+    let message = '';
+    try {
+      migrate(db);
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err);
+    }
+    expect(message).toContain('fan-out');
+    expect(message).toContain('key_fanout'); // 点名到行，而不是一句 SQLITE_CONSTRAINT
+    expect(indexNames(db)).not.toContain('uq_supplier_account_keys_pooled'); // 没建，也就没有半个状态
+
+    // 人工判定后删掉多余那一行 → 同一个库能正常升上来
+    db.prepare('DELETE FROM supplier_account_keys WHERE id = ?').run('sak_2');
+    expect(() => migrate(db)).not.toThrow();
+    expect(indexNames(db)).toContain('uq_supplier_account_keys_pooled');
+  });
+});

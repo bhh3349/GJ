@@ -5,8 +5,12 @@
 //
 // 一次刷新读三样东西，之后全部从内存走：
 //   1. 上游行 → `UpstreamConfig[]`（含该上游**登记并启用**的模型名，见下方「选路口径」）
-//   2. key 行 → `KeyConfig[]` + 解密后的明文（交给 secrets.ts 的缓存）
+//   2. key 行 → `KeyConfig[]` + 解密后的明文 + 出口归属（交给 secrets.ts 的缓存；三表 join 见 KEYS_SQL）
 //   3. 已启用模型档案 → `/v1/models` 列表 + 用量落库时的价格换算
+//
+// 台账也是快照输入的一部分（那把 key 属于哪个账号 / 走哪个出口）。台账表**不在** SNAPSHOT_ENTITIES
+// 的实体名里，所以它的写路径必须自己发一条 `'key'`（见 `db/repo/supplier-accounts.ts` 的两个绑定入口）
+// —— 漏发不会报错，只会让 `accountId` 停在旧值上一直不动。
 //
 // 选路口径（本文件里唯一需要动脑子的地方）：
 //   `UpstreamConfig.models` 取「该上游名下 enabled=1 的模型名」。
@@ -56,12 +60,36 @@ interface ChangeRow {
 /** 上游的 key 才需要 base_url；只要没软删的行 —— 软删是"停用并留痕"，不该再出站 */
 const UPSTREAMS_SQL = 'SELECT id, base_url, enabled FROM upstreams ORDER BY name, id';
 
+/**
+ * key 行 + 它的**账号归属**（ADR-0021 决策 5 的 E 接缝）。
+ *
+ * 这是本文件唯一一处跨到 §15 台账面的读，两个新列都只为出口面服务：
+ *   · `account_id` → `EgressLimitedInput.subject.accountId`（限流计数按**账号**去重，
+ *     否则"一个账号建 3 把 key"会把同一次限流数 3 遍）；
+ *   · `account_egress_id` → 这把 key 从哪个出口出站（§16.7 Tier 2；NULL = 账号直连）。
+ *
+ * 谓词与 `src/db/balance.ts` 的 `UNOWNED_KEY` **逐字同形**（含 `account_id IS NOT NULL`）：
+ * 两处口径一旦不一致，"这把 key 算谁的"会在余额页与网关快照里给出两个答案。
+ *
+ * 一对一是**由索引保证**的（`uq_supplier_account_keys_pooled`，见 schema.ts）：
+ * 少了它，一次 fan-out 就会让同一把 key 在池里出现两遍 —— 放行量翻倍，
+ * 而症状看起来像"路由算法抽风"。
+ *
+ * 也正因为那条部分唯一索引存在，这个 JOIN **不是** ADR-0021 警告的"裸 JOIN 后取首行"：
+ * 它在结构上至多回一行（重建时拿到哪个出口是**确定**的，不随行序/重建次数漂移），
+ * 而索引建不出来时 `migrate()` 直接 fail-closed、进程压根不开门。
+ */
 const KEYS_SQL = `
-SELECT id, upstream_id, category, enabled, weight, balance_cents,
-       token_plan_remaining, token_plan_expires_at, masked_key, revision, secret
-FROM upstream_keys
-WHERE deleted_at IS NULL
-ORDER BY created_at, id
+SELECT k.id, k.upstream_id, k.category, k.enabled, k.weight, k.balance_cents,
+       k.token_plan_remaining, k.token_plan_expires_at, k.masked_key, k.revision, k.secret,
+       sak.account_id AS account_id,
+       sa.egress_id   AS account_egress_id
+FROM upstream_keys k
+LEFT JOIN supplier_account_keys sak
+       ON sak.pooled_key_id = k.id AND sak.account_id IS NOT NULL
+LEFT JOIN supplier_accounts sa ON sa.id = sak.account_id
+WHERE k.deleted_at IS NULL
+ORDER BY k.created_at, k.id
 `;
 
 const MAX_CHANGES_SQL = 'SELECT COALESCE(MAX(seq), 0) AS seq FROM change_log';

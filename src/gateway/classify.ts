@@ -56,3 +56,10 @@ export function isTimeoutError(err: unknown): boolean {
 export function classifyNetworkError(_err: unknown): FailureReason {
   return 'NETWORK';
 }
+
+// 出口级（IP 级）429 的识别缝（`EgressLimitInput` / `EgressLimitDetector` / `neverEgressLimited` /
+// `egressLimitedOnSecondKey`）**已退休**（ADR-0021 影响表 + 决策 10(5)）：归因判据转正进闸内
+//（`src/gateway/egress.ts` 的 `observeLimited`），且只此一处 —— 旁路第二个计数器会让一个
+// 被打空预算的出口拿**自己拒出来的** N 张脸判成「被上游限」再冷掉自己。本文件自此只负责
+// 「状态码 → key 级失败」这一件事。
+

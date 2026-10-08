@@ -23,6 +23,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import type { AppConfig } from '../config.js';
 import type { Db } from '../db/database.js';
+import type { EgressGate } from '../egress/port.js';
 import { gatewayRoutes } from '../gateway/routes.js';
 import type { FetchLike } from '../gateway/engine.js';
 import { createGatewayStack } from '../gateway/stack.js';
@@ -52,6 +53,18 @@ export interface GatewayRuntimeOptions {
   logger?: boolean;
   /** 测试用桩：替换出站 fetch */
   fetchImpl?: FetchLike;
+  /**
+   * 出口（IP）预算闸（契约 §16.7 / ADR-0021 决策 4c）。**必填**，本层不再兜底造一个。
+   *
+   * 必填的理由与 `fetchImpl` 兜底全拆那条同源：`/v1/*` 数据面是**七类出站里唯一不经过
+   * `src/api` 的一类**，闸接在这里就等于"网关面自己有一套预算、管理面另一套" —— 上游按
+   * 来源 IP 计数，两边扣的是**同一张表**，各持一份 = 各自以为还有额度。
+   * 兜底（缺省造一个新闸）会让"漏注入"退化成"预算永远满着"，谁都不会发现；必填则编译期报错。
+   *
+   * 实例由 `src/server.ts` **造一次**：同一个对象既进 `buildApp({ egress })`（管理面）
+   * 也进这里（数据面）—— 决策 4c 的"一个进程一份"。
+   */
+  egress: EgressGate;
 }
 
 export interface GatewayRuntime {
@@ -134,6 +147,9 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions): GatewayRun
       cooldownLadderMs: config.cooldownLadderSeconds.map((s) => s * 1000),
     },
     ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
+    // 逐字转发注入的那个实例，**不**在这里 `?? permissiveEgressGate`：兜底写在这一层，
+    // 就等于"忘了注入"与"故意不接闸"在运行期同形（都恒放行），而那正是要防的静默态。
+    egress: options.egress,
   });
 
   stack.pool.applySnapshot(store.poolSnapshot());

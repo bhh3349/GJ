@@ -159,7 +159,13 @@ export async function syncModels(
   masterKey: Buffer,
   upstreamId: string | undefined,
   reporter: TaskReporter,
-  fetchImpl: typeof fetch = fetch,
+  /**
+   * 出站 fetch。**必填、无兜底**（ADR-0021 决策 4c「8 处 fetchImpl 兜底全拆」）。
+   *
+   * 原为 `= fetch`：`POST /api/models/sync` 同样打上游，兜底在时**路由漏传也不会报错**，
+   * 于是"注入的假 fetch / 闸包装"在这条路上失守（`routes/models.ts` 当时就没传）。
+   */
+  fetchImpl: typeof fetch,
 ): Promise<SyncSummary> {
   const targets = resolveSyncTargets(db, upstreamId);
   reporter.setTotal(targets.length);

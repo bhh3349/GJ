@@ -236,6 +236,8 @@ export function registerUpstreamRoutes(app: FastifyInstance, ctx: ApiContext): v
       const task = startTask(db, 'balance_refresh', total, (reporter) =>
         refreshBalances(db, config.masterKey, { upstreamId: id }, reporter, {
           trigger: 'manual',
+          // 出站 fetch 走管理面那把（ADR-0021 决策 4c：兜底已拆，漏传是编译错误）
+          fetchImpl: ctx.supplier.fetchImpl,
           // 覆盖整个上游 → 收尾会写一条快照（契约 §14.3），并顺带把该上游的退避归零。
           onUpstreamDone: ctx.balanceSync.onRefreshDone,
         }),
@@ -270,6 +272,7 @@ export function registerUpstreamRoutes(app: FastifyInstance, ctx: ApiContext): v
         req.params.id,
         req.body,
         config.masterKey,
+        ctx.supplier.fetchImpl,
       );
       // 审计只记"测了什么来源、成没成"：草稿模板里有 `{key}` 占位符与端点地址，
       // 不该被抄进审计表（替换后的串更不行）。

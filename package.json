@@ -22,7 +22,8 @@
     "test:gateway": "vitest run src/gateway",
     "test:fault": "vitest run src/gateway/fault.spec.ts",
     "bench:ttfb": "tsx scripts/bench-ttfb.ts",
-    "bench:assistant-ttfb": "tsx scripts/bench-assistant-ttfb.ts"
+    "bench:assistant-ttfb": "tsx scripts/bench-assistant-ttfb.ts",
+    "probe:tierflow": "tsx scripts/probe-tierflow-datapath.ts"
   },
   "dependencies": {
     "@fastify/websocket": "^11.3.3",

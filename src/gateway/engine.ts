@@ -15,7 +15,18 @@
 import { REQUEST_ID_HEADER } from '../util/request-id.js';
 import type { KeyPoolInternal } from './key-pool.js';
 import { classifyUpstreamStatus, parseRetryAfter } from './classify.js';
-import { GatewayError, GATEWAY_ERROR_CODES, noAvailableKeyError, openAIError, poolMisconfiguredError, poolSaturatedError, upstreamError } from './errors.js';
+// 出口（IP 级）闸的端口：**跨车道冻结件**，归一化与 `Retry-After` 换算都只此一份
+// （本文件曾有的 `egressHostOf` / `retryAfterSecOf` 是两个同语义重复件，已随 ADR-0021 段二删除）。
+//
+// 段二起出口 id **不再由本文件推导**（`egressIdOfUrl(target.baseUrl)` 已删）：Tier 2 下出口是
+// 账号级的稳定 id，从 base URL 解析不出来，只能由台账给（`target.egressId`）。归一化仍只有
+// `../egress/port.js` 一份，只是它的消费者从"引擎热路径"挪到了"快照重建"（`src/wiring/secrets.ts`）。
+import { permissiveEgressGate, retryAfterSecOf } from '../egress/port.js';
+import type { EgressFetchFor, EgressGate } from '../egress/port.js';
+// 出口预算的 fetch 装饰器（ADR-0021 决策 4 / 4a）：**唯一集散点**。本文件不自己写 `reserve`，
+// 只用它包住 `doFetch` —— 两条车道的七类出站最终都收敛到同一个装饰器上。
+import { createEgressFetch, isLocalEgressReject } from '../egress/fetch-gate.js';
+import { GatewayError, GATEWAY_ERROR_CODES, POOL_SATURATED_RETRY_AFTER_SEC, egressRateLimitedError, noAvailableKeyError, openAIError, poolMisconfiguredError, poolSaturatedError, upstreamError } from './errors.js';
 import type {
   ErrorEventEntry,
   ErrorEventSink,
@@ -54,6 +65,15 @@ export interface EngineOptions {
   crossUpstreamRetry?: boolean;
   /** 上游首字节超时（ms），默认 120s。只作用于「拿到响应头之前」，不掐长流 */
   upstreamTimeoutMs?: number;
+  /**
+   * 出口（IP 级）预算闸 / 冷却态（契约 §16.7，ADR-0021）。**必须跨请求共享** ——
+   * 出口被限流是全体请求共同的事实，每个请求各建一份等于没建。
+   *
+   * 缺省是 `permissiveEgressGate`（决策 7「接缝 ≠ 修」）：恒放行、恒判 key 级，
+   * 未接线时行为与改动前**逐字节相同**。真正的闸由 `src/server.ts` **造一次、注入两处**
+   * （决策 4c）—— 引擎这边不认识预算数值，也就不可能自己编一套。
+   */
+  egress?: EgressGate;
   /** 逐次尝试的观测钩子（指标/日志用，抛异常会被吞掉） */
   onAttempt?: (event: AttemptEvent) => void;
   /**
@@ -143,6 +163,24 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
   const maxAttempts = Math.max(1, options.maxAttempts ?? DEFAULT_MAX_ATTEMPTS);
   const crossUpstreamRetry = options.crossUpstreamRetry ?? true;
   const upstreamTimeoutMs = options.upstreamTimeoutMs ?? DEFAULT_UPSTREAM_TIMEOUT_MS;
+  // 出口级状态（§16.7）：未注入时用**缺省闸**（恒放行 + 恒判 key 级）——
+  // 这不等于"内部建了一份冷却表"：引擎不持有出口状态，状态归接线层注入的那个实例。
+  const egress = options.egress ?? permissiveEgressGate;
+
+  /**
+   * 数据面出站取件（ADR-0021 决策 4c）：`egressId → 绑定了预算闸的 fetch`。
+   *
+   * **由本文件从注入的闸现造**，而不是让 `src/server.ts` 再往下传一个现成实例：装饰器与
+   * 冷却/归因**必须来自同一个闸**，分两路注入就是两处各自可换一半 —— 而"闸接了、装饰器忘了"
+   * 在类型上不报错，只表现为"预算永远满着"，谁都不会发现。造在这里，这一句是唯一落点。
+   * （闸实例本身仍是**一个进程一份**：`src/server.ts` 造一次、注入两处，见决策 4c。）
+   *
+   * `inner` 显式包住 `doFetch`、不让装饰器自己取全局 fetch：测试注入假 fetch 时
+   * **仍然经过闸**（决策 4 末尾那条刻意与"拆兜底"方向相反的要求）。
+   *
+   * `egressId === null` ⇒ 装饰器原样回 `inner`、**0 次裁决**（决策 2 的 fail-open）。
+   */
+  const dataFetchFor: EgressFetchFor = createEgressFetch(egress, (input, init) => doFetch(String(input), init ?? {}));
 
   function emit(event: AttemptEvent): void {
     try {
@@ -295,6 +333,10 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
     let skippedSaturated = 0; // beginAttempt=false：并发槽位全满 → 429 RATE_LIMITED
     let skippedUnresolvable = 0; // secrets.resolve()===null：配置侧异常 → 503
     let attemptableCandidates = 0; // 进入循环、未被 crossUpstreamRetry/maxAttempts 剪掉的候选数
+    // 出口级冷却（§16.7）：冷却期内的候选**不换 key**，全被跳完则径直回 429。
+    // 与 key 级冷却的分野：key 级「换一把就好」，出口级「换一把必然再撞」。
+    let skippedEgress = 0;
+    let egressRetryAfterMs = 0; // 上述跳过里最长的剩余冷却 → 回给客户端的 Retry-After
 
     for (const candidate of candidates) {
       if (attempts >= maxAttempts) break;
@@ -318,13 +360,38 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
         continue;
       }
 
+      // 出口级冷却（§16.7）：该候选所在的出口正在冷却 → 本轮**不试它**。
+      // 放在 `attempts += 1` **之前**是有意的：`attempts` 数的是"真敲过上游"的次数
+      // （收尾分型靠 `attempts === 0` 判"一个上游都没碰到"，ADR-0011），而出口级跳过
+      // 一个请求都没发出，记进去会把终态推去 502 而不是 §16.7 要求的 429。
+      // 这不等于整池短路：**别的出口**的候选仍可顶上（出口级 ≠ 上游级 ≠ 池级）。
+      //
+      // 段二起出口 id **由台账给**（`target.egressId`），本文件不再解析 base URL ——
+      // Tier 1 = 归一化后的 host、Tier 2 = `egress_proxies.id`。**不得再经 `egressIdOfUrl`**：
+      // 拿一个稳定 id 去解析 URL 会恒得 `null`，出口被整个丢掉 = 「一个出口零个桶 ⇒ 无上限」。
+      // 两列在快照重建时算一次（`src/wiring/secrets.ts`），热路径只读（验收 6 的 TTFB）。
+      // `null` = fail-open：不裁决、不加桶、改走 key 级处置（决策 2）。
+      const egressId = target.egressId;
+      const coolingUntil = egressId === null ? null : egress.cooldownUntil(egressId);
+      if (coolingUntil !== null) {
+        skippedEgress += 1;
+        egressRetryAfterMs = Math.max(egressRetryAfterMs, coolingUntil - now());
+        pool.endAttempt(candidate.keyId);
+        emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'skipped' });
+        continue;
+      }
+
       attempts += 1;
       previousUpstreamId = candidate.upstreamId;
 
       const link = linkedAbort(req.signal, upstreamTimeoutMs);
+      // 出站取件走闸（ADR-0021 决策 4c）：`dataFetchFor` 在 `egressId === null` 时原样回裸 fetch
+      // （**0 次裁决**，决策 2 的 fail-open），否则每次调用先 `reserve` 一次 —— 拒绝则回合成 429、
+      // **一个字节都不落网络**。这是数据面唯一的出站口，写第二处就有人绕过预算。
+      const outbound = dataFetchFor(egressId, 'data');
       let response: Response;
       try {
-        response = await doFetch(joinUrl(target.baseUrl, req.upstreamPath), {
+        response = await outbound(joinUrl(target.baseUrl, req.upstreamPath), {
           method: 'POST',
           headers: buildUpstreamHeaders(target, req.requestId),
           body: JSON.stringify(upstreamBody),
@@ -356,6 +423,48 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
         lastTimedOut = timedOut;
         emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'failure', reason: 'NETWORK' });
         continue;
+      }
+
+      // 本地预算拒绝（ADR-0021 决策 4b / 4c）：装饰器在**没发请求**的情况下合成的 429。
+      // 它与"上游真的回了个 429"在响应形状上同形，处置必须分开 —— 下面四件事一件都不能少：
+      //
+      //   1. **不进 `observeLimited`**：归因判据要的是上游证据（哪把 key / 哪个账号被限），
+      //      这次 429 是我们自己造的，喂进去等于让闸自己给自己递证据；
+      //   2. **不 `reportFailure`、不发 `outcome:'failure'`**：本地拒绝不是这把 key 的故障，
+      //      记一次失败，几轮下来就把好 key 停掉（决策 4a 第 2 条点名的硬故障）；
+      //   3. **不 `cool()`、不 push 冷却、不发 §7 帧**（决策 5 表内第 1 行）：桶拒绝是
+      //      **我们自己这边**预算耗尽，不是对面忙 —— 拿它推进出口冷却，与 ADR-0011 §4 修掉的
+      //      "把本地饱和记成上游故障"同形；
+      //   4. **`attempts -= 1`**（决策 4b 落法）：本地拒绝 = **0 次真实尝试**，收尾分型靠
+      //      `attempts === 0` 判"一个上游都没碰到"，不还原就把终态推去 502 而非 §16.7 的 429。
+      //
+      // 处置形状**与既有的冷却跳过分支同形**（同发 `skipped`、同计入 `egressRetryAfterMs`、
+      // 同 `pool.endAttempt`），差别只在那 1 次 `attempts` 的还原：那是"跳过一个**没试的**候选"，
+      // 这里是"试过一次、但那一次一个字节都没出去"。
+      //
+      // 终止本轮候选轮换（**不** `continue`），且**不试别的出口**：依据是决策 5「本地拒绝 ⇒ 本轮候选
+      // 轮换就此终止」（同条另半句是**不记 key 健康、不换 key**，即决策 4a）与决策 6 表内第 1 行
+      // （理由「同出口轮换必然再撞」）。同出口那半截直白：换一把 key 撞的还是同一张桶。
+      //
+      // 「别的出口也不试」**不是**因为"预算与出口无关" —— 决策 8 写死了相反的话：容量是**每个出口**
+      // 的数、桶键 = `egressId`、`reserve` 第一个入参就是出口。这一刀是决策 5 那条三脚架**刻意多切的
+      // 一段**：轮换放大器要在"试"这个动作发生**之前**被掐掉，掐的是**整池轮换**；引擎手里没有出口池
+      // 视图，也不去猜别的出口还剩多少额度，逐个再探一遍正好把决策 5 要掐掉的东西换个形状放开。
+      //
+      // 与上面那个冷却跳过分支的**区别正在这一处**（两者处置形状同形，收口范围刻意不同）：冷却只封
+      // 一个出口，`continue` 后换出口的候选顶上是对的（出口级 ≠ 上游级 ≠ 池级）；这里是**整池**收口。
+      // 别的出口的候选留给后续的出口选择器（决策 9(5) 的池空 503，本期出范围）。
+      if (isLocalEgressReject(response)) {
+        attempts -= 1;
+        link.dispose();
+        pool.endAttempt(candidate.keyId);
+        egressRetryAfterMs = Math.max(
+          egressRetryAfterMs,
+          parseRetryAfter(response.headers.get('retry-after'), now()) ?? 0,
+        );
+        skippedEgress += 1;
+        emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'skipped' });
+        break;
       }
 
       const ttfbMs = now() - started;
@@ -396,15 +505,60 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
           };
         }
 
-        pool.reportFailure(candidate.keyId, reason, {
-          retryAfterMs: parseRetryAfter(response.headers.get('retry-after'), now()),
-        });
+        const retryAfterMs = parseRetryAfter(response.headers.get('retry-after'), now());
+
+        // 出口级 429（§16.7 / ADR-0021 决策 10）：归因判据**只在闸内一处**（`observeLimited`），
+        // 引擎不再自带识别器 —— 旁路第二个计数器 = 一个被打空预算的出口拿**自己拒出来的**
+        // N 张脸判成"被上游限"，正是那个自伤闭环。
+        //
+        // 默认 `mode: 'shadow'`（判据默认关）：闸照常扫窗、照常产 shadow 记录，但恒回 `'key'`，
+        // 于是本分支在接线放行前**与改动前逐字节同形** —— 429 照旧记 key 失败、换下一把。
+        if (reason === 'RATE_LIMITED' && egressId !== null) {
+          const verdict = egress.observeLimited({
+            egressId,
+            correlationId: req.requestId,
+            // `accountId === null`（无主 key）**贡献 0**，绝不并成一个桶（决策 10(2)）
+            subject: { accountId: target.accountId, keyId: candidate.keyId },
+            ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+          });
+          if (verdict.attribution === 'egress') {
+            // 归因上移（决策 10(4)）：**不调 reportFailure(keyId)** —— 谁没错，不给谁记过。
+            // 冷却落在出口上，且**不换 key**：同出口轮换必然再撞，这里是放大器不是容错。
+            emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'failure', reason, status: response.status, ttfbMs });
+            logAttempt(req, {
+              keyId: candidate.keyId,
+              upstreamId: candidate.upstreamId,
+              statusCode: response.status,
+              usage: null,
+              ttfbMs,
+              attempts,
+              failureReason: reason,
+              started,
+            });
+            const untilMs = verdict.cooldownUntilMs ?? now();
+            const error = egressRateLimitedError(retryAfterSecOf(untilMs - now()));
+            reportGatewayError(req, started, error, {
+              failureReason: reason,
+              attempts,
+              candidates: candidates.length,
+              upstreamStatus: response.status,
+            });
+            return { kind: 'error', error, attempts };
+          }
+        }
+
+        pool.reportFailure(candidate.keyId, reason, { retryAfterMs });
         lastReason = reason;
         lastStatus = response.status;
         lastTimedOut = false;
         emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'failure', reason, status: response.status, ttfbMs });
         continue;
       }
+
+      // 出口真的答了 → 清该出口的连续计数、退出升档。
+      // **只清计数、不清冷却窗口**（闸内实现）：并发的在途请求成功不该提前解开整出口的冷却
+      // （§16.7 冷却的意义就是让这段时间内别再打这个 IP）；归因窗同理不被一次成功重置。
+      if (egressId !== null) egress.observeSuccess(egressId);
 
       if (req.stream) {
         if (response.body === null) {
@@ -474,10 +628,15 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
     //   - attempts === 0 且有候选：全是「跳过」—— 分饱和与配置异常两型，都不许报 502
     //   - 真实失败发生在中途、后续候选被剪掉：lastReason 已带住，走 502/504
     if (attempts === 0 && attemptableCandidates > 0) {
-      if (skippedSaturated > 0 && skippedUnresolvable === 0) {
-        // 池饱和：所有候选并发槽位全满。上游没有任何故障，让客户端带 Retry-After 短退避。
+      // 「上游没故障、退避后可重试」的两型：出口级冷却（§16.7）与池饱和（ADR-0011）。
+      // 两型都用 429 + `Retry-After`，与 §16.7「不新增错误码、不新增 HTTP 状态」一致。
+      // 出口级优先报：它的退避窗口更粗（分钟级），对客户端更接近事实。
+      // skippedEgress === 0 时本条件与改动前逐字等价（既有口径零漂移）。
+      const retryableSkips = skippedEgress + skippedSaturated;
+      if (retryableSkips > 0 && skippedUnresolvable === 0) {
         logAttempt(req, { keyId: '', upstreamId: '', statusCode: 429, usage: null, ttfbMs: now() - started, attempts, failureReason: null, started });
-        const error = poolSaturatedError(attemptableCandidates);
+        const error =
+          skippedEgress > 0 ? egressRateLimitedError(retryAfterSecOf(egressRetryAfterMs)) : poolSaturatedError(attemptableCandidates);
         reportGatewayError(req, started, error, { attempts, candidates: candidates.length });
         return { kind: 'error', error, attempts };
       }

@@ -16,6 +16,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'vitest';
 
+import { egressIdOfUrl } from '../egress/port.js';
 import { createGatewayEngine } from './engine.js';
 import type { FetchLike } from './engine.js';
 import { createKeyPool } from './key-pool.js';
@@ -69,7 +70,11 @@ function makeHarness(keys: KeyConfig[], steps: Step | Step[], upstreams?: PoolSn
     resolve: (keyId) => {
       const found = keys.find((k) => k.keyId === keyId);
       if (found === undefined) return null;
-      const target: UpstreamTarget = { upstreamId: found.upstreamId, baseUrl: `https://${found.upstreamId}.example.com/v1`, apiKey: `sk-${keyId}` };
+      // 桩按 `secrets.ts` 的同一条口径算出口：`account_egress_id` 缺席 ⇒ 退回 Tier 1 推导。
+      // 写死 `null` 会让"由 base URL 推出来的桶"在这些用例里凭空消失 —— 桩与真实解析器不同形，
+      // 用例就在验一个生产上不存在的行为。
+      const baseUrl = `https://${found.upstreamId}.example.com/v1`;
+      const target: UpstreamTarget = { upstreamId: found.upstreamId, baseUrl, apiKey: `sk-${keyId}`, egressId: egressIdOfUrl(baseUrl), accountId: null };
       return target;
     },
   };

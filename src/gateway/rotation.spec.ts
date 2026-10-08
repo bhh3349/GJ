@@ -13,6 +13,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'vitest';
 
+import { egressIdOfUrl } from '../egress/port.js';
 import { createGatewayEngine } from './engine.js';
 import type { FetchLike } from './engine.js';
 import { createKeyPool } from './key-pool.js';
@@ -54,7 +55,9 @@ async function pollDistribution(keys: KeyConfig[]): Promise<Map<string, number>>
     resolve: (keyId) => {
       const found = keys.find((x) => x.keyId === keyId);
       if (found === undefined) return null;
-      const target: UpstreamTarget = { upstreamId: found.upstreamId, baseUrl: `https://${found.upstreamId}.example.com/v1`, apiKey: `sk-${keyId}` };
+      // 出口口径同 `secrets.ts`：无账号归属 ⇒ Tier 1 按 base URL 推导（见 fault.spec.ts 同处注释）
+      const baseUrl = `https://${found.upstreamId}.example.com/v1`;
+      const target: UpstreamTarget = { upstreamId: found.upstreamId, baseUrl, apiKey: `sk-${keyId}`, egressId: egressIdOfUrl(baseUrl), accountId: null };
       return target;
     },
   };

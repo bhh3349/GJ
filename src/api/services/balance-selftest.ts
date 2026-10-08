@@ -238,13 +238,18 @@ export function describeTestForAudit(
  * 不写库：`balance_cents` / `balance_source` / `balance_updated_at` 一律不碰。
  * 也**不用** preset 做兜底 —— 用户在测他自己填的东西，拿 preset 的结果回他
  * 会让他以为草稿是对的。
+ *
+ * `fetchImpl` 是**必填**（没有 `= fetch`）：自测打出去的是真实上游请求，和 §14 刷新、
+ * §15.2 批量扣的是同一张出口配额表。留一个全局缺省，等于这条出站**永远绕过闸**，
+ * 而且编译期看不出来（ADR-0021 决策 4 要防的就是"漏了一处没走闸"）。
+ * 缺省值只在 `buildApp` 那一处填（`ctx.supplier.fetchImpl`），路由层照原样透传。
  */
 export async function runUpstreamBalanceTest(
   db: Db,
   upstreamId: string,
   body: unknown,
   masterKey: Buffer,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch,
 ): Promise<BalanceTestResult> {
   const row = getUpstreamRow(db, upstreamId);
   if (!row) throw ApiError.notFound('上游', upstreamId);
@@ -287,12 +292,15 @@ export async function runUpstreamBalanceTest(
  *
  * "生效"= ① 用户模板 → ② 内置 preset；两条都无 → 422。所以这个端点的结论
  * 与批量刷新给这个 key 的结论是同源的：自测通了，刷新就该通。
+ *
+ * `fetchImpl` 必填，理由同 `runUpstreamBalanceTest`：两条自测是**同一个出口**的两次出站，
+ * 一个留缺省、一个必填，等于两者在闸上不同源。
  */
 export async function runKeyBalanceTest(
   db: Db,
   keyId: string,
   masterKey: Buffer,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch,
 ): Promise<BalanceTestResult> {
   const row = getKeyRow(db, keyId);
   if (!row || row.deleted_at !== null) throw ApiError.notFound('Key', keyId);

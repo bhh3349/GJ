@@ -94,8 +94,14 @@ export interface RefreshDone {
 }
 
 export interface RefreshOptions {
-  /** 覆盖 fetch，仅测试用。 */
-  fetchImpl?: typeof fetch | undefined;
+  /**
+   * 出站 fetch。**必填、无兜底**（ADR-0021 决策 4c「8 处 fetchImpl 兜底全拆」）。
+   *
+   * 原为 `options.fetchImpl ?? fetch`：那正是"外层注入了闸包装、内层静默回落全局 fetch"
+   * 的那一类 —— 接线看起来改了，流量照旧绕开闸，且**没有任何报错**。
+   * 现在漏传 = 编译错误；生产值由 `buildApp` 一处解析（`ApiContext.supplier.fetchImpl`）。
+   */
+  fetchImpl: typeof fetch;
   /**
    * 触发方。只影响快照行的 `trigger` 列与它在同步状态里的归类，
    * **不改变任何刷新行为** —— 三个手动端点的语义零变更（契约 §14.1）。
@@ -169,9 +175,9 @@ export async function refreshBalances(
   masterKey: Buffer,
   scope: RefreshScope,
   reporter: TaskReporter,
-  options: RefreshOptions = {},
+  options: RefreshOptions,
 ): Promise<RefreshSummary> {
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = options.fetchImpl;
   const refs = decryptedKeyRefs(db, scope, masterKey);
   reporter.setTotal(refs.length);
 
@@ -288,6 +294,10 @@ function summarize(attempts: readonly Attempt[]): RefreshSummary {
   let skipped = 0;
   // 只服务于 hint：不参与任何计数口径（契约明确"三型计数逐字不变"）。
   let authRejected = 0;
+  // 第 5 个旁路计数（ADR-0017 补遗 3「实现落点」1）：与 `authRejected` 同处现算、同样不进三型口径。
+  // 与补遗 2 那个进 `UpstreamRefreshResult` 的 `rateLimited` **同源同值、各自独立** ——
+  // 一个不出 REST 面（收尾钩子用），一个要出（hint 用），不得并成一个对外字段。
+  let rateLimited = 0;
   for (const a of attempts) {
     if (a.kind === 'skipped') {
       skipped += 1;
@@ -297,6 +307,8 @@ function summarize(attempts: readonly Attempt[]): RefreshSummary {
     if (!o.ok) {
       failed += 1;
       if (o.httpStatus === 401 || o.httpStatus === 403) authRejected += 1;
+      // 429 一行通吃：判据是状态码本身，不看标记头（上游真 429 与本地合成的 429 同归这一档）。
+      if (o.httpStatus === 429) rateLimited += 1;
       continue;
     }
     ok += 1;
@@ -306,7 +318,7 @@ function summarize(attempts: readonly Attempt[]): RefreshSummary {
       unknown += 1;
     }
   }
-  const hintCode = hintForSummary({ failed, unknown, skipped, authRejected });
+  const hintCode = hintForSummary({ failed, unknown, skipped, authRejected, rateLimited });
   return {
     checked: attempts.length,
     ok,

@@ -13,6 +13,7 @@
 
 import { createGatewayEngine } from './engine.js';
 import type { EngineOptions, FetchLike, GatewayEngine } from './engine.js';
+import type { EgressGate } from '../egress/port.js';
 import { createKeyPool } from './key-pool.js';
 import type { KeyPoolInternal } from './key-pool.js';
 import { createRateLimiter } from './limiter.js';
@@ -43,6 +44,12 @@ export interface GatewayStackOptions {
   upstreamTimeoutMs?: number;
   internalToken?: string;
   bodyLimitBytes?: number;
+  /**
+   * 出口预算闸 / 冷却态（契约 §16.7，ADR-0021）。**一个进程一份** —— 出口被限流是全体请求共同的事实，
+   * 在这里注入正是为了让「所有发往同一出口的请求」共用同一道冷却与同一张预算。
+   * 不传 = 引擎用缺省闸（恒放行、恒判 key 级，决策 7），行为与改动前逐字节相同。
+   */
+  egress?: EgressGate;
 }
 
 export interface GatewayStack {
@@ -72,6 +79,7 @@ export function createGatewayStack(options: GatewayStackOptions): GatewayStack {
   if (options.maxAttempts !== undefined) built.maxAttempts = options.maxAttempts;
   if (options.crossUpstreamRetry !== undefined) built.crossUpstreamRetry = options.crossUpstreamRetry;
   if (options.upstreamTimeoutMs !== undefined) built.upstreamTimeoutMs = options.upstreamTimeoutMs;
+  if (options.egress !== undefined) built.egress = options.egress;
 
   const engine = createGatewayEngine(built);
 

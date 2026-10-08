@@ -137,12 +137,20 @@ export interface SupplierOps {
 /**
  * 装配层唯一看得见的那几个字段（= `SupplierOps` 去掉库与主密钥）。
  *
- * 与 `SupplierOps` 分开写而不是 `Omit<…>`：这里每一个都**可省**，省略时各有各的默认
- * （`fetch` 取全局、排除名单读运行时环境、节奏用 §15.5 的 0.6s），而 `SupplierOps`
+ * 与 `SupplierOps` 分开写而不是 `Omit<…>`：除 `fetchImpl` 外都可省，省略时各有各的默认
+ * （排除名单读运行时环境、节奏用 §15.5 的 0.6s），而 `SupplierOps`
  * 里它们**必须有值** —— 默认值的填充只发生在 `buildApp` 一处，业务代码永远拿到填好的。
+ * `fetchImpl` 不在这张"可省"名单里（ADR-0021 决策 4c）：它是出站唯一出口，
+ * 缺省只能由装配根给，且给了就是**有值**，没有第二处兜底。
  */
 export interface SupplierSeams {
-  fetchImpl?: typeof fetch;
+  /**
+   * 出站 fetch。**必填、无兜底**（ADR-0021 决策 4c「8 处 fetchImpl 兜底全拆」）。
+   *
+   * 默认值**不在这里**：`buildApp` 一处解析（`opts.supplier?.fetchImpl ?? fetch`），
+   * 与 `resolveEgressGate` 同一条纪律 —— 业务代码拿到的永远是有值的 `SupplierOps.fetchImpl`。
+   */
+  fetchImpl: typeof fetch;
   excluded?: ReadonlySet<string>;
   pacing?: SupplierOps['pacing'];
   now?: () => Date;
@@ -160,7 +168,7 @@ export function supplierOps(db: Db, masterKey: Buffer, seams: SupplierSeams): Su
   return {
     db,
     masterKey,
-    fetchImpl: seams.fetchImpl ?? fetch,
+    fetchImpl: seams.fetchImpl,
     excluded: seams.excluded ?? parseExcludedIdentifiers(),
     pacing: seams.pacing,
     now: seams.now,
@@ -420,7 +428,7 @@ class BatchTally {
    * 只给"上游不可达"这一档出 hint。
    *
    * `BALANCE_AUTH_REJECTED` 的文案写的是"这把 key"，套到账号会话失效上会指错对象 ——
-   * 现有 `HintCode` 四个成员里没有为账号面写过的那一个，所以这一档**不出 hint**，
+   * `HintCode` 现有成员里没有为账号面写过的那一个，所以这一档**不出 hint**，
    * 原因留在逐行 `message` 里（那里能说清是密码错还是会话过期）。
    */
   private pickHint(): SupplierBatchResult['hintCode'] {
@@ -431,7 +439,7 @@ class BatchTally {
 /**
  * "上游不可达"那一档的 hint（§15.3 `hintCode` 的**唯一生产者**）。
  *
- * 写成单个常量而不是 `Record<HintCode, string>` 表：现有 `HintCode` 四个成员里
+ * 写成单个常量而不是 `Record<HintCode, string>` 表：`HintCode` 现有成员里
  * 只有这一个能用在账号面上。`BALANCE_AUTH_REJECTED` 的文案写的是"这把 key"，
  * 套到账号会话失效上会指错对象；把它和本常量并排摆在一张表里，等于邀请下一个人
  * 顺手把那一档也接上 —— 而接上的那一刻错的是**文案里的对象**，不会报错。

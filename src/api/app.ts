@@ -20,6 +20,7 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import type { AppConfig } from '../config.js';
 import type { Db } from '../db/database.js';
 import { NO_ASSISTANT_METRICS } from '../db/observability.js';
+import { permissiveEgressGate, type EgressGate } from '../egress/port.js';
 import { unwiredAssistantInvoker, type AssistantModelInvoker } from './assistant-port.js';
 import { LoginRateLimiter, requireSession, type SessionInfo } from './auth.js';
 import { createBalanceSync, type BalanceSync } from './balance-sync.js';
@@ -87,6 +88,19 @@ export interface ApiContext {
    * 拿真号去跑 —— 那正好是这条纪律禁止的事。
    */
   supplier: SupplierOps;
+  /**
+   * 出口（IP）预算闸（ADR-0021 决策 4 / §16.7）。**始终存在**，未接线时是
+   * `permissiveEgressGate` —— 那个实例的所有方法都是"逐字节同现状"的空实现。
+   *
+   * 为什么要有这层缝：管理面有**七类出站**（§14 刷新 / 自测 / §15.2 批量 / 模型同步 /
+   * 出口自检……），它们扣的是**同一张**上游配额表（上游按来源 IP 计数，连账号与 key 都不区分）。
+   * 把闸藏在某一类出站的调用点里，等于"另外六类可以取配额，只是默认没人取"。
+   *
+   * ⚠️ **与本批一起落的是"缝"，不是"修"**：目前 `src/api` 里还没有消费者读它，
+   * 真正的接线（把 `SupplierOps.fetchImpl` / 刷新那两处 fetch 包成 `fetchFor(egressId,'management')`）
+   * 在批二。所以现在断言它的唯一有意义的东西是**实例身份** —— 见 `resolveEgressGate`。
+   */
+  egress: EgressGate;
 }
 
 /** 唯一免鉴权路径（契约 §0.5）。用 method+path 精确匹配，不用前缀。 */
@@ -211,10 +225,34 @@ export interface BuildAppOptions {
    * §15.2 管理面端点的注入缝（见 `ApiContext.supplier`）。缺省：全局 `fetch`、
    * 运行时环境里的排除名单、§15.5 的 0.6s 节奏。
    *
+   * `fetchImpl` 的缺省**只在本函数里解析一次**（ADR-0021 决策 4c）：它是管理面唯一的出站口，
+   * 拆了逐层兜底之后，`fetchImpl` 在本结构里仍可选（测试不必人人传），但**下游每一层都必填**。
+   *
    * 测试注入假 `fetchImpl` ⇒ 六个端点的全部用例**零网络**；注入 `pacing: {gapMs: 0}`
    * ⇒ 不必真的等 0.6s × N。
    */
   supplier?: SupplierSeams;
+  /**
+   * 出口（IP）预算闸（ADR-0021）。缺省 `permissiveEgressGate` —— 语义上等价于"没有闸"，
+   * 与改动前逐字节同行为，所以线上漏注入不会静默改变现有流量。
+   *
+   * **本批刻意保持可选**：ADR-0020 决策 5 反转那一段要求"管理面出站改必填注入"，
+   * 但必填化必须与**所有注入点同一笔**落（否则中间态就是"有的出站走闸、有的不走"，
+   * 而那正是这条缝要防的事）。批二接线时连同 `src/server.ts` 的造一次注入两处一起收。
+   */
+  egress?: EgressGate;
+}
+
+/**
+ * 缺省闸的**唯一**填充点（`ApiContext.egress` 与 `BuildAppOptions.egress` 之间那一跳）。
+ *
+ * 单独写成函数、并导出：`permissiveEgressGate` 的正确性靠的是"注入的**就是端口里那个实例**"，
+ * 而不是"形状对得上"。任何形如 `?? { ...permissiveEgressGate }` 的写法都会造出第二个缺省闸 ——
+ * 那一份和端口里那份会各自被将来的实现替换掉，于是"未接线"有了两种行为。
+ * 导出只为让这条身份断言可测（`app.spec.ts`）。
+ */
+export function resolveEgressGate(opt: EgressGate | undefined): EgressGate {
+  return opt ?? permissiveEgressGate;
 }
 
 export function buildApp(opts: BuildAppOptions): FastifyInstance {
@@ -229,6 +267,15 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   const startedAt = opts.startedAt ?? new Date();
   const droppedEvents = opts.droppedEvents ?? (() => 0);
 
+  // 管理面出站 fetch 的**唯一**填充点（ADR-0021 决策 4c：8 处兜底全拆、逐层必填）。
+  // 与 `resolveEgressGate` 同一条纪律：默认值只在这一处填，业务代码拿到的永远是填好的 ——
+  // 于是"忘了接出站缝"只可能发生在这一个表达式里，不可能发生在某个 handler 或某层循环里。
+  // `fetch` 是**延迟**取全局的：写成模块级常量会在 import 那一刻绑死，测试就换不掉了。
+  const supplier = supplierOps(db, config.masterKey, {
+    ...opts.supplier,
+    fetchImpl: opts.supplier?.fetchImpl ?? fetch,
+  });
+
   // 余额自动同步调度器（契约 §14 / ADR-0017）。**先建对象、后起步**：
   // 路由与刷新收尾钩子都要拿到同一个实例，而"要不要注册定时器"是启动那一步的事。
   const balanceSync = createBalanceSync({
@@ -239,6 +286,8 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     log: app.log,
     tickMs: opts.balanceSyncTickMs,
     pruneIntervalMs: opts.balanceSyncPruneIntervalMs,
+    // 自动同步与手动三端点走**同一把**出站 fetch（否则"自动那条线绕开闸"没有任何症状）。
+    fetchImpl: supplier.fetchImpl,
   });
 
   const ctx: ApiContext = {
@@ -252,8 +301,9 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     balanceSync,
     // 六个管理面端点的缝。这里**只填默认值**，业务代码拿到的永远是填好的对象 ——
     // 于是"排除名单没接上"这种事只可能发生在这一个表达式里，不可能发生在某个 handler 里。
-    // `fetch` 是**延迟**取全局的：写成模块级常量会在 import 那一刻绑死，测试就换不掉了。
-    supplier: supplierOps(db, config.masterKey, opts.supplier ?? {}),
+    supplier,
+    // 同一条纪律：默认值只在这一处填，业务代码拿到的永远是填好的闸。
+    egress: resolveEgressGate(opts.egress),
   };
 
   app.decorateRequest('auth', null);

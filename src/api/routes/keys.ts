@@ -283,6 +283,8 @@ export function registerKeyRoutes(app: FastifyInstance, ctx: ApiContext): void {
       const task = startTask(db, 'balance_refresh', 1, (reporter) =>
         refreshBalances(db, config.masterKey, { keyIds: [id] }, reporter, {
           trigger: 'manual',
+          // 出站 fetch 走管理面那把（ADR-0021 决策 4c：兜底已拆，漏传是编译错误）
+          fetchImpl: ctx.supplier.fetchImpl,
           // 单 key 作用域 → **不写快照**（那时上游合计里只有这一把是新值，记成"上游此刻的状态"
           // 会是一条半新半旧的假相，§14.3）。收尾仍然要跑：手动查通了就把退避归零。
           onUpstreamDone: ctx.balanceSync.onRefreshDone,
@@ -309,7 +311,7 @@ export function registerKeyRoutes(app: FastifyInstance, ctx: ApiContext): void {
     '/api/keys/:id/test-balance',
     { schema: { params: idParam } },
     async (req, reply) => {
-      const result = await runKeyBalanceTest(db, req.params.id, config.masterKey);
+      const result = await runKeyBalanceTest(db, req.params.id, config.masterKey, ctx.supplier.fetchImpl);
       auditWrite(db, req, config, {
         action: 'key.balance_selftest',
         targetType: 'key',
@@ -370,6 +372,8 @@ export function registerKeyRoutes(app: FastifyInstance, ctx: ApiContext): void {
       const task = startTask(db, 'balance_refresh', total, (reporter) =>
         refreshBalances(db, config.masterKey, scope, reporter, {
           trigger: 'manual',
+          // 出站 fetch 走管理面那把（ADR-0021 决策 4c：兜底已拆，漏传是编译错误）
+          fetchImpl: ctx.supplier.fetchImpl,
           // 不带 keyIds 时 scope 覆盖整个上游 → 每个受影响的上游各写一条快照；
           // 带了 keyIds 就是部分刷新，`wholeUpstream` 为假，一条都不写（§14.3）。
           onUpstreamDone: ctx.balanceSync.onRefreshDone,

@@ -164,7 +164,10 @@ export interface QueryTarget {
 export async function queryBalance(
   template: BalanceQueryTemplate,
   target: QueryTarget,
-  fetchImpl: typeof fetch = fetch,
+  // **必填、无兜底**（ADR-0021 决策 4c「8 处 fetchImpl 兜底全拆」）：这是**最终出站层**，
+  // 漏传 = 编译错误。写成 `= fetch` 的话，上面任何一层忘了透传，流量就静默绕过闸 ——
+  // 而"配了出口但流量仍走宿主 IP"正是这条缝最贵的那类故障。
+  fetchImpl: typeof fetch,
   options: QueryOptions = {},
 ): Promise<QueryOutcome> {
   const captureRaw = options.captureRaw === true;

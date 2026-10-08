@@ -14,6 +14,7 @@
 // 查询方法」那句指令的正面实现：猜不出来的就不猜，直接问。
 
 import type { BalanceUnit } from '../db/balance-query.js';
+import { egressIdOfUrl } from '../egress/port.js';
 import { convertToCents, getByPath, toNumber, type ParsedBalance } from './template.js';
 
 /** 单次 preset 查询的结果。字段与 `QueryOutcome` 对齐，便于上层统一汇总。 */
@@ -231,12 +232,14 @@ export const BALANCE_PRESETS: readonly BalancePresetSpec[] = [OPENAI_PRESET];
 
 /** 按 baseUrl 的 host 精确匹配 preset。判不出来就返回 null —— 不猜。 */
 export function findPresetByBaseUrl(baseUrl: string): BalancePresetSpec | null {
-  let host: string;
-  try {
-    host = new URL(baseUrl).host.toLowerCase();
-  } catch {
-    return null;
-  }
+  // 归一化**只有一份**（ADR-0021 决策 2：`egressIdOfUrl` 是全仓唯一实现）。
+  // 这里曾经自己又写了一遍 host 归一（语义与它逐字相同，含解析失败 → null），
+  // 但同一件事写两遍就是漂移的起点 —— 出口桶键与 preset 匹配一旦分叉，会出现
+  // "钱按这个 host 算、出口按另一个 host 记账"的错配。
+  // （ADR 验收口径见 `docs/adr/0021-egress-budget-seam.md:189`：扫 `src/` 全集，只许命中
+  //   `src/egress/port.ts` 一处 —— 本注释因此刻意不把那行旧写法逐字抄进来。）
+  const host = egressIdOfUrl(baseUrl);
+  if (host === null) return null;
   return BALANCE_PRESETS.find((p) => p.hosts.includes(host)) ?? null;
 }
 

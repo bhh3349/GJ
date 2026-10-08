@@ -21,6 +21,24 @@ export interface UpstreamTarget {
   baseUrl: string;
   /** ⚠️ 明文。只准写入 Authorization 头 */
   apiKey: string;
+  /**
+   * 本次出站走的**出口 id**（ADR-0021 决策 5 的 E 接缝）。
+   *
+   * 取值 = `supplier_accounts.egress_id`（Tier 2 的**稳定 id**，`egress_proxies.id`，
+   *        **原样透传、不过 `egressIdOfUrl`** —— 拿它去解析一个 id 会恒得 `null`，
+   *        出口被整个丢掉 = 「一个出口零个桶 ⇒ 无上限」）
+   *        ?? `egressIdOfUrl(baseUrl)`（Tier 1，没指定出口的直连流量仍占同一个桶）。
+   *        `null` = 连 base URL 都解析不出 host ⇒ **fail-open**（不裁决、不加桶）。
+   *
+   * **在快照重建时算一次**，热路径只读：改成在 `resolve()` 里现算就是每次出站多一次
+   * `new URL` + 一次台账查库，TTFB 直接崩（验收 6）。
+   *
+   * 必填**且可空**是刻意的 —— 与 `UsageLogEntry.requestId` 同一条理由：漏传在编译期报错。
+   * 漏传若退化成 `undefined`，语义上与 `null`（放行、无上限）同形，而这正是 ADR-0021 点名的事故。
+   */
+  egressId: string | null;
+  /** 这把 key 的供应商账号归属（`supplier_account_keys.account_id`）；通用上游 / 未入池 → `null` */
+  accountId: string | null;
 }
 
 /** keyId → 出站材料；命中不到（密文缺失/已删）返回 null，由引擎跳过该 key */

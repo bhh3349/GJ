@@ -901,10 +901,14 @@ describe('判据 9 / 10 —— 热路径零回退与零新增枚举', () => {
     // **本断言是**本版（v1.3.0 余额同步）**的**快照：它要钉的是"加余额同步没有新增任何枚举"。
     // v1.4.0 给 §15 账号面加了 `ACCOUNT_HAS_KEYS`（契约明写"`ERROR_CODES` 首次新增 1 个"），
     // 故这里的绝对值随之 15 → 16 —— **加的是别人那一版的，不是本版的**。
+    // v1.7.0 再各加一枚（ADR-0021 决策 9，契约 §0.4 / §10 同批登记）：16 → 17（`EGRESS_HAS_ACCOUNTS`）、
+    // 10 → 11（`NO_AVAILABLE_EGRESS`）—— 同样**不是本版（余额同步）加的**。
     // 改动这里时请一并确认：新增的那个码有契约与 ADR 背书，不是因为顺手。
-    expect(ERROR_CODES).toHaveLength(16);
+    expect(ERROR_CODES).toHaveLength(17);
     expect(ERROR_CODES).toContain('ACCOUNT_HAS_KEYS');
-    expect(Object.keys(GATEWAY_ERROR_CODES)).toHaveLength(10);
+    expect(ERROR_CODES).toContain('EGRESS_HAS_ACCOUNTS');
+    expect(Object.keys(GATEWAY_ERROR_CODES)).toHaveLength(11);
+    expect(GATEWAY_ERROR_CODES.NO_AVAILABLE_EGRESS).toBe('NO_AVAILABLE_EGRESS');
     expect(SCHEMA_VERSION).toBe(2);
 
     // 漂移码的地位同 `hintCode`：进码表就等于给它开了 HTTP 状态与拦截能力
@@ -942,5 +946,66 @@ describe('判据 9 / 10 —— 热路径零回退与零新增枚举', () => {
     expect(h.calls).toHaveLength(1);
     const tasks = h.db.prepare('SELECT COUNT(*) AS n FROM tasks').get() as { n: number };
     expect(tasks.n).toBe(0);
+  });
+});
+
+describe('§2 引导码 —— 429 不再报成"上游坏了"（ADR-0017 补遗 3）', () => {
+  it('批量刷新撞 429 → BALANCE_EGRESS_RATE_LIMITED（不是"上游不可达"）', async () => {
+    // 判据是**状态码 429 本身**，不看标记头（ADR-0017 补遗 3「实现落点」2）：
+    // 这里没有标记头，是"上游真 429"，与本地合成的 429 归同一行。
+    const h = makeHarness({ handler: () => ({ status: 429, body: '{"error":"rate limited"}' }) });
+    const up = addUpstream(h, 'up-a', '/balance');
+    const a = addKey(h, up, null);
+
+    const summary = await refreshBalances(h.db, MASTER_KEY, { keyIds: [a] }, NOOP_REPORTER, {
+      trigger: 'manual',
+      onUpstreamDone: h.sync.onRefreshDone,
+      fetchImpl: h.fetchImpl,
+    });
+
+    expect(summary.failed).toBe(1);
+    expect(summary.hintCode).toBe('BALANCE_EGRESS_RATE_LIMITED');
+    // 文案**不得越证据**：只给两种可能，不写成"出口被限流"这种确定性归因
+    expect(summary.hint).toContain('429');
+    expect(summary.hint).not.toContain('出口被限流');
+  });
+
+  it('401 与 429 同时出现时"鉴权被拒"优先 —— 429 插在它与"上游不可达"之间', async () => {
+    // 只接单查询侧的实现会让这条**给出"上游不可达"**：批量路径必须自己数 429（补遗 3「实现落点」1）。
+    const h = makeHarness({
+      handler: (path) => (path === '/a' ? { status: 401, body: '{}' } : { status: 429, body: '{}' }),
+    });
+    const up1 = addUpstream(h, 'up-a', '/a');
+    const up2 = addUpstream(h, 'up-b', '/b');
+    addKey(h, up1, null);
+    addKey(h, up2, null);
+
+    const summary = await refreshBalances(h.db, MASTER_KEY, {}, NOOP_REPORTER, {
+      trigger: 'manual',
+      onUpstreamDone: h.sync.onRefreshDone,
+      fetchImpl: h.fetchImpl,
+    });
+
+    expect(summary.failed).toBe(2);
+    expect(summary.hintCode).toBe('BALANCE_AUTH_REJECTED');
+  });
+
+  it('429 与真失败同时出现时 429 优先 —— 它不是"上游挂了"', async () => {
+    const h = makeHarness({
+      handler: (path) => (path === '/a' ? { status: 429, body: '{}' } : { status: 500, body: '{}' }),
+    });
+    const up1 = addUpstream(h, 'up-a', '/a');
+    const up2 = addUpstream(h, 'up-b', '/b');
+    addKey(h, up1, null);
+    addKey(h, up2, null);
+
+    const summary = await refreshBalances(h.db, MASTER_KEY, {}, NOOP_REPORTER, {
+      trigger: 'manual',
+      onUpstreamDone: h.sync.onRefreshDone,
+      fetchImpl: h.fetchImpl,
+    });
+
+    expect(summary.failed).toBe(2);
+    expect(summary.hintCode).toBe('BALANCE_EGRESS_RATE_LIMITED');
   });
 });

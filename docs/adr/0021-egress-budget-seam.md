@@ -399,8 +399,12 @@ v3 那句"**参数化为'当前作用域内'**（`scope`）"**随 `scope` 退休
   本地拒绝（标记头分支）不走它** —— 断言一律按 `:477` 写。
 - **落法**（路由者车道，`engine.ts` 一处）：见到本地标记头 ⇒ 按既有跳过分支的形状处理，
   **并额外把 `attempts` 减回 1**（本地拒绝 = 0 次真实尝试）：结束该 key 的本次尝试、发 `outcome:'skipped'`
-  事件、`egressRetryAfterMs = max(…, retryAfterMs)`、继续下一候选。于是客户端拿到 429、
-  `attempts` 恒为 0、事件流里**没有**假失败行。
+  事件、`egressRetryAfterMs = max(…, retryAfterMs)`、**终止本轮候选轮换（不换 key、也不试别的出口）**。
+  于是客户端拿到 429、`attempts` 恒为 0、事件流里**没有**假失败行。
+  （**v1.7.1 订正**：本句原写"继续下一候选" —— 那是 v8 之前「实施细则 6」的原话，与**决策 5**「本地拒绝 ⇒
+  本轮候选轮换就此终止」（`:504`，三脚架 `:507`）和**决策 6** 表第 1 行「终止本轮候选轮换、不记 key 健康、
+  不换 key」（`:520`）**直接冲突**：本地拒绝落在**同一个出口**上，换 key 必然再撞同一张桶，
+  照"继续"实现等于把 27 次候选轮换原样留着。**此处只订正这一句措辞，行为与断言零改动。**）
 - **验收必须是四条断言，不是一条**（只断言"零上游调用"会按 502 通过）：① 客户端终态
   **`429 RATE_LIMITED` + `Retry-After`**（不是 `502`）；② `attempts` **恒 0**；③ **不写 key 失败行**
   （KeyPool / `key_runtime` 健康计数不变；管理面任务级 `failed` 照记 —— 那是任务结论，不是 key 归因）；
@@ -458,6 +462,16 @@ export type EgressFetchFor = (egressId: string | null, consumer: EgressConsumer)
   账号改了出口而 key 行 `revision` 未变时缓存**不更新** ⇒ 流量继续走旧出口 / 宿主 IP，而桶已按新 id 记账：
   **账实两分**，且症状正是"配了代理但流量仍走宿主 IP"这类最贵的静默故障。
   `egressId` 变更因此走"直接改写缓存条目"的轻路径（**不需要重新解密**），与 skip 判据解耦。
+
+**三处选项面的缺省例外**（**v1.7.1 补**，与上表那 8 处方向相反）：`GatewayStackOptions.egress`
+（`src/gateway/stack.ts:52`）/ `EngineOptions.egress`（`src/gateway/engine.ts:76`）/
+`BuildAppOptions.egress`（`src/api/app.ts:240`）**保留可选、缺省到 `permissiveEgressGate`** ——
+那是决策 7「逐字节同现状」的落点，也是七个管理面 spec 桩（`api.spec.ts` / `observability` / `assistant` /
+`balance-sync` / `live` / `supplier-accounts-write` / `supplier-accounts`）不必各传一份闸的原因。
+**生产路径的必填不由这三处类型承担**，由两道锁兜住：`src/wiring/runtime.ts` 的装配口 `egress` **必填**
+（数据面漏注入 = 编译期报错）＋ 生产装配源码锁（`src/server.ts` 只许出现一次 `createEgressGate(`，
+且同一个变量交两处 app）。**两类缝的口径不冲突**：选项缺省要"行为同现状"，注入缝要"漏传不静默" ——
+上表那 8 处 `fetchImpl` 属后者（兜底全拆、逐层必填）。
 
 ## 决策 5：预算拒绝与上游 429 在**证据面同形**；冷却**只由上游证据写入**（PM 已裁定）
 

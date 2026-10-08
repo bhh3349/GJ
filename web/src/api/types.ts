@@ -49,6 +49,8 @@ export type ApiErrorCode =
   | 'CONFLICT'
   | 'REVISION_MISMATCH'
   | 'UPSTREAM_HAS_KEYS'
+  /** v1.4.0 首次新增的错误码（409）：删账号时名下还有已入池 key。**只解绑、不删 key**。 */
+  | 'ACCOUNT_HAS_KEYS'
   | 'UNPROCESSABLE'
   | 'TOO_MANY_ATTEMPTS'
   | 'INTERNAL'
@@ -113,7 +115,12 @@ export type HintCode =
   | 'BALANCE_QUERY_UNSUPPORTED'
   | 'BALANCE_PARSE_MISMATCH'
   | 'BALANCE_UPSTREAM_UNREACHABLE'
-  | 'BALANCE_AUTH_REJECTED';
+  | 'BALANCE_AUTH_REJECTED'
+  /**
+   * v1.7.0 新增（§15.3 `failed` 子型）。**判据只是 HTTP 429**（契约第 328 行），
+   * 所以文案只能陈述"这一轮请求被拒绝"，**不得**写成"出口被限流" —— 归因归检测器，不归 UI。
+   */
+  | 'BALANCE_EGRESS_RATE_LIMITED';
 
 /** 自测的查询来源。③（无查询方式）走不到，直接 422。 */
 export type BalanceTestSource = 'user-template' | 'preset';
@@ -176,15 +183,34 @@ export interface Upstream {
   id: string;
   name: string;
   baseUrl: string;
+  /**
+   * §2 `supplier`（v1.4.0）。它存在的唯一目的是让 host **不被当成能力判据** ——
+   * 「这个上游有没有账号面」由管理员建上游时就指定，前端**不得**去 parse `baseUrl` 反推。
+   * 判据只有一条：`supplier === 'tierflow'`（§15.12 锚 1）。
+   */
+  supplier: string | null;
   enabled: boolean;
   keyCount: number;
   enabledKeyCount: number;
-  /** 本上游 balance 类 key 合计（分）。全部未知时是 `null`，不是 0。 */
+  /**
+   * 本上游合计（分）。全部未知时是 `null`，不是 0。
+   * 组成 = `Σ账号 + Σ无账号归属的 key`（§15.6 / ADR-0018 决策 3）——
+   * 所以它**不是** `accountsBalance + keysBalance` 之外的新一份钱，另两个字段是拆解用的。
+   */
   totalBalance: Cents | null;
   /** 余额未知的 key 数。**未知 ≠ 0**，UI 必须单独呈现。 */
   balanceUnknownKeyCount: number;
+  /** `balance` 类 key 中 `unlimited=1` 的子集。**是子集：不额外相加、也不进未知计数**。 */
+  unlimitedKeyCount: number;
   /** token-plan 类 key 数。这类**不进** totalBalance。 */
   tokenPlanKeyCount: number;
+  /** §15 账号数。**通用上游恒 0**（0 是"没有账号面"，不是"没查到"）。 */
+  accountCount: number;
+  /** 账号级余额合计（分）；通用上游恒 `null`。 */
+  accountsBalance: Cents | null;
+  accountsBalanceUnknownCount: number;
+  /** `totalBalance` 里由 key 贡献的那一半（分，供拆解合计）；**不是**新增的一份钱。 */
+  keysBalance: Cents | null;
   balanceQuery: BalanceQueryTemplate | null;
   /** 内置 preset（只读、可推导）。未命中任何 preset 时为 `null`。 */
   balancePreset: BalancePreset | null;
@@ -198,10 +224,18 @@ export interface UpstreamListQuery extends PageQuery {
   enabled?: boolean;
 }
 
+/**
+ * v1.4.0 起 `supplier` **可写**（§15.6：上游表单多一个可选「供应商」下拉，缺省 = 通用）。
+ * 取值只有两个：`null` = 通用上游，`'tierflow'` = 走 §15 账号面。
+ * 服务端 schema 是 `enum: [null, 'tierflow']`，写别的值会当场 400。
+ */
+export type SupplierKind = 'tierflow';
+
 export interface UpstreamCreateRequest {
   name: string;
   baseUrl: string;
   enabled?: boolean;
+  supplier?: SupplierKind | null;
   balanceQuery?: BalanceQueryTemplate;
 }
 
@@ -210,6 +244,7 @@ export interface UpstreamPatchRequest {
   name?: string;
   baseUrl?: string;
   enabled?: boolean;
+  supplier?: SupplierKind | null;
   balanceQuery?: BalanceQueryTemplate | null;
   revision: number;
 }
@@ -428,7 +463,18 @@ export interface ModelPatchRequest {
 
 // ── §5.1 异步任务 ─────────────────────────────────────────────────────────
 
-export type TaskType = 'model_sync' | 'balance_refresh';
+/**
+ * 任务类型。后四个来自 §15.2 的四个批量端点（服务端 `startTask` 的取值，
+ * 见 `src/api/services/supplier-accounts.ts`）。前端**不用它做分支判断**
+ * —— 逐行结果一律读 `result.items`（§15.3），类型串只用来在浮层标题上指个来源。
+ */
+export type TaskType =
+  | 'model_sync'
+  | 'balance_refresh'
+  | 'supplier_import'
+  | 'supplier_refresh'
+  | 'supplier_keys'
+  | 'supplier_keys_sync';
 
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed';
 
@@ -878,3 +924,206 @@ export type AssistantFrame =
       /** 仅 429 两类带；其它为 `null`。 */
       retryAfterSec: number | null;
     };
+
+// ── §15 供应商账号面（TierFlow） ───────────────────────────────────────────
+//
+// **消费锚（§15.12，三个字段级事实，判据唯一）**
+// 1. 「这个上游有没有账号面」的唯一判据是 `Upstream.supplier === 'tierflow'`。
+//    **不 parse `baseUrl`、不查域名、不猜** —— 猜错的后果是静默走错驱动器。
+// 2. 批量任务的逐行结论**只读 `result.items`**，且只在**终态**读（`succeeded` / `failed`）。
+//    它最多 500 行，`itemsTotal` 是截断前的真实行数、`truncated` 说明明细被截。
+//    本期**没有**分页，前端不得自己造一个"下一页"。
+// 3. `SupplierAccount` DTO 是**穷尽**的：**不存在** `egressId` 或任何出口字段。
+//    出口的读面只有 §7 的 `egress_*` 帧，而本期那两帧**不发射** ⇒ 出口池在管理面上**无数据可读**。
+//
+// **凭据纪律**：本文件里所有 `identifier` / `keyMasked` 都是**掩码**；
+// 唯一进入系统的明文密码走 `POST /api/supplier-accounts/import` 的请求体，且**只进不出**。
+
+/** §15.1 `credentialSource`：回答「会话过期后能不能自动重登」。与 `hasSession` **正交**。 */
+export type SupplierCredentialSource = 'password' | 'session';
+
+/** §15.1 账号状态。`unknown` = **从未成功查询过**，不是"正常"的同义词。 */
+export type SupplierAccountStatus = 'active' | 'login_failed' | 'session_expired' | 'unknown';
+
+/**
+ * §15.1 `SupplierAccount`。列表项与详情**共用同一形状**。
+ *
+ * 金额一律 int **分**；上游给的是 quota 或**浮点元**，换算**全在后端**，前端不做任何除法。
+ */
+export interface SupplierAccount {
+  id: string;
+  upstreamId: string;
+  supplier: string;
+  /** **掩码**手机号 / 邮箱。真值不出后端，前端也不得试图还原。 */
+  identifier: string;
+  username: string | null;
+  uid: string | null;
+  status: SupplierAccountStatus;
+  /** 面向人的一句话，只放供应商错误码或通用原因，**不含凭据**。 */
+  statusMessage: string | null;
+  /** 分；`null` = 未知 ≠ 0。 */
+  balanceCents: Cents | null;
+  /** 最近一次**真的查到**余额的时刻。查失败**不动它** —— 否则会渲染成"刚查过"，而事实是没查到。 */
+  balanceUpdatedAt: Iso8601 | null;
+  /** 归属本账号、**已入池**的 key 数。 */
+  keyCount: number;
+  /** `keyCount` 中 `unlimited=1` 的**子集**（不额外相加）。 */
+  unlimitedKeyCount: number;
+  /** 只拿到掩码、**进不了池**的 key 数（对账用）。**不得与 `keyCount` 相加成"key 总数"**。 */
+  maskedKeyCount: number;
+  /** **恒为数组**：上游给的是 `all_subscriptions: []`，单数对象表达不了"没有套餐"。 */
+  subscriptions: SupplierSubscription[];
+  /** 「能不能自动重登」由它回答。**不得**用 `hasSession` 反推。 */
+  credentialSource: SupplierCredentialSource;
+  /** 只回答**有无**，会话值永不出后端。 */
+  hasSession: boolean;
+  sessionExpiresAt: Iso8601 | null;
+  revision: number;
+  createdAt: Iso8601;
+  updatedAt: Iso8601;
+}
+
+/** §15.1 套餐摘要。**挂账号、不建成 key**（ADR-0018 决策 7）。 */
+export interface SupplierSubscription {
+  subNo: string;
+  planTitle: string | null;
+  planSlug: string | null;
+  amountTotalCents: Cents | null;
+  amountUsedCents: Cents | null;
+  paidCents: Cents | null;
+  basicTokenTotal: number | null;
+  basicTokenUsed: number | null;
+  status: string | null;
+  source: string | null;
+  startAt: Iso8601 | null;
+  endAt: Iso8601 | null;
+  /**
+   * **三态**：`true` / `false` 是上游明确给了；`null` = 上游**根本没这个字段**。
+   * 合并成两态等于把"供应商没告诉我们"当成"不会自动续费" —— 替对方下了结论。
+   */
+  autoRenew: boolean | null;
+  hasKey: boolean;
+  /** 套餐 key **只有掩码、永不进池**。 */
+  keyMasked: string | null;
+  updatedAt: Iso8601;
+}
+
+/**
+ * §15.2 `GET /api/supplier-accounts/subscriptions` 的一行 = 套餐摘要 **加上"它是谁的"**。
+ *
+ * 归属字段**只放掩码**：扁平列表不知道自己属于谁，而不给归属的列表在读的人眼里
+ * 是一串没有主语的编号，对账时第一句话就是"这是哪个号的"。
+ */
+export interface SupplierSubscriptionRow extends SupplierSubscription {
+  accountId: string;
+  /** **掩码**。与 §15.1 同一条纪律。 */
+  accountIdentifier: string;
+  upstreamId: string;
+}
+
+export interface SupplierAccountListQuery extends PageQuery {
+  upstreamId?: string;
+  status?: SupplierAccountStatus;
+  q?: string;
+}
+
+/** §15.2 `POST /api/supplier-accounts/import`。**本端点只收密码型凭据**；会话型不走 HTTP（§15.9）。 */
+export interface SupplierImportRequest {
+  upstreamId: string;
+  /** 「手机号,密码」行文本。逐行校验在服务层 —— 它要按行给「第 3 行缺密码」这种原因。 */
+  text?: string;
+}
+
+/** 四个批量端点共用的「打谁」参数。`ids` 省略 = 该上游全部账号。 */
+export interface SupplierBatchRequest {
+  upstreamId: string;
+  ids?: string[];
+}
+
+/** §15.2 `POST /api/supplier-accounts/keys`：批量新建 key 并入池（**本节的目的是这个**）。 */
+export interface SupplierKeysRequest extends SupplierBatchRequest {
+  /** 1..10，越界**在本次 HTTP 里就 400**（不变成一个立刻失败的异步任务）。 */
+  count?: number;
+  namePrefix?: string;
+  unlimited?: boolean;
+  quotaCents?: Cents | null;
+  /** 空数组与省略同义，两者都归一化为 `NULL` = 不限模型。 */
+  models?: string[] | null;
+  label?: string | null;
+}
+
+/** §15.3 `action` 五值，每个都必须有生产者（不留"枚举里有、没人发"的空值）。 */
+export type SupplierBatchAction = 'login' | 'relogin' | 'refresh' | 'create' | 'sync';
+
+/** 逐行结果的一行。**不含任何凭据** —— `keyMasked` 是掩码，`keyId`/`tokenNo` 是内部标识。 */
+export interface SupplierBatchItem {
+  accountId: string | null;
+  /** **掩码**；这一行没能解析出账号时为 `null`。 */
+  identifier: string | null;
+  action: SupplierBatchAction | null;
+  ok: boolean;
+  /** 供应商错误码原样（如 `LOGIN_INVALID_CREDENTIALS`）或本契约错误码。 */
+  code: string | null;
+  message: string | null;
+  keyId: string | null;
+  keyMasked: string | null;
+  tokenNo: number | null;
+}
+
+/**
+ * §15.3 批量任务 result（四个批量端点共用形状）。
+ *
+ * 不变量：`ok + failed + skipped = total`。
+ */
+export interface SupplierBatchResult {
+  done: number;
+  total: number;
+  ok: number;
+  failed: number;
+  skipped: number;
+  /** `items` 截断前的**真实行数**。 */
+  itemsTotal: number;
+  /** `items` 超过 500 行时为 `true` —— UI **必须**说出"逐行明细已截断"。 */
+  truncated: boolean;
+  items: SupplierBatchItem[];
+  hintCode: HintCode | null;
+  hint: string | null;
+}
+
+/**
+ * §15.2 `SupplierTestResult`（连接自测）。与 §2 `BalanceTestResult` 同口径三条：
+ * **永不写库**、业务性失败一律 `200 + ok:false`、`raw` 是上游原样而 `parsed` 才是结论。
+ */
+export interface SupplierTestResult {
+  ok: boolean;
+  accountId: string;
+  /** **掩码**。 */
+  identifier: string;
+  /** 未能发出请求时为 `0`（`null` 会让人以为是"没记录"，事实是"没发生"）。 */
+  httpStatus: number;
+  durationMs: number;
+  /** 本次是否为验证密码而**真实登录过** —— 让"这次测得慢"可解释。 */
+  loginAttempted: boolean;
+  /** **换算后**的结论：`balanceCents` 是分，取不到就是 `null`。 */
+  parsed: SupplierTestParsed;
+  /** 上游原样，已抹掉所有凭据出现并截断。**禁止读这里的数字当金额渲染**。 */
+  raw: unknown;
+  errorCode: string | null;
+  hintCode: HintCode | null;
+  hint: string | null;
+}
+
+export interface SupplierTestParsed {
+  balanceCents: Cents | null;
+  /** 换算比（**比例，非金额**）。保留是为了诊断"换算比是不是被供应商改了"。 */
+  quotaPerUnit: number | null;
+  subscriptionCount: number | null;
+}
+
+/** 状态 → 人话。`unknown` 那一格刻意不写"正常"。 */
+export const SUPPLIER_STATUS_TEXT: Record<SupplierAccountStatus, string> = {
+  active: '正常',
+  login_failed: '登录失败',
+  session_expired: '会话过期',
+  unknown: '未查询过',
+};

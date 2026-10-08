@@ -24,6 +24,12 @@ export const router = createBrowserRouter([
       { index: true, element: <Navigate to="/dashboard" replace /> },
       { path: 'dashboard', element: lazyPage(() => import('@/pages/DashboardPage')) },
       { path: 'upstreams', element: lazyPage(() => import('@/pages/UpstreamsPage')) },
+      // 契约 §15.6：`supplier = "tierflow"` 的上游才有账号面。独立分包 —— 通用上游的用户
+      // 一辈子不会点进来，不让它进上游列表的首屏包（`findNavItem` 按前缀命中，导航仍高亮「上游管理」）。
+      {
+        path: 'upstreams/:id/accounts',
+        element: lazyPage(() => import('@/pages/upstreams/SupplierAccountsPage')),
+      },
       { path: 'keys', element: lazyPage(() => import('@/pages/KeysPage')) },
       { path: 'groups', element: lazyPage(() => import('@/pages/GroupsPage')) },
       { path: 'models', element: lazyPage(() => import('@/pages/ModelsPage')) },

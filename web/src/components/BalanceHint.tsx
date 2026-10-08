@@ -3,9 +3,13 @@
  *
  * 关键纪律：
  * - `hintCode` 是**引导指针**，不是错误码：不进 `ERROR_CODES`、不映射 HTTP 状态，
- *   所以这里也不用 `ErrorState`，而是按四种形态给可操作的说明。
+ *   所以这里也不用 `ErrorState`，而是按几种形态给可操作的说明。
  * - `BALANCE_UPSTREAM_UNREACHABLE` 只提示重试，**不引导改配置**（上游挂了不是配置错）。
  * - `hintCode=null` 表示出数了，无需引导，本组件应直接不渲染。
+ *
+ * `Record<HintCode, …>` **没有 fallback 项是刻意的**：`HintCode` 加值时这里不补就编译不过 ——
+ * 一条新的引导码如果没人写文案，会在 UI 上变成空白提示，而空白提示比没有提示更坏
+ * （用户以为"系统说没事"）。v1.7.0 的第 5 值就是被这条约束逼出来的。
  */
 import { Alert } from 'antd';
 import type { ReactNode } from 'react';
@@ -26,12 +30,30 @@ const HINT_CONFIG: Record<HintCode, { type: 'info' | 'warning' | 'error'; title:
   BALANCE_UPSTREAM_UNREACHABLE: {
     type: 'warning',
     title: '上游暂不可达',
-    description: '请求超时或返回非 2xx。请稍后重试，无需改动配置。',
+    description:
+      '请求超时，或返回了非 2xx（429 除外 —— 限流有它自己的提示）。请稍后重试，无需改动配置。',
   },
   BALANCE_AUTH_REJECTED: {
     type: 'warning',
     title: '鉴权被拒绝',
     description: '该 key 可能已失效，或该端点需要另一种凭据。请核对 key 有效性。',
+  },
+  /**
+   * v1.7.0 第 5 值。**判据只是 HTTP 429**（契约 §「失败引导字段」表 + 文案纪律那两条）。
+   *
+   * `title` 是**另一处用户可见文案**，所以它同样受"不越证据"约束：出口级 429 与 key 级 429
+   * 在证据面上**同形**（上游真的 429 与本地合成的 429 归同一行，标记头只证明"我们的桶拒了"、
+   * 不证明"给 429 的是这把 key 的额度"）。⇒ `title` 只能陈述"本次请求被限流"，
+   * **不得**写成"出口被限流"这种确定性归因：那等于把后端刚立起来的文案纪律在这一处漏掉。
+   *
+   * `type` 取 `info` 而不是 `warning`：这是**稍后重试即可**的临时状态，
+   * 不需要用户做任何事，用 warning 会把人推去查一个不存在的配置问题。
+   */
+  BALANCE_EGRESS_RATE_LIMITED: {
+    type: 'info',
+    title: '本次请求被限流（429）',
+    description:
+      '可能是出口 IP 的请求预算已用尽，也可能该 key 自身撞到限额 —— 两者在这里同形，无法区分，所以不替你归因。稍后重试即可，不必改配置。',
   },
 };
 

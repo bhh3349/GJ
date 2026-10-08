@@ -22,8 +22,14 @@ import { formatCount, formatIso } from '@/utils/format';
 
 const { Text } = Typography;
 
-/** 码 → 人话。**只说方向**，不换算金额。 */
-const CODE_TEXT: Record<BalanceDriftCode, { label: string; explain: string }> = {
+/**
+ * 码 → 人话。**只说方向**，不换算金额。
+ *
+ * 导出是刻意的：横幅（`components/BalanceDriftBanner`）也要说这两个名字，
+ * 而"有支出无流量"这五个字是**纪律文案**（不许写成"少了多少钱"），
+ * 抄一份就是第二个事实源 —— 改一处漏一处的代价正好落在最不该出错的那句话上。
+ */
+export const DRIFT_CODE_TEXT: Record<BalanceDriftCode, { label: string; explain: string }> = {
   BALANCE_SPENT_WITHOUT_TRAFFIC: {
     label: '有支出无流量',
     explain: '余额下降 > 0，而同窗口本网关 token 用量 = 0。可能：同一把 key 被别处直连在用，或上游改了口径。',
@@ -50,7 +56,7 @@ export function BalanceDriftPanel({ drift, upstreams }: BalanceDriftPanelProps) 
       dataIndex: 'code',
       width: 150,
       render: (code: BalanceDriftCode) => {
-        const meta = CODE_TEXT[code];
+        const meta = DRIFT_CODE_TEXT[code];
         return (
           <Tooltip title={meta.explain}>
             <Tag

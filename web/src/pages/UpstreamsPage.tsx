@@ -35,6 +35,7 @@ import {
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useState, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 
 import { statsApi, upstreamsApi } from '@/api/endpoints';
 import { describeError, isApiError } from '@/api/http';
@@ -47,6 +48,7 @@ import {
   type HintCode,
   type Upstream,
 } from '@/api/types';
+import { BalanceDriftBanner } from '@/components/BalanceDriftBanner';
 import { BalanceHint } from '@/components/BalanceHint';
 import { BalanceText } from '@/components/BalanceText';
 import { PageHeader } from '@/components/PageHeader';
@@ -111,6 +113,7 @@ function DeleteUpstreamBody({ name, counts }: { name: string; counts: SubtreeCou
 export default function UpstreamsPage() {
   const { message, modal } = App.useApp();
   const { run, isPending } = useAction();
+  const navigate = useNavigate();
 
   const [q, setQ] = useState('');
   const [enabled, setEnabled] = useState<boolean | undefined>(undefined);
@@ -409,9 +412,28 @@ export default function UpstreamsPage() {
     {
       title: '操作',
       key: 'actions',
-      width: 200,
+      width: 260,
       render: (_: unknown, row) => (
         <Space size={tokens.space.sm}>
+          {/*
+            账号面入口**只由 `supplier` 这一个字段决定**（§15.12 锚 1）——
+            不解析 Base URL 猜供应商。不是 tierflow 的上游这里连按钮都不出现：
+            画一个点进去全是"不是供应商账号型"的按钮，等于把一次拒绝做成一个功能。
+          */}
+          {row.supplier === 'tierflow' ? (
+            <Tooltip title="供应商账号池：账号 → 池内 key / 套餐（契约 §15）">
+              <Button
+                size="small"
+                type="link"
+                style={{ padding: 0 }}
+                onClick={() => {
+                  navigate(`/upstreams/${row.id}/accounts`);
+                }}
+              >
+                账号池
+              </Button>
+            </Tooltip>
+          ) : null}
           <Button size="small" type="link" style={{ padding: 0 }} onClick={() => openEdit(row)}>
             编辑
           </Button>
@@ -519,6 +541,15 @@ export default function UpstreamsPage() {
       />
 
       {filterBar}
+
+      {/*
+        余额漂移横幅（契约 §14.4）。数据**复用本页已经取到的那一份** `statsApi.balanceSync` ——
+        再发一次请求换来的只是"两个数字可能不一致"。取不到时**整条不渲染**：
+        渲染一条"无提示"会把"没加载出来"画成"这轮健康"（缺省不是证据）。
+      */}
+      {syncStatus.data ? (
+        <BalanceDriftBanner drift={syncStatus.data.drift} upstreams={syncStatus.data.upstreams} />
+      ) : null}
 
       {list.error && list.data ? (
         <div style={{ marginBottom: tokens.space.md }}>

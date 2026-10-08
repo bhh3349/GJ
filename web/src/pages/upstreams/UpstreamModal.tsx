@@ -5,21 +5,58 @@
  * - `baseUrl` 必须 `http(s)://` 且无尾斜杠（根路径除外），不合法直接 400 —— 这里前置校验，少一次往返。
  * - `headers` 里的 `{key}` 是**占位符**。页面上只编辑模板文本，永远不出现替换后的串，
  *   也不显示任何上游凭据。
+ *
+ * §15.6 的「供应商」下拉（本期唯一动到本表单的地方）：
+ * - `supplier` **可写**（`null` | `'tierflow'`，默认 `null`），且**建与改两条路径都要发** ——
+ *   只加在下拉上而漏进 body，会变成一个"选得动、不生效"的控件，比没有这个控件更难查。
+ * - 表单值是 `'common' | 'tierflow'` 这个**展示枚举**，只在提交那一刻映射成 `null | 'tierflow'`。
+ *   不让 `null` 直接当控件值，是因为 antd 的 `Select` 把 `null` 与"没选"当同一件事。
+ * - `PATCH` 的判据是 `!== undefined` 而不是真值判断 ⇒ **必须显式发 `null`** 才能降回通用；
+ *   省略这个字段是"不改"。这两者必须分得开（§2）。
+ * - 不解析 `baseUrl` 猜供应商（§15.6）：猜错会静默渲染出一个功能全 422 的分区。
+ * - 降回通用**没有** `force`、没有 409（与退役出口的 `EGRESS_HAS_ACCOUNTS` 不同）：
+ *   后端只改这一列、不级联删账号。所以这里用一条就地警告说清代价，而不是假装弹个确认框。
  */
-import { Alert, Button, Form, Input, InputNumber, Modal, Segmented, Space, Switch, Typography } from 'antd';
+import {
+  Alert,
+  Button,
+  Form,
+  Input,
+  InputNumber,
+  Modal,
+  Segmented,
+  Select,
+  Space,
+  Switch,
+  Typography,
+} from 'antd';
 import { useEffect, useState } from 'react';
 
 import { upstreamsApi } from '@/api/endpoints';
 import { useAction } from '@/api/hooks';
-import type { BalanceQueryTemplate, BalanceTestTemplate, Upstream } from '@/api/types';
+import type {
+  BalanceQueryTemplate,
+  BalanceTestTemplate,
+  SupplierKind,
+  Upstream,
+} from '@/api/types';
 import { tokens } from '@/theme/tokens';
 import { BalanceSelfTest } from './BalanceSelfTest';
 
 const { Text } = Typography;
 
+/** 表单里的展示枚举。`'common'` 提交时映射为 `supplier: null`（§15.6 默认值）。 */
+type SupplierFormValue = 'common' | 'tierflow';
+
+const SUPPLIER_OPTIONS: { value: SupplierFormValue; label: string }[] = [
+  { value: 'common', label: '通用（无账号面）' },
+  { value: 'tierflow', label: 'TierFlow（供应商账号面）' },
+];
+
 interface UpstreamFormValues {
   name: string;
   baseUrl: string;
+  supplier: SupplierFormValue;
   enabled: boolean;
   queryEnabled: boolean;
   queryUrl: string;
@@ -53,6 +90,7 @@ const DEFAULT_TEMPLATE: BalanceQueryTemplate = {
 function toFormValues(upstream: Upstream | null): Partial<UpstreamFormValues> {
   if (!upstream) {
     return {
+      supplier: 'common',
       enabled: true,
       queryEnabled: false,
       queryMethod: 'GET',
@@ -67,6 +105,9 @@ function toFormValues(upstream: Upstream | null): Partial<UpstreamFormValues> {
   return {
     name: upstream.name,
     baseUrl: upstream.baseUrl,
+    // 判据只有一条：`supplier === 'tierflow'`（§15.12 锚 1）。不是 tierflow 就是通用，
+    // 包括 `null` 与将来可能出现的第二个供应商值 —— 落到「通用」比落到某个具体值是更诚实的缺省。
+    supplier: upstream.supplier === 'tierflow' ? 'tierflow' : 'common',
     enabled: upstream.enabled,
     queryEnabled: template.enabled,
     queryUrl: template.url,
@@ -103,6 +144,7 @@ export function UpstreamModal({ open, editing, onClose, onSaved }: UpstreamModal
 
   const queryEnabled = Form.useWatch('queryEnabled', form) ?? false;
   const method = Form.useWatch('queryMethod', form) ?? 'GET';
+  const supplier = Form.useWatch('supplier', form) ?? 'common';
 
   /** 把主表单当前的模板字段快照成一份草稿（best-effort，headers 解析失败则空对象），交给自测抽屉。 */
   const openSelfTest = (): void => {
@@ -165,6 +207,9 @@ export function UpstreamModal({ open, editing, onClose, onSaved }: UpstreamModal
       timeoutMs: values.timeoutMs,
     };
 
+    // 展示枚举 → 契约取值。`null` 是**显式降回通用**，不是"没填"（§2 / §15.6）。
+    const supplierValue: SupplierKind | null = values.supplier === 'tierflow' ? 'tierflow' : null;
+
     const result = editing
       ? await run(
           'save',
@@ -172,6 +217,7 @@ export function UpstreamModal({ open, editing, onClose, onSaved }: UpstreamModal
             upstreamsApi.update(editing.id, {
               name: values.name,
               baseUrl: values.baseUrl,
+              supplier: supplierValue,
               enabled: values.enabled,
               balanceQuery,
               revision: editing.revision,
@@ -184,6 +230,7 @@ export function UpstreamModal({ open, editing, onClose, onSaved }: UpstreamModal
             upstreamsApi.create({
               name: values.name,
               baseUrl: values.baseUrl,
+              supplier: supplierValue,
               enabled: values.enabled,
               balanceQuery,
             }),
@@ -243,6 +290,40 @@ export function UpstreamModal({ open, editing, onClose, onSaved }: UpstreamModal
               <Switch />
             </Form.Item>
           </Space>
+
+          {/*
+            契约 §15.6：建/改上游表单里**唯一**多出来的控件。默认「通用」= `supplier: null`。
+            这里刻意不做「按 Base URL 自动选中」—— 那正是 §15.6 禁止的猜测。
+          */}
+          <Form.Item
+            name="supplier"
+            label="供应商"
+            extra="账号面判据只有这一个字段（§15.6 / §15.12）：选定 TierFlow 后，该上游才出现账号池入口。前端不解析 Base URL 猜供应商。"
+            style={{ maxWidth: 360 }}
+          >
+            <Select<SupplierFormValue> options={SUPPLIER_OPTIONS} />
+          </Form.Item>
+
+          {/*
+            降回通用：后端不拦（没有 409、也没有 `force`），只把这一列写成 NULL。
+            所以代价必须在这里说清 —— 入口会消失，但账号数据还在；否则管理员会以为
+            这个动作要么被拒绝、要么连账号一起清了。
+          */}
+          {editing?.supplier === 'tierflow' && supplier !== 'tierflow' ? (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: tokens.space.md, background: tokens.tint.warning, border: 'none' }}
+              message="改回「通用」后，这个上游的账号池入口会消失"
+              description={
+                <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
+                  这个动作只写这一个字段，不会级联删除账号
+                  {editing.accountCount > 0 ? `（当前名下有 ${editing.accountCount} 个账号，它们会保留）` : ''}
+                  ；但管理面上不再显示账号池入口，直到把「供应商」改回 TierFlow。
+                </Text>
+              }
+            />
+          ) : null}
 
           <Form.Item
             name="queryEnabled"

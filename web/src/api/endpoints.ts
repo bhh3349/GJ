@@ -4,7 +4,7 @@
  * 这一层只做三件事：拼路径、拼 query、给返回类型。**不做**字段改名、
  * 不做默认值填充、不做 null→0 的降级（契约 §0.2 的 null 语义必须原样往上传）。
  */
-import { api, type QueryValue } from './http';
+import { api, downloadFile, type QueryValue } from './http';
 import type {
   AuditEntry,
   BalanceStats,
@@ -34,6 +34,13 @@ import type {
   SessionInfo,
   StatsOverview,
   StatsWindow,
+  SupplierAccount,
+  SupplierAccountListQuery,
+  SupplierBatchRequest,
+  SupplierImportRequest,
+  SupplierKeysRequest,
+  SupplierSubscriptionRow,
+  SupplierTestResult,
   Task,
   TaskAccepted,
   Upstream,
@@ -166,6 +173,58 @@ export const statsApi = {
    */
   balanceSync: (query: BalanceSyncQuery = {}) =>
     api.get<BalanceSyncStatus>('/stats/balance/sync', { query: q(query) }),
+};
+
+// ── §15 供应商账号面（TierFlow） ───────────────────────────────────────────
+//
+// 一个函数对应 §15.2 的一行。11 个端点**全在这里**，因为它们是同一张管理面的两个切面
+// （账号池 / 套餐台账），拆成两个命名空间只会让"这个上游有没有账号面"这个判据
+// 散在两处 —— 而那个判据只有一条：`Upstream.supplier === 'tierflow'`（§15.12 锚 1）。
+
+export const supplierAccountsApi = {
+  list: (query: SupplierAccountListQuery = {}) =>
+    api.get<Paged<SupplierAccount>>('/supplier-accounts', { query: q(query) }),
+  get: (id: string) => api.get<SupplierAccount>(`/supplier-accounts/${id}`),
+  /**
+   * 跨账号的扁平套餐台账（**只读、不发上游请求**）。与详情里那个嵌套 `subscriptions[]`
+   * 是同一份数据的两个切面；这边按 `end_at` 排，回答的是"接下来谁到期"。
+   */
+  subscriptions: (query: { upstreamId?: string; page?: number; pageSize?: number } = {}) =>
+    api.get<Paged<SupplierSubscriptionRow>>('/supplier-accounts/subscriptions', { query: q(query) }),
+  /**
+   * 批量导入（`text` = 「手机号,密码」行文本）。**只收密码型凭据** ——
+   * 会话型凭据不走 HTTP（§15.9），所以这里没有第二个入口。
+   * 返回 `202 {taskId}`：成了几行要等任务跑完，靠 §15.3 的逐行结果说话。
+   */
+  import: (body: SupplierImportRequest) => api.post<TaskAccepted>('/supplier-accounts/import', body),
+  /** 刷余额。`ids` 省略 = 该上游全部账号（**不按状态筛**，会话过期的号正是最该刷的）。 */
+  refresh: (body: SupplierBatchRequest) => api.post<TaskAccepted>('/supplier-accounts/refresh', body),
+  /** 批量新建 key 并入池。上游明文**不经浏览器**，响应与任务结果只回 `keyId` + `keyMasked`。 */
+  createKeys: (body: SupplierKeysRequest) => api.post<TaskAccepted>('/supplier-accounts/keys', body),
+  /** 同步已有 key（掩码）+ 套餐。只读上游、只写台账；未命中的掩码**只记数**。 */
+  syncKeys: (body: SupplierBatchRequest) =>
+    api.post<TaskAccepted>('/supplier-accounts/keys/sync', body),
+  /** 单账号重登。**同步**端点，回 200；无存档密码时当场 422（不是"点了没重登成"）。 */
+  relogin: (id: string) => api.post<SupplierAccount>(`/supplier-accounts/${id}/login`),
+  /** 连接自测。**永不写库**，业务性失败一律 `200 + ok:false`（诊断结论走响应体）。 */
+  test: (id: string) => api.post<SupplierTestResult>(`/supplier-accounts/${id}/test`),
+  /**
+   * 删账号。名下还有已入池 key 且 `force !== true` → `409 ACCOUNT_HAS_KEYS`。
+   * 与删上游（ADR-0016 物理删子树）关键差别：**这里一把 key 都不删，只解绑** ——
+   * 账号删了它名下的 key 仍可用，真删 key 会让网关下一轮快照少一批可用 key（删账号打穿流量）。
+   */
+  remove: (id: string, force = false) =>
+    api.del<void>(`/supplier-accounts/${id}`, { query: { force: force ? true : undefined } }),
+  /**
+   * §15.2 对账 CSV（`text/csv`，UTF-8 BOM + CRLF，文件名由服务端给）。
+   *
+   * 走 `downloadFile` 而不是 `api.get`：它是产出物型端点，要按 `Content-Disposition` 落盘，
+   * 且失败必须能落进 loading / 成功 / 失败同一条通道（裸 `window.open` 拿不到 401 的反馈）。
+   * **导出不分页**（§15.2）—— 分页导出拿到的"账号总数"取决于点第几页，那不是对账表。
+   * 表里**不含密码、不含会话、不含任何 key 明文或掩码**，所以它不能用来重建账号，只能用来对账。
+   */
+  exportCsv: (query: { upstreamId?: string } = {}) =>
+    downloadFile('/supplier-accounts/export', { query: q(query) }),
 };
 
 export const logsApi = {

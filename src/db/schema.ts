@@ -330,21 +330,34 @@ CREATE TABLE IF NOT EXISTS supplier_accounts (
 CREATE INDEX IF NOT EXISTS idx_supplier_accounts_upstream ON supplier_accounts(upstream_id);
 CREATE INDEX IF NOT EXISTS idx_supplier_accounts_status ON supplier_accounts(status);
 
--- 出口 IP 池（契约 §16.7 Tier 2 / ADR-0020）。**纯加表**。
+-- 出口 IP 池（契约 §16.7 Tier 2 / ADR-0020；生命周期见 ADR-0021 决策 9）。**纯加表**。
 --
 -- url 只放 scheme://host:port，**不放凭据**；代理认证走 secret（aes-256-gcm 密文 BLOB，
 -- 与 upstream_keys.secret 同一形状）。"凭据不存值"的正确落法是**不存明文** ——
 -- 一个连不上的代理不是出口，所以这里存的是可用凭据，但明文永不落盘、永不出后端。
+--
+-- v1.7.0 三处形状（ADR-0021 决策 9，表未发布 ⇒ 逐字替换、零迁移）：
+--   1. status 单轴：enabled + 退役位两列能组合出"启用且已退役"，而选择器要滤两处 ⇒
+--      漏一处就是静默选错的出口。改成单列枚举，只有一处要滤。
+--   2. retired **不删行**：删了它，历史用量 / 统计 / §7 帧就失去宿主 —— egressId 必须比 IP 活得久。
+--   3. url 归一化后 UNIQUE：同 URL 两行 = 两个 egressId = 两个桶 = 放行量翻倍；且"退役后重建同 URL"
+--      会拿到一个新桶 —— 等于改个名字白拿一次额度。**回池只有一条路：复用原 id 改回 active**。
+--      UNIQUE 只在**归一化之后**才拦得住 HTTPS://A.EXAMPLE:443 与 https://a.example 是同一个出口，
+--      所以写库前必须走 src/egress 的同一份归一化。
 CREATE TABLE IF NOT EXISTS egress_proxies (
-  id         TEXT PRIMARY KEY,
-  name       TEXT NOT NULL UNIQUE,
-  url        TEXT NOT NULL,                         -- scheme://host:port，不含 user:pass
-  secret     BLOB,                                  -- aes-256-gcm：代理认证；NULL = 免认证
-  region     TEXT,                                  -- 备注用：hk / cn-bj / us
-  note       TEXT,
-  enabled    INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  id             TEXT PRIMARY KEY,
+  name           TEXT NOT NULL UNIQUE,
+  url            TEXT NOT NULL UNIQUE,              -- scheme://host:port（归一化后落库），不含 user:pass
+  secret         BLOB,                              -- aes-256-gcm：代理认证；NULL = 免认证
+  region         TEXT,                              -- 备注用：hk / cn-bj / us
+  note           TEXT,
+  status         TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','retired')),
+  retired_reason TEXT CHECK (retired_reason IS NULL OR retired_reason IN ('replaced','manual')),
+  retired_at     TEXT,                              -- ISO8601；退役即写，回池不清
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  -- 没有原因的 retired 半年后没人判断得了它能不能删 ⇒ 退役必须带原因。
+  CHECK (status <> 'retired' OR retired_reason IS NOT NULL)
 );
 
 -- 账号套餐（契约 §15.1 subscriptions）。**纯加表**。

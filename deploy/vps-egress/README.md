@@ -115,8 +115,20 @@ sudo cp nodes.example.tsv /etc/sub2api/egress-nodes.tsv   # 再填真值
 
 ## 6. 开放待办（R1：owner + 载体 + 回执口径）
 
+> 现行清单：2026-10-09 PM 三裁决后由**管家**登记。裁决 1（画师两笔微任务）**已收口**，
+> 证据移到本节末尾，不再挂开放项。每行三要素齐全，缺一行视为未报备。
+
 | 事项 | owner | 载体 | 回执口径 |
 |---|---|---|---|
-| `check:secrets` 增一条「代理 URL 不含 `user:pass@`」断言（提案 §6 已承诺） | 管家 | `dev/api` | 规则 + 正对照用例同批落，回 `check:secrets` 命中数 |
-| `pool-probe.sh` 的清单改为可从 `GET /api/egress` 取（DB 成为唯一事实源后） | 管家 | `dev/api` | S2 落 `/api/egress` 时同批改，回命令与输出样例 |
-| 网关侧代理接线 + 指纹桶键 + 出口单例 | 路由者 | `dev/gateway-rotation` | 按 ADR-0021 §验证 |
+| `/api/egress` REST 面：`src/api/routes/egress.ts` + `src/db/repo/egress.ts` + SSRF 校验 + `test` / `status` / `retire` / `reactivate` | 管家 | `dev/api`（工作树 `.worktrees/api`，基线 = 当前 `origin/main` tip） | 端点表 + `check:secrets` 命中数 + 自测样例；**追加两条**（PM 裁决 2）：① 契约 diff（端点表 + 错误码）与实现**同批**落；② `user:pass@` 断言必须附一条**触发样例**作 deny-case 证据 —— 只有放行样例不算收口 |
+| `check:secrets` 增一条「代理 URL 不含 `user:pass@`」断言（提案 §6 已承诺；实测 `src/security/plaintext-scan.ts` 目前只对 `nodes.example.tsv` 放行、**断言本体未落**） | 管家 | `dev/api`（与上一行同批、同一 PR） | 规则 + 正对照用例 + **一条触发（deny）样例**同批落，回 `check:secrets` 命中数 |
+| `pool-probe.sh` 的清单改为可从 `GET /api/egress` 取（DB 成为唯一事实源后） | 管家 | `dev/api`（同上） | **上面两行的下游件**：可与实现同 PR、不同 commit（PM 裁决 2）；回命令与输出样例 |
+| `egress_pool` 帧的**生产者** = 心跳上报链（冻结字段 `status` / `exitIp` / `lastHeartbeatAt` 的数据来源；`pool-probe.sh` 按设计无状态、当前**无接收端**） | 路由者 | `dev/gateway-rotation`（工作树 `.worktrees/gateway`，基线 = 当前 `origin/main` tip） | 四门禁全绿 + **live 流里一帧真实发射样例**（含那三条冻结字段）+ 心跳→帧的延迟一句话。**先于前端接线**（契约 v1.5.0「禁止先加字段、后补生产者」） |
+| 出口池卡片接线渲染 `egress_pool`（及其后的 `egress_cooldown`） | 画师 | `dev/web-m2`（工作树 `.worktrees/web`） | **硬前置 = 上一行的生产者合入 main**。生产者未落地前不得接线，否则就是渲染无证据字段（AGENTS.md §6 禁假数据） |
+| S4 成功响应面实测（TTFB / SSE 帧形状 / `model` 取值） | 路由者出探针与结论；凭据由 Bo 运行时注入 `PROBE_KEY` / `PROBE_MODEL` | `dev/gateway-rotation` | **执行序最后一棒**：① 画师两笔（已收口）→ ② 管家 `/api/egress` 批次 → ③ 路由者心跳生产者 → ④ 画师接线 → ⑤ S4。实测用的超额套餐 key 只从排除名单之外的授权账号里挑，**§15.9 排除名单里那个账号永不参与**（号码不写进仓库） |
+
+**已收口（裁决 1，2026-10-09 由管家 git 实测复核）**：
+
+- `4df1f24` `feat(web)`：BalanceHint 未知 `hintCode` 运行时兜底（单文件 `web/src/components/BalanceHint.tsx`，+15/−1）。
+- `62d70eb` `feat(web)`：§14.7 手动刷新二次确认补齐两个批量入口（`ManualRefreshConfirm.tsx` + Keys/Upstreams/SupplierAccounts 三页，+131/−31）——**即当前 `origin/main` tip**。
+- 两笔都已 rebase 到新 main 之上并**线性**落在 `origin/main`，因此不需要 `--force-with-lease`；四闸结果写在各自的 commit message 里（typecheck 净 · test 638 passed | 1 skipped · build 净 · `check:secrets` 0 命中）。

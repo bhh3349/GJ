@@ -94,8 +94,12 @@ export interface BalanceSyncOptions {
    * 退避阶梯的断言要的是"30m / 1h / 2h"这种精确值，不能被抖动搅成区间判断。
    */
   random?: (() => number) | undefined;
-  /** 透传给 `refreshBalances`，仅测试用。 */
-  fetchImpl?: typeof fetch | undefined;
+  /**
+   * 出站 fetch，**必填、无兜底**（ADR-0021 决策 4c）。由装配根 `buildApp` 解析后透传给
+   * `refreshBalances`；测试注入假 fetch 也走同一条路（原先这里允许缺省再靠下游回落全局 `fetch`，
+   * 那等于"自动同步这条线静默绕开注入缝"）。
+   */
+  fetchImpl: typeof fetch;
   /** 排程拍节，仅测试用。 */
   tickMs?: number | undefined;
   /** 裁剪拍节，仅测试用。 */
@@ -354,7 +358,7 @@ export function createBalanceSync(options: BalanceSyncOptions): BalanceSync {
       await refreshBalances(db, masterKey, { upstreamId }, NOOP_REPORTER, {
         trigger: 'auto',
         onUpstreamDone: onRefreshDone,
-        ...(fetchImpl === undefined ? {} : { fetchImpl }),
+        fetchImpl,
       });
     } catch (err) {
       // `refreshBalances` 内部已把"单把 key 失败"消化成计数；走到这里说明是库/接线级异常。

@@ -283,7 +283,13 @@ export const TIERFLOW_PATHS = {
 export interface TierFlowOptions {
   /** 上游根，如 `https://tierflow.cn`。尾斜杠会被抹掉。 */
   baseUrl: string;
-  fetchImpl?: typeof fetch;
+  /**
+   * 出站 fetch。**必填、无兜底**（ADR-0021 决策 4c「8 处 fetchImpl 兜底全拆」，本处是**内层**）。
+   *
+   * 原为 `options.fetchImpl ?? fetch`：只改外层（`supplierOps`）而留着这一层，
+   * "改了"是假的 —— 内层兜底照旧静默生效，流量绕开闸且不报错。
+   */
+  fetchImpl: typeof fetch;
   timeoutMs?: number;
 }
 
@@ -357,7 +363,7 @@ export interface TierFlowClient {
 
 export function createTierFlowClient(options: TierFlowOptions): TierFlowClient {
   const baseUrl = options.baseUrl.replace(/\/+$/, '');
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = options.fetchImpl;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   async function request(spec: RequestSpec): Promise<TierFlowResult<unknown>> {

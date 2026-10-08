@@ -164,7 +164,9 @@ export function registerModelRoutes(app: FastifyInstance, ctx: ApiContext): void
       const targets = resolveSyncTargets(db, upstreamId);
 
       const task = startTask(db, 'model_sync', targets.length, (reporter) =>
-        syncModels(db, config.masterKey, upstreamId, reporter),
+        // 出站 fetch 走**管理面那把**（`ctx.supplier.fetchImpl`）。原先这里不传、靠
+        // `syncModels` 的 `= fetch` 兜底 —— 于是注入的假 fetch / 闸包装在这条路上失守。
+        syncModels(db, config.masterKey, upstreamId, reporter, ctx.supplier.fetchImpl),
       );
       auditWrite(db, req, config, {
         action: 'model.sync',

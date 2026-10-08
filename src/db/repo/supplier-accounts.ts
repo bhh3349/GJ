@@ -30,6 +30,7 @@ import { nowIso } from '../../util/time.js';
 import { decryptSecret } from '../crypto.js';
 import type { Db } from '../database.js';
 import { newId } from '../ids.js';
+import { appendChange } from './change-log.js';
 import { translateWriteError } from './write-errors.js';
 
 /**
@@ -452,10 +453,13 @@ export function countPooledKeys(db: Db, accountId: string): number {
  * 回到 §2 的 `keysBalance` 那一格。若这里顺手把 key 也删了，网关会在下一轮快照里少一把可用 key，
  * 客户端开始报"没有可用 key"——**删除账号的动作打穿了流量**。
  *
- * **不发 `change_log`**：网关快照只消费 `upstream_keys` / `upstreams` / `models`，
- * 而本操作一行 key 都没动（解绑不改 key 行的任何一列），所以网关侧**没有任何变化可推**。
- * 发一条它不认识的 entity 只会让快照消费方多一个要忽略的分支。
- * 留痕由 `audit_log` 负责（同 ADR-0008 对网关 key 的处理）。
+ * **要发 `change_log`（ADR-0021 决策 5 起改口）**：解绑确实不改 `upstream_keys` 的任何一列，
+ * 但它改的是网关快照里的**归属** —— 那把 key 的 `accountId` / 出口从"账号的"变回"自己的"。
+ * 本段注释早先写的是"网关侧没有任何变化可推"，那在快照只读 `upstreams` / `upstream_keys` / `models`
+ * 时是对的；E 接缝把台账并进了快照输入，那个前提就没了。漏发的后果不是报错，
+ * 是网关那边这笔归属**永远不更新**。
+ * 仍然**不动池内 key**（密文与行都在，网关照常转发）—— 理由见上。
+ * 留痕仍由 `audit_log` 负责（同 ADR-0008 对网关 key 的处理）。
  */
 export function deleteSupplierAccount(db: Db, id: string, force: boolean): void {
   const exists = db.prepare('SELECT id FROM supplier_accounts WHERE id = ?').get(id);
@@ -470,12 +474,17 @@ export function deleteSupplierAccount(db: Db, id: string, force: boolean): void 
     );
   }
 
+  // 先记下"解绑了谁"：删完台账行就再也问不出受影响的是哪几把 key 了。
+  const linked = listLinkedPooledKeyIds(db, id);
+
   db.transaction(() => {
     // 套餐行与台账行都 `REFERENCES supplier_accounts(id)`，必须先删 —— 否则删账号行直接
     // `SQLITE_CONSTRAINT_FOREIGNKEY`（同 ADR-0016 那条 500 的成因，只是这里更短）。
     db.prepare('DELETE FROM supplier_account_subscriptions WHERE account_id = ?').run(id);
     db.prepare('DELETE FROM supplier_account_keys WHERE account_id = ?').run(id);
     db.prepare('DELETE FROM supplier_accounts WHERE id = ?').run(id);
+    // 与删除同一事务：崩在中间会让"库里已解绑、网关还认着账号"成为**永久**状态。
+    for (const pooled of linked) appendChange(db, 'key', pooled, 'update', null);
   })();
 }
 
@@ -876,6 +885,8 @@ export function replaceSupplierAccountKeyLedger(
     `INSERT INTO supplier_account_keys (id, account_id, masked_key, pooled_key_id, note, created_at, updated_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
   );
+  /** 本次动过的入池 key（= 网关快照里"这把 key 属于谁"变了的那些），见事务尾部的广播。 */
+  const touched = new Set<string>();
   db.transaction(() => {
     // 只清"仅掩码"的行（`pooled_key_id IS NULL`）—— 见上面的理由。
     db.prepare('DELETE FROM supplier_account_keys WHERE account_id = ? AND pooled_key_id IS NULL').run(accountId);
@@ -888,6 +899,7 @@ export function replaceSupplierAccountKeyLedger(
     for (const r of rows) {
       const pooled = r.pooledKeyId ?? null;
       if (pooled !== null) {
+        touched.add(pooled);
         const updated = db
           .prepare(
             `UPDATE supplier_account_keys SET masked_key = ?, note = ?, updated_at = ?
@@ -902,6 +914,13 @@ export function replaceSupplierAccountKeyLedger(
       seenMasked.add(r.maskedKey);
       insert.run(newId('supplierAccountKey'), accountId, r.maskedKey, null, r.note ?? null, at, at);
     }
+
+    // 台账动 = 网关快照里的「这把 key 属于哪个账号 / 从哪个出口出」动了 ⇒ 必须广播。
+    // 快照只认 change_log 里那几个实体名，而**台账表名不在其中**（store.ts 的 SNAPSHOT_ENTITIES）：
+    // 漏发不会报错、不会变慢，只会让 `accountId` 长期停在旧值上 ——
+    // 而它正是出口限流按账号去重的键，一个人被数成好几份时判据只会更晚才响。
+    // 广播与写入同一个事务：崩在中间会让"库里有、网关看不见"成为**永久**状态。
+    for (const pooled of touched) appendChange(db, 'key', pooled, 'update', null);
     // 这个 `()` 不能省：`db.transaction(fn)` **只构造**一个事务函数，不执行。
     // 少了它，整个函数变成一次静默空转 —— 而它照样 `return { rows: rows.length }`，
     // 于是调用方看到"更新了 2 行"、库里一行没动。这类 bug 不会报错、不会变慢，
@@ -964,11 +983,14 @@ export function linkSupplierAccountKey(
         WHERE account_id = ? AND pooled_key_id = ?`,
     )
     .run(maskedKey, note, at, accountId, pooledKeyId);
-  if (updated.changes > 0) return;
-  db.prepare(
-    `INSERT INTO supplier_account_keys (id, account_id, masked_key, pooled_key_id, note, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(newId('supplierAccountKey'), accountId, maskedKey, pooledKeyId, note, at, at);
+  if (updated.changes === 0) {
+    db.prepare(
+      `INSERT INTO supplier_account_keys (id, account_id, masked_key, pooled_key_id, note, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(newId('supplierAccountKey'), accountId, maskedKey, pooledKeyId, note, at, at);
+  }
+  // 台账动 ⇒ 网关快照里这把 key 的归属变了（理由与 `replaceSupplierAccountKeyLedger` 尾部逐字相同）。
+  appendChange(db, 'key', pooledKeyId, 'update', null);
 }
 
 /** 上游的 `supplier` 与根地址。`import` 前必须 `supplier === 'tierflow'`，否则 `422`（§15.2）。 */

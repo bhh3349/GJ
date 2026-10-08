@@ -539,6 +539,12 @@ describe('删账号（§15.2：`force` 的语义与删上游**不同**）', () =
     // 种数据本身就会写 change_log（建上游、建 key 各一条），所以判据是**差值**而不是绝对值：
     // 断言 0 等于在断言"库里从没建过任何东西"，那是另一件事，且会随 fixture 变化而误报。
     const before = countOf(h, 'SELECT COUNT(*) AS n FROM change_log');
+    // 「这把 key 的归属变更」同样按**差值**判：bindKey 自己就发过一条，绝对值会跟着 fixture 漂。
+    const beforeKeyChanges = countOf(
+      h,
+      "SELECT COUNT(*) AS n FROM change_log WHERE entity = 'key' AND entity_id = ?",
+      keyId,
+    );
 
     const { status } = await del(h, acc, '?force=true');
     expect(status).toBe(204);
@@ -550,9 +556,13 @@ describe('删账号（§15.2：`force` 的语义与删上游**不同**）', () =
     // 客户端开始报"没有可用 key"——**删除账号的动作打穿了流量**。
     expect(countOf(h, 'SELECT COUNT(*) AS n FROM upstream_keys WHERE id = ? AND deleted_at IS NULL', keyId)).toBe(1);
 
-    // 不发 change_log：网关快照只消费 upstream_keys / upstreams / models，
-    // 本操作一行 key 都没动，没有任何变化可推。
-    expect(countOf(h, 'SELECT COUNT(*) AS n FROM change_log')).toBe(before);
+    // 解绑要发 change_log（ADR-0021 决策 5）：解绑不改 upstream_keys 的列，但改的是网关快照里的
+    // **归属** —— 那把 key 从"账号代表其余额"变回"自己就是一份钱"，出口也从账号的变回宿主的。
+    // 快照只认 change_log，漏发不会报错，只会让网关那边这笔归属永远不更新。绑着一把 key ⇒ 多一条。
+    expect(countOf(h, 'SELECT COUNT(*) AS n FROM change_log')).toBe(before + 1);
+    expect(
+      countOf(h, "SELECT COUNT(*) AS n FROM change_log WHERE entity = 'key' AND entity_id = ?", keyId),
+    ).toBe(beforeKeyChanges + 1);
 
     const audit = h.db
       .prepare("SELECT target_id, detail FROM audit_log WHERE action = 'supplier.account.delete'")

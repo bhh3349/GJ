@@ -15,13 +15,16 @@ import { join } from 'node:path';
 import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'vitest';
 
-import { sha256Hex } from '../db/crypto.js';
+import { encryptSecret, sha256Hex } from '../db/crypto.js';
 import { openDatabase, type Db } from '../db/database.js';
+import { appendChange } from '../db/repo/change-log.js';
 import { createGroup } from '../db/repo/groups.js';
 import { createKey, deleteKey } from '../db/repo/keys.js';
 import { upsertModelFromSync, updateModel, getModel } from '../db/repo/models.js';
+import { createSupplierAccount, linkSupplierAccountKey } from '../db/repo/supplier-accounts.js';
 import { createUpstream, updateUpstream } from '../db/repo/upstreams.js';
 import { createKeyPool } from '../gateway/key-pool.js';
+import { createSecretResolver } from './secrets.js';
 import { createGatewayStore } from './store.js';
 
 /* ------------------------------ 测试台 ------------------------------ */
@@ -69,6 +72,28 @@ function setup(masterKey: Buffer = MASTER_KEY): Harness {
 function addUpstream(db: Db, name = 'up-a', baseUrl = 'https://a.example.com'): string {
   return createUpstream(db, { name, baseUrl }).id;
 }
+
+/** 一个最小可用的供应商账号行（凭据是密文探针，源码里没有可扫的明文）。 */
+function seedAccount(db: Db, upstreamId: string, egressId: string | null = null): string {
+  const id = `sa_probe_${accountSeq++}`;
+  createSupplierAccount(db, id, {
+    upstreamId,
+    supplier: 'tierflow',
+    identifier: '138****0000',
+    identifierHash: sha256Hex(`wiring-store-${id}`),
+    status: 'active',
+    encryptedPassword: encryptSecret(probeSecret(`${id}-pw`), MASTER_KEY),
+  });
+  if (egressId !== null) setAccountEgress(db, id, egressId);
+  return id;
+}
+
+/** 直接改出口列：Tier 2 的写路径还没落，这里只造快照输入。 */
+function setAccountEgress(db: Db, accountId: string, egressId: string): void {
+  db.prepare('UPDATE supplier_accounts SET egress_id = ? WHERE id = ?').run(egressId, accountId);
+}
+
+let accountSeq = 0;
 
 /* ------------------------------ 用例 ------------------------------ */
 
@@ -196,7 +221,14 @@ describe('明文缓存', () => {
     const k = createKey(h.db, { upstreamId: up, key: plain, category: 'balance' }, MASTER_KEY);
     h.store.refresh();
 
-    assert.deepEqual(h.store.secrets.resolve(k.id), { upstreamId: up, baseUrl: 'https://a.example.com', apiKey: plain });
+    assert.deepEqual(h.store.secrets.resolve(k.id), {
+      upstreamId: up,
+      baseUrl: 'https://a.example.com',
+      apiKey: plain,
+      // 出口归属与明文同批算好（E 接缝，ADR-0021 决策 5）：无主 key ⇒ Tier 1 按 base URL 推导
+      egressId: 'a.example.com',
+      accountId: null,
+    });
 
     // 硬约束（PM 冻结）：热路径零 SQL。软删之后不 refresh，明文必须还在 ——
     // 反过来说，如果 resolve() 真在查库，这里已经返回 null 了
@@ -325,5 +357,92 @@ describe('刷新触发条件', () => {
 
     // 没有新变更时不该无限重建（否则 applySnapshot 会被空转调用，见 store.ts 头注释）
     assert.equal(h.store.refresh(), false);
+  });
+});
+
+describe('出口归属（E 接缝：台账 → 快照缓存）', () => {
+  it('无主 key：accountId=null，egressId 按 base URL 推导（Tier 1，与改动前逐字相同）', () => {
+    const h = setup();
+    const up = addUpstream(h.db); // https://a.example.com
+    const k = createKey(h.db, { upstreamId: up, key: probeSecret('egress-a'), category: 'balance' }, MASTER_KEY);
+    h.store.refresh();
+
+    assert.deepEqual(h.store.secrets.egressOf(k.id), { egressId: 'a.example.com', accountId: null });
+    // 出站面的键集**逐字钉死**：引擎拿的是整个对象，多一个键就是多一个会漂移的面 ——
+    // 所以这里数键，而不是「包含」。出口两键是 E 接缝**明示**加进来的（ADR-0021 决策 5），
+    // 再有任何第五个键落进来都该是一次有意识的改动，而不是顺手带的。
+    assert.deepEqual(Object.keys(h.store.secrets.resolve(k.id) ?? {}).sort(), ['accountId', 'apiKey', 'baseUrl', 'egressId', 'upstreamId']);
+  });
+
+  it('入池 key 的归属来自台账；账号没指定出口时退回 Tier 1 推导', () => {
+    const h = setup();
+    const up = addUpstream(h.db);
+    const k = createKey(h.db, { upstreamId: up, key: probeSecret('egress-b'), category: 'balance' }, MASTER_KEY);
+    const account = seedAccount(h.db, up);
+    linkSupplierAccountKey(h.db, account, k.id, k.maskedKey);
+    assert.equal(h.store.refresh(), true);
+
+    assert.deepEqual(h.store.secrets.egressOf(k.id), { egressId: 'a.example.com', accountId: account });
+    // 出站面上必须是**同一个值**：批二给 `EgressLimitedInput.subject.accountId` 喂的就是它。
+    // 两个读点各算一遍，就是"计数按账号去重"和"断言看的账号"分叉的老路。
+    assert.equal(h.store.secrets.resolve(k.id)?.accountId, account);
+  });
+
+  it('账号指定出口（Tier 2）→ 原样取那一列，**不做 URL 归一化**；空串按"没指定"处理', () => {
+    const h = setup();
+    const up = addUpstream(h.db);
+    const k = createKey(h.db, { upstreamId: up, key: probeSecret('egress-c'), category: 'balance' }, MASTER_KEY);
+    const account = seedAccount(h.db, up, 'egress_hk_1');
+    linkSupplierAccountKey(h.db, account, k.id, k.maskedKey);
+    h.store.refresh();
+
+    // 这一列存的是**稳定 egressId**（Tier 2 = `egress_proxies.id`），**不是 URL**。
+    // 拿 `egressIdOfUrl` 去"归一化"一个 id，`new URL('egress_hk_1')` 会抛 → 恒 null，
+    // 于是出口被整个丢掉 —— 那正是"一个出口零个桶 ⇒ 无上限"那条事故。
+    assert.deepEqual(h.store.secrets.egressOf(k.id), { egressId: 'egress_hk_1', accountId: account });
+    // 原样透传到**出站面**（引擎读的是这一个），而不是只在观测口上对
+    assert.equal(h.store.secrets.resolve(k.id)?.egressId, 'egress_hk_1');
+
+    // 空串不是"一个叫 '' 的出口"：它会绕开宿主出口兜底，所以归一到 Tier 1。
+    // 这里顺带钉住一条**给 Tier 2 写路径的约定**：改 `supplier_accounts.egress_id` 必须同时
+    // 广播一条 `'key'`。它动的是一张不在 SNAPSHOT_ENTITIES 里的表，不广播就**不会重建** ——
+    // 下面那行 `appendChange` 就是将来那条写路径欠的动作（本期还没有写路径，所以由测试代做）。
+    setAccountEgress(h.db, account, '');
+    appendChange(h.db, 'key', k.id, 'update', null);
+    assert.equal(h.store.refresh(), true);
+    assert.equal(h.store.secrets.egressOf(k.id)?.egressId, 'a.example.com');
+    assert.equal(h.store.secrets.resolve(k.id)?.egressId, 'a.example.com', '出站面同步退回 Tier 1');
+  });
+});
+
+describe('归属变化不吃明文缓存（决策 4c 末条）', () => {
+  it('revision 没变时只覆盖归属、不重新解密', () => {
+    // 直接驱动解析器：把"密文在那两轮之间已经解不开"当成探针 ——
+    // 一旦实现退化成"每轮都重新解密"，第二轮就会失败并把条目踢出缓存。
+    const errors: string[] = [];
+    const resolver = createSecretResolver({ masterKey: MASTER_KEY, onDecryptError: (id) => errors.push(id) });
+    const cipher = encryptSecret(probeSecret('egress-light'), MASTER_KEY);
+    const row = { id: 'k-light', upstream_id: 'up-1', revision: 3, secret: cipher, account_id: null, account_egress_id: null };
+    const urls = new Map([['up-1', 'https://a.example.com']]);
+
+    resolver.update([row], urls);
+    resolver.update([{ ...row, secret: Buffer.from('已经不是密文了'), account_id: 'acc-1' }], urls);
+
+    assert.deepEqual(errors, [], 'revision 未变 + 归属变了 → 走轻路径，不碰密文');
+    assert.equal(resolver.size(), 1);
+    assert.deepEqual(resolver.egressOf('k-light'), { egressId: 'a.example.com', accountId: 'acc-1' });
+  });
+
+  it('台账写路径发 change_log：绑定后 refresh 会重建（否则 accountId 停在旧值上）', () => {
+    const h = setup();
+    const up = addUpstream(h.db);
+    const k = createKey(h.db, { upstreamId: up, key: probeSecret('egress-trigger'), category: 'balance' }, MASTER_KEY);
+    h.store.refresh();
+    assert.equal(h.store.secrets.egressOf(k.id)?.accountId, null);
+
+    const account = seedAccount(h.db, up);
+    linkSupplierAccountKey(h.db, account, k.id, k.maskedKey);
+    assert.equal(h.store.refresh(), true, '台账绑定必须广播到网关快照');
+    assert.equal(h.store.secrets.egressOf(k.id)?.accountId, account);
   });
 });

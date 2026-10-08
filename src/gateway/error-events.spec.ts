@@ -20,6 +20,7 @@ import Fastify from 'fastify';
 import type { FastifyInstance } from 'fastify';
 import { describe, it } from 'vitest';
 
+import { egressIdOfUrl } from '../egress/port.js';
 import { REQUEST_ID_HEADER, isValidRequestId } from '../util/request-id.js';
 import type { FetchLike } from './engine.js';
 import type { ErrorEventEntry, ErrorEventSink, GroupContext, ModelCatalog, SecretResolver, UpstreamTarget } from './ports.js';
@@ -106,7 +107,9 @@ async function setup(options: Options = {}): Promise<Harness> {
       ((keyId) => {
         const found = stackKeys.find((k) => k.keyId === keyId);
         if (found === undefined) return null;
-        return { upstreamId: found.upstreamId, baseUrl: `https://${found.upstreamId}.example.com/v1`, apiKey: `sk-${keyId}` };
+        // 出口口径同 `secrets.ts`：桩里没有台账 ⇒ Tier 1 按 base URL 推导（见 engine.spec.ts 的 upstreamTarget）
+        const baseUrl = `https://${found.upstreamId}.example.com/v1`;
+        return { upstreamId: found.upstreamId, baseUrl, apiKey: `sk-${keyId}`, egressId: egressIdOfUrl(baseUrl), accountId: null };
       }),
   };
 

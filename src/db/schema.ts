@@ -301,6 +301,12 @@ CREATE INDEX IF NOT EXISTS idx_balance_snapshots_upstream_ts ON balance_snapshot
 --      所以先不加约束，把「删上游时账号怎么办」留作契约缺口，不在这里发明行为。
 --   4. **不存套餐价、不存单价**。quota_per_unit 每次从上游读（§15.1），落库的只有
 --      换算后的**分**。供应商改了换算比，我们的历史数不会跟着错。
+--
+-- ⚠ 给 Tier 2 写路径的约定（ADR-0021 决策 5）：改 egress_id 时**必须同时发一条 change_log**
+--   （entity 'key'，entity_id = 受影响的每把 pooled_key_id）。网关快照只认 change_log，
+--   而 supplier_accounts 不在它的实体清单里 —— 漏发的表现不是报错，是那把 key 的出口
+--   永远停在旧值上（出口预算按 id 分桶，于是同一根出口被算成两根、放行量翻倍）。
+--   本期没落这条写路径，所以这里只登记，不发明入口。
 CREATE TABLE IF NOT EXISTS supplier_accounts (
   id                 TEXT PRIMARY KEY,
   upstream_id        TEXT NOT NULL,                 -- 抹名引用，刻意不设外键（见上）
@@ -330,21 +336,34 @@ CREATE TABLE IF NOT EXISTS supplier_accounts (
 CREATE INDEX IF NOT EXISTS idx_supplier_accounts_upstream ON supplier_accounts(upstream_id);
 CREATE INDEX IF NOT EXISTS idx_supplier_accounts_status ON supplier_accounts(status);
 
--- 出口 IP 池（契约 §16.7 Tier 2 / ADR-0020）。**纯加表**。
+-- 出口 IP 池（契约 §16.7 Tier 2 / ADR-0020；生命周期见 ADR-0021 决策 9）。**纯加表**。
 --
 -- url 只放 scheme://host:port，**不放凭据**；代理认证走 secret（aes-256-gcm 密文 BLOB，
 -- 与 upstream_keys.secret 同一形状）。"凭据不存值"的正确落法是**不存明文** ——
 -- 一个连不上的代理不是出口，所以这里存的是可用凭据，但明文永不落盘、永不出后端。
+--
+-- v1.7.0 三处形状（ADR-0021 决策 9，表未发布 ⇒ 逐字替换、零迁移）：
+--   1. status 单轴：enabled + 退役位两列能组合出"启用且已退役"，而选择器要滤两处 ⇒
+--      漏一处就是静默选错的出口。改成单列枚举，只有一处要滤。
+--   2. retired **不删行**：删了它，历史用量 / 统计 / §7 帧就失去宿主 —— egressId 必须比 IP 活得久。
+--   3. url 归一化后 UNIQUE：同 URL 两行 = 两个 egressId = 两个桶 = 放行量翻倍；且"退役后重建同 URL"
+--      会拿到一个新桶 —— 等于改个名字白拿一次额度。**回池只有一条路：复用原 id 改回 active**。
+--      UNIQUE 只在**归一化之后**才拦得住 HTTPS://A.EXAMPLE:443 与 https://a.example 是同一个出口，
+--      所以写库前必须走 src/egress 的同一份归一化。
 CREATE TABLE IF NOT EXISTS egress_proxies (
-  id         TEXT PRIMARY KEY,
-  name       TEXT NOT NULL UNIQUE,
-  url        TEXT NOT NULL,                         -- scheme://host:port，不含 user:pass
-  secret     BLOB,                                  -- aes-256-gcm：代理认证；NULL = 免认证
-  region     TEXT,                                  -- 备注用：hk / cn-bj / us
-  note       TEXT,
-  enabled    INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  id             TEXT PRIMARY KEY,
+  name           TEXT NOT NULL UNIQUE,
+  url            TEXT NOT NULL UNIQUE,              -- scheme://host:port（归一化后落库），不含 user:pass
+  secret         BLOB,                              -- aes-256-gcm：代理认证；NULL = 免认证
+  region         TEXT,                              -- 备注用：hk / cn-bj / us
+  note           TEXT,
+  status         TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','retired')),
+  retired_reason TEXT CHECK (retired_reason IS NULL OR retired_reason IN ('replaced','manual')),
+  retired_at     TEXT,                              -- ISO8601；退役即写，回池不清
+  created_at     TEXT NOT NULL,
+  updated_at     TEXT NOT NULL,
+  -- 没有原因的 retired 半年后没人判断得了它能不能删 ⇒ 退役必须带原因。
+  CHECK (status <> 'retired' OR retired_reason IS NOT NULL)
 );
 
 -- 账号套餐（契约 §15.1 subscriptions）。**纯加表**。
@@ -398,6 +417,20 @@ CREATE TABLE IF NOT EXISTS supplier_account_keys (
   updated_at    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_supplier_keys_account ON supplier_account_keys(account_id);
+
+-- pooled_key_id 的**部分唯一索引**（ADR-0021 决策 5 的 E 接缝）。纯加索引，SCHEMA_VERSION 不递增。
+--
+-- 网关的 KEYS_SQL 要 join 这张台账才能知道"这把 key 属于哪个账号 / 走哪个出口"，
+-- 一对一是那条 join 成立的前提：一旦 fan-out（同一个 pooled_key_id 被两条台账行引用），
+-- 同一把 key 会在池里出现两遍 —— 出口预算的放行量翻倍，而且症状看起来像"路由算法抽风"。
+-- 台账写入方（linkSupplierAccountKey / replaceSupplierAccountKeyLedger）本来就按
+-- upsert-by-(account_id, pooled_key_id) 写，这里只是把那条**约定**变成**约束**。
+--
+-- 为什么是部分索引：纯掩码行（pooled_key_id IS NULL）可以有任意多条，
+-- 全局 UNIQUE 会让"同一个后 4 位出现两次"这种**正常事件**变成约束报错 —— 同上一条刻意不做的事。
+-- （本段不写反引号：它在模板字符串里，反引号会当场截断整段 DDL。）
+CREATE UNIQUE INDEX IF NOT EXISTS uq_supplier_account_keys_pooled
+  ON supplier_account_keys(pooled_key_id) WHERE pooled_key_id IS NOT NULL;
 `;
 
 /** 列是否存在。删列是"只做一次"的搬迁，靠它判幂等 —— 版本号只当记账用。 */
@@ -407,10 +440,49 @@ function hasColumn(db: SqliteDatabase, table: string, column: string): boolean {
 }
 
 /**
+ * 建 `uq_supplier_account_keys_pooled` 之前先数一遍 fan-out 行 —— **非 0 就地 fail-closed**。
+ *
+ * 为什么不能等索引自己报错：库里已有重复时 `CREATE UNIQUE INDEX` 抛的是
+ * `SQLITE_CONSTRAINT: UNIQUE constraint failed`，既不说哪张表、也不说哪几行；
+ * 排障得倒着读整段 DDL 才找得到病根，而它表现为"服务起不来"。
+ * 这里先把**具体的 pooled_key_id** 报出来，让拿到日志的人知道该去删哪一行。
+ *
+ * 不静默的取舍已定：库里有 fan-out 说明**事实已经分叉**（两把台账行都在声称同一把 key），
+ * 自动挑一条删掉等于替用户决定"哪条为准"。宁可不开门，也不猜。
+ */
+function assertNoPooledKeyFanOut(db: SqliteDatabase): void {
+  const table = db
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'supplier_account_keys'")
+    .get();
+  if (table === undefined) return; // 新库：表与索引在本次 DDL 里同批建出来，没有历史数据可查
+
+  const dupes = db
+    .prepare(
+      `SELECT pooled_key_id AS pooledKeyId, COUNT(*) AS n
+         FROM supplier_account_keys
+        WHERE pooled_key_id IS NOT NULL
+        GROUP BY pooled_key_id
+       HAVING COUNT(*) > 1
+        LIMIT 5`,
+    )
+    .all() as { pooledKeyId: string; n: number }[];
+  if (dupes.length === 0) return;
+
+  const detail = dupes.map((d) => `${d.pooledKeyId} ×${d.n}`).join(', ');
+  throw new Error(
+    `supplier_account_keys 存在 fan-out 行（同一 pooled_key_id 被多条台账行引用）：${detail}` +
+      `${dupes.length === 5 ? '（只列前 5 组）' : ''}。` +
+      '建 UNIQUE(pooled_key_id) 部分索引会失败；即便强行建上，这把 key 也会在网关池里出现多次，' +
+      '导致出口预算放行量翻倍。请先人工判定哪条台账行为准（删除多余的行），再启动。',
+  );
+}
+
+/**
  * 建表 / 迁移。幂等：DDL 全是 IF NOT EXISTS，搬迁分支自身也判存在性，
  * 所以重复调用无副作用、可以安全地在每次开库时跑。
  */
 export function migrate(db: SqliteDatabase): void {
+  assertNoPooledKeyFanOut(db);
   db.exec(DDL);
 
   // v1 → v2：gateway_keys.deleted_at 删列（ADR-0008）。

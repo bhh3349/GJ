@@ -13,8 +13,7 @@
 
 import { createGatewayEngine } from './engine.js';
 import type { EngineOptions, FetchLike, GatewayEngine } from './engine.js';
-import type { EgressLimitDetector } from './classify.js';
-import type { EgressCooldown } from './egress.js';
+import type { EgressGate } from '../egress/port.js';
 import { createKeyPool } from './key-pool.js';
 import type { KeyPoolInternal } from './key-pool.js';
 import { createRateLimiter } from './limiter.js';
@@ -46,15 +45,11 @@ export interface GatewayStackOptions {
   internalToken?: string;
   bodyLimitBytes?: number;
   /**
-   * 出口级冷却表（契约 §16.7）。**一个进程一份** —— 出口被限流是全体请求共同的事实，
-   * 在这里注入正是为了让「所有发往同一出口的请求」共用同一道冷却。不传则引擎内部自建。
+   * 出口预算闸 / 冷却态（契约 §16.7，ADR-0021）。**一个进程一份** —— 出口被限流是全体请求共同的事实，
+   * 在这里注入正是为了让「所有发往同一出口的请求」共用同一道冷却与同一张预算。
+   * 不传 = 引擎用缺省闸（恒放行、恒判 key 级，决策 7），行为与改动前逐字节相同。
    */
-  egress?: EgressCooldown;
-  /**
-   * 出口级 429 识别器（ADR-0020 决策 4）。不传 = 通道接好但不触发，
-   * 行为与改动前逐字节相同。识别规则定案后在此换成实识别器。
-   */
-  egressLimitDetector?: EgressLimitDetector;
+  egress?: EgressGate;
 }
 
 export interface GatewayStack {
@@ -85,7 +80,6 @@ export function createGatewayStack(options: GatewayStackOptions): GatewayStack {
   if (options.crossUpstreamRetry !== undefined) built.crossUpstreamRetry = options.crossUpstreamRetry;
   if (options.upstreamTimeoutMs !== undefined) built.upstreamTimeoutMs = options.upstreamTimeoutMs;
   if (options.egress !== undefined) built.egress = options.egress;
-  if (options.egressLimitDetector !== undefined) built.egressLimitDetector = options.egressLimitDetector;
 
   const engine = createGatewayEngine(built);
 

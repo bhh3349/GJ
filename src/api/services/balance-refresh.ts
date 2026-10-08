@@ -288,6 +288,10 @@ function summarize(attempts: readonly Attempt[]): RefreshSummary {
   let skipped = 0;
   // 只服务于 hint：不参与任何计数口径（契约明确"三型计数逐字不变"）。
   let authRejected = 0;
+  // 第 5 个旁路计数（ADR-0017 补遗 3「实现落点」1）：与 `authRejected` 同处现算、同样不进三型口径。
+  // 与补遗 2 那个进 `UpstreamRefreshResult` 的 `rateLimited` **同源同值、各自独立** ——
+  // 一个不出 REST 面（收尾钩子用），一个要出（hint 用），不得并成一个对外字段。
+  let rateLimited = 0;
   for (const a of attempts) {
     if (a.kind === 'skipped') {
       skipped += 1;
@@ -297,6 +301,8 @@ function summarize(attempts: readonly Attempt[]): RefreshSummary {
     if (!o.ok) {
       failed += 1;
       if (o.httpStatus === 401 || o.httpStatus === 403) authRejected += 1;
+      // 429 一行通吃：判据是状态码本身，不看标记头（上游真 429 与本地合成的 429 同归这一档）。
+      if (o.httpStatus === 429) rateLimited += 1;
       continue;
     }
     ok += 1;
@@ -306,7 +312,7 @@ function summarize(attempts: readonly Attempt[]): RefreshSummary {
       unknown += 1;
     }
   }
-  const hintCode = hintForSummary({ failed, unknown, skipped, authRejected });
+  const hintCode = hintForSummary({ failed, unknown, skipped, authRejected, rateLimited });
   return {
     checked: attempts.length,
     ok,

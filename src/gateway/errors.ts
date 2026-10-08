@@ -4,7 +4,7 @@
  *
  * 纪律：`/v1/*` 只出 OpenAI 形状 `{error:{message,type,code}}`，绝不出现 `{code,message}`。
  * 码值来源分两类：
- *   - 项目冻结码：NO_AVAILABLE_KEY / UNSUPPORTED_ENDPOINT / GROUP_DISABLED（契约 §10 明文写死）
+ *   - 项目冻结码：NO_AVAILABLE_KEY / NO_AVAILABLE_EGRESS / UNSUPPORTED_ENDPOINT / GROUP_DISABLED（契约 §10 明文写死）
  *   - OpenAI 规范码：invalid_api_key / rate_limit_exceeded / insufficient_quota / ...
  * 新增码值前先在群里对一次，避免调用方按码分支时踩空。
  */
@@ -35,6 +35,13 @@ export const GATEWAY_ERROR_CODES = {
   INVALID_API_KEY: 'INVALID_API_KEY',
   GROUP_DISABLED: 'GROUP_DISABLED',
   NO_AVAILABLE_KEY: 'NO_AVAILABLE_KEY',
+  /**
+   * v1.7.0 新增（契约 §10 / ADR-0021 决策 9(5)）：候选集合**永久为空** —— 绑定的出口全 `retired`，
+   * 或出口池启用后一个出口都未登记。**不带 `Retry-After`**（等待无效，只能改配置），
+   * 且**不回落宿主直连**。与 `NO_AVAILABLE_KEY` 同族（候选为空、0 次真实尝试）。
+   * 注意**不含**"账号级未绑"（`egress_id IS NULL` 是配置事实，照常走宿主出口）。
+   */
+  NO_AVAILABLE_EGRESS: 'NO_AVAILABLE_EGRESS',
   UNSUPPORTED_ENDPOINT: 'UNSUPPORTED_ENDPOINT',
   RATE_LIMITED: 'RATE_LIMITED',
   QUOTA_EXCEEDED: 'QUOTA_EXCEEDED',

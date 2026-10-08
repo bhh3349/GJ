@@ -754,6 +754,27 @@ describe('余额自测（契约 §2 · M6-A）：同步、诊断语义、绝不�
     await closeHarness(h);
   });
 
+  it('上游返回 429 时引导码是"被限流"，而不是"上游不可达"', async () => {
+    // 判据是状态码本身（ADR-0017 补遗 3）：出口级与 key 级 429 证据面同形，不按来源分型。
+    const h = await setup({ fetchImpl: fakeUpstreamFetch({ error: 'rate limited' }, 429) });
+    const upstreamId = await createUpstream(h);
+    const key = await createKey(h, upstreamId, { key: probeSecret() });
+
+    const res = await h.app.inject({
+      method: 'POST',
+      url: `/api/upstreams/${upstreamId}/balance-template/test`,
+      headers: auth(h),
+      payload: { ...draft(), keyId: key.id },
+    });
+
+    expect(res.statusCode, res.body).toBe(200);
+    const body = res.json() as { hintCode: string | null; hint: string | null };
+    expect(body.hintCode).toBe('BALANCE_EGRESS_RATE_LIMITED');
+    // 文案不得越证据：不许写成"出口被限流"这类确定性归因
+    expect(body.hint).not.toContain('出口被限流');
+    await closeHarness(h);
+  });
+
   it('草稿字段写错是 400（请求本身有问题），并指名到具体字段', async () => {
     const h = await setup();
     const upstreamId = await createUpstream(h);

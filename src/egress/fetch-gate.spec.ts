@@ -8,7 +8,8 @@
 //   16 出口隔离 —— 两个 `egressId` 各自取件，不串桶。
 //
 // ⚠️ 终态形状那条（验证 #10「客户端拿到 429 而不是 502」）**不在这里**：它要引擎把
-//    `attempts` 减回 1、不进 `egressKeys429`、不 `reportFailure` 才成立，属路由者车道的
+//    `attempts` 减回 1、不进台账归因（判据只在闸内一处：`EgressGate.observeLimited`）、
+//    不 `reportFailure` 才成立，属路由者车道的
 //    `engine.spec.ts`。本文件只能证到「装饰器没发请求、也没让调用方以为成功」这一半。
 //
 // 桩 fetch 一律用闭包记参数，不引入任何真实网络。

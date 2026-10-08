@@ -4,10 +4,12 @@
 // 缺省闸逐字节同现状、标记头常量、`Retry-After` 取整。
 // 令牌桶 / 冷却阶梯 / 窗口化判据在 `src/gateway/egress.ts`（路由者车道），不在本文件。
 //
-// ⚠️ ADR 验证 #1 / #2 的**并轨回归锁**（`egressHostOf(x)` 与 `egressIdOfUrl(x)` 对同一输入同值）
-//    刻意不在这里：`src/gateway/egress.ts` 只存在于 `dev/gateway-rotation`，两条车道合流前
-//    本文件建一条跨车道 import 等于把 api 车道的闸门挂在别人分支上。合流后由路由者侧随
-//    `egressHostOf` 退化为薄封装（决策 1 / 影响表）同笔落 —— 那里才是它被删掉的地方。
+// ✅ ADR 验证 #1 / #2 的**并轨回归锁**已落（`b67b3f3`）：`egressHostOf` 已随 ADR-0021 段二**删净**
+//    （`src/gateway/engine.ts` 现直接引用 `egressIdOfUrl`），"两个实现同值"那条锁因此**没有对象** ——
+//    并轨期结束，现行形态是**单一实现约束**：全仓只有 `egressIdOfUrl` 一个归一化实现
+//    （口径见 `docs/adr/0021-egress-budget-seam.md:189`）。原 `egressHostOf` 的 fixture 表整张
+//    迁到 `src/gateway/egress.spec.ts`（describe 名「原 egressHostOf fixture 表整张迁来」），
+//    由那里的源码扫描锁守 —— 本文件不再承担该锁。
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
@@ -20,7 +22,7 @@ import {
   type EgressLimitedInput,
 } from './port.js';
 
-describe('egressIdOfUrl（决策 2：全仓唯一归一化，`grep "new URL(.*)\\.host"` 只许命中一处）', () => {
+describe('egressIdOfUrl（决策 2：全仓唯一归一化 —— 口径见 docs/adr/0021-egress-budget-seam.md:189）', () => {
   it('等价写法收敛到同一个 id：大小写 / 默认端口 / 尾斜杠 / query / fragment / 路径', () => {
     const same = [
       'https://api.example.com/v1/chat/completions',

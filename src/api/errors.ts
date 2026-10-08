@@ -22,6 +22,10 @@ export const ERROR_CODES = [
   // 账号这条是"删了 key 仍然可用"，所以两者都拦，但 `force=true` 的**语义不同** ——
   // 上游是真删子树、账号只是**解绑**（§15.2）。
   'ACCOUNT_HAS_KEYS',
+  // 契约 §0.4 / §16.7（v1.7.0 登记，ADR-0021 决策 9(6)）：退役仍被账号引用的出口。
+  // **与上两条的关键区别**：这条**不提供 `force`** —— 出口退役不是"连带解绑"，而是破上游 IP 白名单，
+  // 唯一出路是先把这些账号**改绑**到另一个 `active` 出口（改绑是显式动作，§16.7）。
+  'EGRESS_HAS_ACCOUNTS',
   'UNPROCESSABLE',
   'TOO_MANY_ATTEMPTS',
   'INTERNAL',
@@ -43,6 +47,7 @@ const HTTP_STATUS: Record<ErrorCode, number> = {
   REVISION_MISMATCH: 409,
   UPSTREAM_HAS_KEYS: 409,
   ACCOUNT_HAS_KEYS: 409,
+  EGRESS_HAS_ACCOUNTS: 409,
   UNPROCESSABLE: 422,
   TOO_MANY_ATTEMPTS: 429,
   INTERNAL: 500,

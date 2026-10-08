@@ -50,7 +50,8 @@ export const EGRESS_LOCAL_BODY = '{"error":{"code":"RATE_LIMITED"}}';
  * 比较也必须只有一处 —— 写第二遍比较就是"两个地方都能判、只是默认关着"的温床。
  *
  * 调用方（数据面）：命中 ⇒ **不换 key**（本地拒绝落在同一个出口上，换一把再试必然再撞）、
- * **不 `egressKeys429.add`**、**不 `reportFailure`**、终止候选轮换（决策 4b 的落法）。
+ * **不进台账归因**（判据只在闸内一处 —— `EgressGate.observeLimited` 的返回
+ * `attribution === 'egress'`）、**不 `reportFailure`**、终止候选轮换（决策 4b 的落法）。
  */
 export function isLocalEgressReject(res: Response): boolean {
   return res.headers.get(EGRESS_LOCAL_HEADER) === EGRESS_LOCAL_VALUE;

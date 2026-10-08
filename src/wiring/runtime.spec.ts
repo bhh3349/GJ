@@ -26,6 +26,8 @@ import { createGroup } from '../db/repo/groups.js';
 import { createKey, listKeys } from '../db/repo/keys.js';
 import { upsertModelFromSync, getModel, updateModel } from '../db/repo/models.js';
 import { createUpstream } from '../db/repo/upstreams.js';
+import { permissiveEgressGate } from '../egress/port.js';
+import type { EgressGate } from '../egress/port.js';
 import type { FetchLike } from '../gateway/engine.js';
 import { createGatewayRuntime, mountGatewayRoutes } from './runtime.js';
 import type { GatewayRuntime } from './runtime.js';
@@ -107,7 +109,7 @@ interface Harness {
   calls: Call[];
 }
 
-async function setup(script?: Script): Promise<Harness> {
+async function setup(script?: Script, gate: EgressGate = permissiveEgressGate): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'wiring-runtime-'));
   dirs.push(dir);
   const dbPath = join(dir, 'gateway.db');
@@ -138,7 +140,8 @@ async function setup(script?: Script): Promise<Harness> {
     return script === undefined ? jsonResponse(COMPLETION) : script(url, init);
   };
 
-  const runtime = createGatewayRuntime({ db, config: makeConfig(dbPath), fetchImpl });
+  // 出口闸必填（ADR-0021 决策 4c）。本文件判的是端到端转发口径，不判预算，缺省闸 = "没有闸"。
+  const runtime = createGatewayRuntime({ db, config: makeConfig(dbPath), fetchImpl, egress: gate });
   await mountGatewayRoutes(runtime);
   await runtime.app.ready();
 
@@ -573,5 +576,63 @@ describe('错误事件：热路径 → 队列 → 落库（契约 §12.1 / ADR-0
     const [call] = h.calls;
     assert.ok(call);
     assert.equal(headerOf(call, 'x-request-id'), inbound, '上游也要收到同一个值：跨我们这层的调用链才对得起来');
+  });
+});
+
+/* ------------- 出口闸接线：数据面消费的是**注入的那个实例**（ADR-0021 决策 4c / 4） ------------- */
+
+describe('出口预算闸的接线', () => {
+  /**
+   * 间谍闸：把端口那五个方法全包一遍，只记录调用，不改变任何一个结论。
+   *
+   * 为什么不用"断言闸里的状态被改了"来判接线：那要求请求先撞上限流，判据就混进了归因逻辑
+   * （那条路已经在 `src/gateway/egress.spec.ts` 判过）。这里要判的是一件更小、也更基础的事 ——
+   * **数据面到底有没有在用这个对象**。一次成功请求也会经过 `cooldownUntil`（选路前的冷却检查）
+   * 与 `reserve`（出站前取配额），所以调用痕迹天然存在。
+   */
+  function spyGate() {
+    const seen = { reserve: [] as string[], cooldown: [] as string[], success: [] as string[] };
+    const gate: EgressGate = {
+      reserve: (egressId, consumer) => {
+        seen.reserve.push(`${egressId}:${consumer}`);
+        return permissiveEgressGate.reserve(egressId, consumer);
+      },
+      observeLimited: (input) => permissiveEgressGate.observeLimited(input),
+      observeSuccess: (egressId) => {
+        seen.success.push(egressId);
+        permissiveEgressGate.observeSuccess(egressId);
+      },
+      cooldownUntil: (egressId) => {
+        seen.cooldown.push(egressId);
+        return permissiveEgressGate.cooldownUntil(egressId);
+      },
+      snapshot: () => permissiveEgressGate.snapshot(),
+    };
+    return { gate, seen };
+  }
+
+  it('`createGatewayRuntime({ egress })` 注入的实例就是数据面用的那个（两侧不是各造一份）', async () => {
+    // 这条是"造一次、注入两处"在数据面这一侧的可见证据：引擎若自建一份闸，
+    // 这里的 `seen` 会全空 —— 而症状只是"预算永远满着 / 冷却永远不生效"，没有任何报错。
+    const { gate, seen } = spyGate();
+    const h = await setup(() => jsonResponse(COMPLETION), gate);
+
+    const res = await chat(h);
+
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(seen.cooldown, ['a.example.com'], '选路前查冷却走的是注入的那个实例（Tier 1 = 归一化 host）');
+    assert.deepEqual(seen.reserve, ['a.example.com:data'], '出站前取配额走的是同一个实例，且消费方是 `data`');
+  });
+
+  it('注入的闸**不替换** `fetchImpl`：出站仍然落到测试桩上（决策 4 末尾那条）', async () => {
+    // 装饰器包的是 `doFetch`（= `options.fetchImpl`），不是全局 fetch。
+    // 包错一层，测试就会真的往外发请求 —— 而且看起来只是"这个用例变慢了"。
+    const { gate } = spyGate();
+    const h = await setup(() => jsonResponse(COMPLETION), gate);
+
+    await chat(h);
+
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.calls[0]?.url, 'https://a.example.com/chat/completions');
   });
 });

@@ -20,6 +20,7 @@ import { afterAll, afterEach, describe, it } from 'vitest';
 import { loadConfig } from '../config.js';
 import { openDatabase, openReadonly } from '../db/database.js';
 import type { Db } from '../db/database.js';
+import { permissiveEgressGate } from '../egress/port.js';
 import type { UsageLogEntry } from '../gateway/ports.js';
 import { createGatewayRuntime } from './runtime.js';
 import type { GatewayRuntime } from './runtime.js';
@@ -108,7 +109,9 @@ function makeHarness(): Harness {
   const db = openDatabase({ path: dbPath });
   dbs.push(db);
 
-  return { dbPath, db, gateway: createGatewayRuntime({ db, config }) };
+  // 闸是必填注入（ADR-0021 决策 4c）；本用例判的是停机顺序，与预算无关，故给缺省闸
+  // —— 它逐字节同"没有闸"，不会让这条判据多出与出口有关的噪声。
+  return { dbPath, db, gateway: createGatewayRuntime({ db, config, egress: permissiveEgressGate }) };
 }
 
 function countLogs(db: Db): number {

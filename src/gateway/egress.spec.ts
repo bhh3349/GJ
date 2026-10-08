@@ -13,7 +13,11 @@
  * 另外两张**不许漂移**的锁：
  *   · 出口标识归一化已并轨到端口（`egressIdOfUrl`）—— 原 `egressHostOf` 的 fixture 表整张迁到这里，
  *     外加一条源码扫描锁：`src/gateway/` 下**不得再出现** `new URL(`（同语义第二份实现的老路）。
- *   · 引擎换轨后仍是 `egressIdOfUrl(target.baseUrl)`（Tier 1）：批一**刻意不读** `target.egressId`。
+ *   · 引擎读的是**台账给的稳定 id**（`target.egressId`，段二起）：Tier 1 = 归一化 host、
+ *     Tier 2 = `egress_proxies.id`。引擎**不再**从 `baseUrl` 推导，**也不得重做归一化**
+ *     （拿稳定 id 去 `egressIdOfUrl` 会恒得 `null` ⇒ 出口被整个丢掉 = 「一个出口零个桶 ⇒ 无上限」）。
+ *     批一的 fixture 仍按 `egressIdOfUrl(baseUrl)` 填 tier-1 形状，故那批用例换读后逐字不变；
+ *     Tier-2 形状（稳定 id ≠ host）另有一组用例，见「出口 id 由台账给」。
  */
 
 import { readFileSync, readdirSync } from 'node:fs';
@@ -24,9 +28,10 @@ import { describe, it } from 'vitest';
 
 import { egressIdOfUrl, retryAfterSecOf } from '../egress/port.js';
 import type { EgressGate, EgressShadowRecord } from '../egress/port.js';
+import { EGRESS_LOCAL_HEADER } from '../egress/port.js';
 import { EGRESS_BUDGET_PLACEHOLDER, createEgressGate } from './egress.js';
 import { createGatewayEngine } from './engine.js';
-import type { FetchLike, ForwardResult } from './engine.js';
+import type { AttemptEvent, FetchLike, ForwardResult } from './engine.js';
 import { createKeyPool } from './key-pool.js';
 import type { KeyPoolInternal } from './key-pool.js';
 import type { GroupContext, ModelCatalog, SecretResolver, UpstreamTarget } from './ports.js';
@@ -86,9 +91,17 @@ interface HarnessOptions {
   accounts?: Record<string, string>;
   /** upstreamId → baseUrl 覆写（测等价写法收敛时用） */
   baseUrls?: Record<string, string>;
+  /**
+   * upstreamId → 台账给的出口 id（`UpstreamTarget.egressId`）。**不填 = Tier 1 形状**
+   * （`egressIdOfUrl(baseUrl)`）；填了才是 Tier 2：稳定 id 与 host 解耦，两者**不再相等**。
+   * 显式 `null` 用来喂 fail-open 那一支（未绑出口）。
+   */
+  egressIds?: Record<string, string | null>;
   gate?: EgressGate;
   /** 覆盖池（测「候选非空但 beginAttempt 拒绝」这类竞态形状时用桩池，见 engine.spec.ts） */
   pool?: KeyPoolInternal;
+  /** 逐次尝试事件（判「有没有产假失败行」「轮换有没有终止」用） */
+  attempts?: AttemptEvent[];
 }
 
 function makeHarness(options: HarnessOptions) {
@@ -107,14 +120,15 @@ function makeHarness(options: HarnessOptions) {
       const found = keys.find((k) => k.keyId === keyId);
       if (found === undefined) return null;
       const baseUrl = baseUrlOf(found.upstreamId);
+      const override = options.egressIds?.[found.upstreamId];
       const target: UpstreamTarget = {
         upstreamId: found.upstreamId,
         baseUrl,
         apiKey: `sk-${keyId}`,
-        // 批一引擎**不读**这两个字段（Tier 1 一律由 baseUrl 推导）；这里照样填上 ——
-        // 桩造的出站面与真实 `secretResolver` 同形，批二换读 `target.egressId` 时这些用例
-        // 不必改一个字，也就不会「改完测试才通过」。
-        egressId: egressIdOfUrl(baseUrl),
+        // 出口 id **由台账给**（段二起引擎只读这一列）。`egressIds` 未覆盖时按 Tier 1 形状填
+        // `egressIdOfUrl(baseUrl)` —— 于是批一那批用例换读前后逐字不变（桩与真实
+        // `src/wiring/secrets.ts` 同形：那一层算一次，热路径只读）。
+        egressId: override === undefined ? egressIdOfUrl(baseUrl) : override,
         accountId: options.accounts?.[keyId] ?? null,
       };
       return target;
@@ -124,9 +138,37 @@ function makeHarness(options: HarnessOptions) {
 
   const gate = options.gate ?? createEgressGate({ now });
   const { fetchImpl, calls } = scriptedFetch(options.steps);
-  const engine = createGatewayEngine({ pool, secrets, models, fetchImpl, now, egress: gate });
+  const engine = createGatewayEngine({
+    pool,
+    secrets,
+    models,
+    fetchImpl,
+    now,
+    egress: gate,
+    ...(options.attempts === undefined ? {} : { onAttempt: (e) => options.attempts?.push(e) }),
+  });
 
   return { pool, engine, calls, gate };
+}
+
+/** 一次调用记录下的出站请求（判「一个字节都没发」与「标记头没上行」用） */
+interface Outbound {
+  url: string;
+  headers: Record<string, string>;
+}
+
+/** 与 `scriptedFetch` 同形，但留下 `init.headers` —— 只看 url 判不了"没上行标记头" */
+function capturingFetch(steps: Script[]): { fetchImpl: FetchLike; calls: Outbound[] } {
+  const calls: Outbound[] = [];
+  let index = 0;
+  const fetchImpl: FetchLike = async (url, init) => {
+    calls.push({ url, headers: { ...((init.headers ?? {}) as Record<string, string>) } });
+    const step = steps[index];
+    index += 1;
+    if (step === undefined) throw new Error(`unexpected fetch call #${index} to ${url}`);
+    return step(url, init);
+  };
+  return { fetchImpl, calls };
 }
 
 function chatBody(): Record<string, unknown> {
@@ -197,6 +239,20 @@ describe('egressIdOfUrl（原 egressHostOf fixture 表整张迁来）', () => {
     // 两条消费路径都得从端口 import（改了实现而调用方抄一份，就是并轨破裂的开始）
     assert.ok(readFileSync(join(dir, 'engine.ts'), 'utf8').includes("'../egress/port.js'"));
     assert.ok(readFileSync(join(dir, 'egress.ts'), 'utf8').includes("'../egress/port.js'"));
+  });
+
+  it('生产装配锁：`src/server.ts` 造一次、同一个实例注入两处（决策 4c）', () => {
+    // "一个进程一份"没法靠单测的运行期断言来判 —— `src/server.ts` 的 `main()` 一 import 就跑。
+    // 于是退到源码面：**这一处只许有一次 `createEgressGate(` 调用**，且同一个标识符同时交给
+    // 两条车道。造两份不是性能问题而是正确性问题 —— 上游按**来源 IP** 计数，
+    // 两侧各扣各的 = 各自以为还有额度；而症状只表现为"闸不怎么拦"，没有任何报错。
+    const source = readFileSync(fileURLToPath(new URL('../server.ts', import.meta.url)), 'utf8');
+    assert.equal((source.match(/createEgressGate\(/g) ?? []).length, 1, '闸只许造一次');
+    // 两个对象字面量都是扁的，`[^}]` 够用（跨到下一个 `}` 之前必须出现 `egress`）
+    assert.match(source, /createGatewayRuntime\(\{[^}]*\begress\b[^}]*\}\)/, '数据面（网关装配）拿到它');
+    assert.match(source, /buildApp\(\{[^}]*\begress\b[^}]*\}\)/, '管理面（`ApiContext.egress`）拿到的是同一个变量');
+    assert.match(source, /EGRESS_BUDGET_PLACEHOLDER/, '预算值引用端口那一份，不在这里抄数字（标定只改一处）');
+    assert.ok(!/mode:\s*'active'/.test(source), '判据本期只记不动 —— 接线层不得顺手放行（决策 10(6)）');
   });
 });
 
@@ -635,8 +691,9 @@ describe('引擎：出口级 429 的归因上移（§16.7 / 决策 10）', () =>
   });
 
   it('出口标识并轨（端到端）：等价写法（大小写 + 非默认端口）落进**同一个桶**', async () => {
-    // 引擎侧用 `egressIdOfUrl(target.baseUrl)` 归一，与闸内的键必须逐字相同：
-    // 两边对「大小写/默认端口」读法只要差一处，限流就按写法分裂成两份（等于没限）。
+    // Tier 1 下台账给的 id 就是归一化 host（`egressIdOfUrl`，在 `src/wiring/secrets.ts` 算一次），
+    // 与闸内的键必须逐字相同：两边对「大小写/默认端口」读法只要差一处，
+    // 限流就按写法分裂成两份（等于没限）。本用例喂的正是那一步的产物。
     const h = makeHarness({
       keys: [keyConfig('k1'), keyConfig('k2'), keyConfig('k3')],
       steps: [EGRESS_429, EGRESS_429, EGRESS_429],
@@ -737,5 +794,240 @@ describe('引擎：未接线/默认时行为零漂移（决策 7）', () => {
     assert.equal(result.error.httpStatus, 429);
     assert.equal(result.error.retryAfterSec, 1, '饱和走短退避 1s，未被出口级分支改动');
     assert.equal(h.calls.length, 0);
+  });
+});
+
+
+/* ------------------ 引擎读台账给的稳定 id（Tier 2 形态） ------------------ */
+
+describe('引擎：出口 id 由台账给（target.egressId，不再解析 baseUrl）', () => {
+  const active = () => ({ gate: createEgressGate({ now, mode: 'active' }) });
+
+  it('稳定 id ≠ host：冷却落在台账那个 id 上，**host 不被冷**（引擎没在解析 baseUrl）', async () => {
+    // Tier 2 的出口是账号级的 `egress_proxies.id`，从 base URL 里**解析不出来**。
+    // 这条用例把两者刻意分开：`egr_9f2c1a` 是台账给的，`up1.example.com` 是 baseUrl 的 host。
+    // 引擎若还在归一化 baseUrl，冷掉的就是后者 —— 而真实的 Tier 2 出口于是永远不冷却（等于没闸）。
+    const h = makeHarness({
+      keys: [keyConfig('k1'), keyConfig('k2'), keyConfig('k3')],
+      steps: [EGRESS_429, EGRESS_429, EGRESS_429],
+      accounts: { k1: 'acc-1', k2: 'acc-2', k3: 'acc-3' },
+      egressIds: { up1: 'egr_9f2c1a' },
+      ...active(),
+    });
+
+    const result = await call(h);
+
+    assert.equal(result.error.httpStatus, 429);
+    assert.equal(h.gate.cooldownUntil('egr_9f2c1a'), clock + 60_000, '冷却记在台账给的稳定 id 上');
+    assert.equal(h.gate.cooldownUntil('up1.example.com'), null, 'host 不是出口 —— 引擎不得再解析 baseUrl');
+    assert.deepEqual(h.gate.snapshot(), [{ host: 'egr_9f2c1a', untilMs: clock + 60_000 }]);
+  });
+
+  it('该出口冷却期内 0 次出站：说明读取的是台账 id，而不是"从来就没匹配上"', async () => {
+    // 上一条只证明"冷在了稳定 id 上"。若引擎两侧读法是两个键（冷却查 host、判据写 id），
+    // 也会出现"稳定 id 上有一条冷却、host 上没有"的画面 —— 所以必须补一条**行为面**的判据：
+    // 冷却真的把它挡住了。同一个出口被挡住 ⇒ 查的与写的是同一个键。
+    const gate = createEgressGate({ now, mode: 'active' });
+    const h = makeHarness({
+      keys: [keyConfig('k1'), keyConfig('k2'), keyConfig('k3')],
+      steps: [EGRESS_429, EGRESS_429, EGRESS_429],
+      accounts: { k1: 'acc-1', k2: 'acc-2', k3: 'acc-3' },
+      egressIds: { up1: 'egr_9f2c1a' },
+      gate,
+    });
+    assert.equal((await call(h)).error.httpStatus, 429, '第一轮判明出口级');
+
+    h.calls.length = 0;
+    const result = await call(h);
+
+    assert.equal(h.calls.length, 0, '冷却期内一把都不试 —— 同出口轮换必然再撞');
+    assert.equal(result.error.httpStatus, 429);
+    assert.equal(result.error.body.error.code, 'RATE_LIMITED');
+    assert.equal(result.error.retryAfterSec, 60);
+  });
+
+  it('稳定 id 不做二次归一化：不像 host 的 id 照样进桶（拿去 `egressIdOfUrl` 会恒得 null）', async () => {
+    // 这是段二最容易踩的一脚：顺手对 `target.egressId` 再跑一次 `egressIdOfUrl`，
+    // 结果恒是 `null`（"egr_9f2c1a" 不是 URL）⇒ **一个出口零个桶 = 无上限**，
+    // 且症状是"闸接了但从来不拦"，与"没接线"同形。这里用预算桶把它钉死。
+    const gate = createEgressGate({ now, budget: { capacity: 2, windowMs: 60_000, reserveForData: 0 } });
+    const h = makeHarness({ keys: [keyConfig('k1')], steps: [OK], egressIds: { up1: 'egr_9f2c1a' }, gate });
+
+    assert.deepEqual(gate.reserve('egr_9f2c1a', 'data'), { allowed: true });
+    assert.deepEqual(gate.reserve('egr_9f2c1a', 'data'), { allowed: true });
+    const denied = gate.reserve('egr_9f2c1a', 'data');
+    assert.equal(denied.allowed, false, '桶按**原样的**稳定 id 记账（同一把键）');
+
+    // 引擎侧同样按原样那个键取配额：桶已空 ⇒ 本地拒绝，而不是"换个键还有余额"
+    const result = await call(h);
+    assert.equal(result.error.httpStatus, 429);
+    assert.equal(result.error.body.error.code, 'RATE_LIMITED');
+    assert.equal(h.calls.length, 0, '一个字节都没发');
+  });
+
+  it('`target.egressId === null` ⇒ fail-open：不裁决、不冷任何出口、照旧走 key 级', async () => {
+    // 决策 2：解析不出出口 ⇒ 宁可退回旧的 key 级处置，也不拿一个假出口去冷掉别的上游。
+    // **不得**在这里回退去解析 baseUrl（那个 host 是宿主的，不是这次要用的出口）
+    // —— Tier 2 下 `egress_id IS NULL` 的 Tier-1 回退发生在快照重建那一层（`src/wiring/secrets.ts`）。
+    const gate = createEgressGate({ now, mode: 'active' });
+    const h = makeHarness({
+      keys: [keyConfig('k1')],
+      steps: [EGRESS_429, EGRESS_429, EGRESS_429],
+      accounts: { k1: 'acc-1' },
+      egressIds: { up1: null },
+      gate,
+    });
+
+    const result = await call(h);
+
+    assert.equal(result.error.httpStatus, 502, '出口未知 ⇒ 沿用既有 key 级终态，不是 429');
+    assert.deepEqual(gate.snapshot(), [], '没有假出口被冷掉');
+    assert.equal(gate.cooldownUntil('up1.example.com'), null, '不得回退去解析 baseUrl 当出口');
+    assert.notEqual(runtimeOf(h.pool, 'k1').cooldownUntil, null, 'key 级处置照旧');
+  });
+});
+
+/* ---------------- 本地预算拒绝：四件事一件都不能少（决策 4b / 4c） ---------------- */
+
+describe('引擎：本地预算拒绝（标记头 ⇒ 不换 key、不记失败、attempts 减回 1）', () => {
+  /**
+   * 把桶打空：`capacity` 枚由本用例显式取走，随后引擎那次 `reserve` 必被拒。
+   * `reserveForData: 0` 是为了让"数据面"这一个消费方自己就能把桶吃到见底
+   * （保留额只挡管理面，见决策 8）。
+   */
+  const EXHAUSTED = { capacity: 1, windowMs: 60_000, reserveForData: 0 } as const;
+
+  function spentGate() {
+    const gate = createEgressGate({ now, mode: 'active', budget: { ...EXHAUSTED } });
+    assert.deepEqual(gate.reserve('up1.example.com', 'data'), { allowed: true });
+    assert.equal(gate.reserve('up1.example.com', 'data').allowed, false, '桶已空（用例前提）');
+    return gate;
+  }
+
+  it('终态是 429 + Retry-After，**不是 502**（决策 4b：本地拒绝不算一次尝试）', async () => {
+    const h = makeHarness({ keys: [keyConfig('k1')], steps: [OK], gate: spentGate() });
+
+    const result = await call(h);
+
+    assert.equal(result.error.httpStatus, 429, '「本地上限，等一等再来」不是「上游故障」');
+    assert.equal(result.error.body.error.code, 'RATE_LIMITED');
+    assert.equal(result.error.body.error.type, 'rate_limit_error');
+    assert.ok((result.error.retryAfterSec ?? 0) >= 1, '合成 429 带的 Retry-After 原样透给客户端');
+    assert.equal(result.attempts, 0, 'attempts 减回 1 ⇒ 收尾分型读到"一个上游都没碰到"');
+  });
+
+  it('一个字节都没发：`inner` fetch 零调用（合成的 429 不落网络）', async () => {
+    const h = makeHarness({ keys: [keyConfig('k1'), keyConfig('k2')], steps: [OK, OK], gate: spentGate() });
+
+    await call(h);
+
+    assert.equal(h.calls.length, 0);
+  });
+
+  it('不记 key 失败：无冷却、无失败计数、事件流里**没有**假失败行（决策 4a 第 2 条）', async () => {
+    // 这是本分支最贵的一条：本地拒绝被当成 upstream 证据记一次失败，几轮下来
+    // **真的把好 key 停掉**。四类证据都断一遍，缺一条就有一个入口能漏过去。
+    const attempts: AttemptEvent[] = [];
+    const gate = createEgressGate({ now, mode: 'active', budget: { ...EXHAUSTED } });
+    gate.reserve('up1.example.com', 'data');
+    const h = makeHarness({
+      keys: [keyConfig('k1'), keyConfig('k2')],
+      steps: [OK, OK],
+      gate,
+      attempts,
+    });
+
+    await call(h);
+
+    const rt = runtimeOf(h.pool, 'k1');
+    assert.equal(rt.cooldownUntil, null, '没有 key 级冷却');
+    assert.equal(rt.consecutiveFails, 0, '连续失败数没被推进（推进它就会走升档阶梯）');
+    assert.equal(rt.failCount, 0);
+    assert.ok(!attempts.some((e) => e.outcome === 'failure'), `事件流不得出现 failure：${JSON.stringify(attempts)}`);
+    assert.deepEqual(
+      attempts.map((e) => e.outcome),
+      ['skipped'],
+      '只发一条 skipped（见下一条：轮换就此终止）',
+    );
+  });
+
+  it('终止本轮候选轮换（决策 4a/5 表 + 影响表①）：剩下的候选一个都不碰', async () => {
+    // 本地拒绝落在**同一个出口**上，换一把 key 必然再撞同一张桶（决策 4a「不换 key」）。
+    // 判别方式：三把候选都可用、桶已空 —— 终止 ⇒ **一条** skipped；继续 ⇒ 三条。
+    // 两者都 `calls.length === 0`，所以只断"零调用"是断不出来的。
+    const attempts: AttemptEvent[] = [];
+    const gate = createEgressGate({ now, mode: 'active', budget: { ...EXHAUSTED } });
+    gate.reserve('up1.example.com', 'data');
+    const h = makeHarness({
+      keys: [keyConfig('k1'), keyConfig('k2'), keyConfig('k3')],
+      steps: [OK, OK, OK],
+      gate,
+      attempts,
+    });
+
+    await call(h);
+
+    assert.equal(attempts.length, 1, '第一个候选就撞上本地拒绝 ⇒ 本轮结束，不去试第二把');
+    assert.equal(attempts[0]?.attempt, 0, '事件回报的 attempt 是 0 —— 「真实尝试」计数里没有这一次');
+  });
+
+  it('出口冷却态逐字节不变：不 `cool()`、不推进阶梯、不发 §7 帧（决策 5 表内第 1 行）', async () => {
+    const gate = createEgressGate({ now, mode: 'active', budget: { ...EXHAUSTED } });
+    gate.reserve('up1.example.com', 'data');
+    const before = gate.snapshot();
+    const h = makeHarness({ keys: [keyConfig('k1'), keyConfig('k2')], steps: [OK, OK], gate });
+
+    await call(h);
+
+    assert.deepEqual(gate.snapshot(), before, '桶拒绝是**我们自己**的账，不是对面忙');
+    assert.equal(gate.cooldownUntil('up1.example.com'), null);
+  });
+
+  it('不进台账归因：本地拒绝不喂 `observeLimited`（否则闸拿自己拒出来的脸冷掉自己）', async () => {
+    // 决策 10(5) 末条点名的自伤闭环形态：一个被打空预算的出口拿自己产出的 N 张脸判成
+    // 「被上游限」再把自己冷掉。shadow 记录是这条纪律的可观测面 —— 它必须**一条都不产**。
+    const records: EgressShadowRecord[] = [];
+    const gate = createEgressGate({ now, mode: 'active', budget: { ...EXHAUSTED }, onShadow: (r) => records.push(r) });
+    gate.reserve('up1.example.com', 'data');
+    const h = makeHarness({
+      keys: [keyConfig('k1'), keyConfig('k2'), keyConfig('k3')],
+      steps: [OK, OK, OK],
+      accounts: { k1: 'acc-1', k2: 'acc-2', k3: 'acc-3' },
+      gate,
+    });
+
+    await call(h);
+
+    assert.deepEqual(records, [], '观察到 0 次 —— 判据只在闸内一处，本地拒绝不得旁路喂它');
+    assert.equal(gate.cooldownUntil('up1.example.com'), null);
+  });
+
+  it('放行的请求照旧：原样转发，且**标记头不上行**（进程内标记不得透给上游）', async () => {
+    const gate = createEgressGate({ now, mode: 'active', budget: { capacity: 5, windowMs: 60_000, reserveForData: 0 } });
+    const { fetchImpl, calls } = capturingFetch([OK]);
+    const secrets: SecretResolver = {
+      resolve: () => ({ upstreamId: 'up1', baseUrl: 'https://up1.example.com/v1', apiKey: 'sk-k1', egressId: 'up1.example.com', accountId: null }),
+    };
+    const models: ModelCatalog = { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m };
+    const pool: KeyPoolInternal = createKeyPool({ now });
+    pool.applySnapshot({
+      revision: 1,
+      upstreams: [{ upstreamId: 'up1', enabled: true, models: null }],
+      keys: [keyConfig('k1')],
+    });
+    const engine = createGatewayEngine({ pool, secrets, models, fetchImpl, now, egress: gate });
+
+    const result = (await engine.chatCompletions({
+      group: GROUP,
+      model: 'gpt-4o-mini',
+      body: chatBody(),
+      stream: false,
+      requestId: REQUEST_ID,
+    })) as ForwardResult;
+
+    assert.equal(result.kind, 'json');
+    assert.equal(calls.length, 1);
+    const sent = Object.keys(calls[0]?.headers ?? {}).map((h) => h.toLowerCase());
+    assert.ok(!sent.includes(EGRESS_LOCAL_HEADER), `进程内标记头不得上行：${JSON.stringify(sent)}`);
   });
 });

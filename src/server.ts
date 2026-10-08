@@ -26,6 +26,8 @@ import { LoginRateLimiter, bootstrapAdmin, purgeExpiredSessions } from './api/au
 import { loadConfig } from './config.js';
 import { openDatabase } from './db/database.js';
 import { pruneLogs } from './db/repo/logs.js';
+import { EGRESS_BUDGET_PLACEHOLDER, createEgressGate } from './gateway/egress.js';
+import type { EgressShadowRecord } from './egress/port.js';
 import {
   createAssistantInvoker,
   createAssistantMetrics,
@@ -45,9 +47,36 @@ async function main(): Promise<void> {
 
   const loginLimiter = new LoginRateLimiter();
 
+  // 出口（IP）预算闸（契约 §16.7 / ADR-0021 决策 4c）：**造一次、注入两处** ——
+  // 下一行的网关装配（数据面）与后面的 `buildApp({ egress })`（管理面）拿到**同一个对象**。
+  // 建两个实例不是性能问题而是正确性问题：上游按**来源 IP** 计数，两侧扣的是同一张配额表，
+  // 各持一份 = 各自以为还有额度（`src/egress/port.ts` 文件头那段"两条车道共同的约束"）。
+  //
+  // 预算值引用 `EGRESS_BUDGET_PLACEHOLDER` 这**一份**常量，不在这里抄数字：
+  // 标定回填时"只改数、不改结构"（决策 8），抄第二遍就等于标定只改到了一半。
+  //
+  // **mode 保持缺省 `'shadow'`**：判据本期只记不动（决策 10(6)），放行要另有一笔；
+  // 回执里不得把这一步写成"判据已生效"。
+  //
+  // shadow 记录的去处在下面 `logShadow` 那一跳 —— 见那里的注释（为何要晚绑到网关 app 的 logger）。
+  let logShadow: (record: EgressShadowRecord) => void = () => {};
+  const egress = createEgressGate({
+    budget: EGRESS_BUDGET_PLACEHOLDER,
+    onShadow: (record) => logShadow(record),
+  });
+
   // 网关 runtime 自带内存快照 + 明文缓存；`stop()` 负责最后一次用量落库、最后一次
   // key 运行态镜像（ADR-0010）与清明文 —— 都在 db.close() 之前，否则 flush 会写到已关的连接上
-  const gateway = createGatewayRuntime({ db, config, logger: true });
+  const gateway = createGatewayRuntime({ db, config, logger: true, egress });
+
+  // 晚绑（上面先给了个空实现）：`onShadow` 的消费者是日志，而闸必须**先于** app 存在
+  // （它要注入进 runtime，runtime 才建 app）。标定吃的就是这条输出（决策 10(6)「shadow 输出
+  // 只是日志」），挂成空实现 = 影子模式在线上没有观测面，"判据炸了"与"判据什么都没发现"
+  // 又变成同一件事。只写 `egressId` + 那几个判据字段：这里不含 key 明文，也不含请求体。
+  logShadow = (record) => {
+    gateway.app.log.info({ egressShadow: record }, '出口预算判据 shadow 记录（只记不动，未生效）');
+  };
+
   await mountGatewayRoutes(gateway);
   gateway.start();
 
@@ -82,6 +111,8 @@ async function main(): Promise<void> {
     droppedEvents: () => gateway.errors.dropped(),
     assistant,
     assistantMetrics,
+    // 同一个闸实例（见上面"造一次、注入两处"）—— 决策 4c 的验收就压在"这是同一个对象"上。
+    egress,
   });
 
   if (config.assistantModel === null) {

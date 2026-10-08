@@ -213,7 +213,14 @@ describe('明文缓存', () => {
     const k = createKey(h.db, { upstreamId: up, key: plain, category: 'balance' }, MASTER_KEY);
     h.store.refresh();
 
-    assert.deepEqual(h.store.secrets.resolve(k.id), { upstreamId: up, baseUrl: 'https://a.example.com', apiKey: plain });
+    assert.deepEqual(h.store.secrets.resolve(k.id), {
+      upstreamId: up,
+      baseUrl: 'https://a.example.com',
+      apiKey: plain,
+      // 出口归属与明文同批算好（E 接缝，ADR-0021 决策 5）：无主 key ⇒ Tier 1 按 base URL 推导
+      egressId: 'a.example.com',
+      accountId: null,
+    });
 
     // 硬约束（PM 冻结）：热路径零 SQL。软删之后不 refresh，明文必须还在 ——
     // 反过来说，如果 resolve() 真在查库，这里已经返回 null 了
@@ -313,8 +320,10 @@ describe('出口归属（E 接缝：台账 → 快照缓存）', () => {
     h.store.refresh();
 
     assert.deepEqual(h.store.secrets.egressOf(k.id), { egressId: 'a.example.com', accountId: null });
-    // 缓存里多出来的两个值**不得**改变出站面：resolve 的返回形状本批一字不动
-    assert.deepEqual(Object.keys(h.store.secrets.resolve(k.id) ?? {}).sort(), ['apiKey', 'baseUrl', 'upstreamId']);
+    // 出站面的键集**逐字钉死**：引擎拿的是整个对象，多一个键就是多一个会漂移的面 ——
+    // 所以这里数键，而不是「包含」。出口两键是 E 接缝**明示**加进来的（ADR-0021 决策 5），
+    // 再有任何第五个键落进来都该是一次有意识的改动，而不是顺手带的。
+    assert.deepEqual(Object.keys(h.store.secrets.resolve(k.id) ?? {}).sort(), ['accountId', 'apiKey', 'baseUrl', 'egressId', 'upstreamId']);
   });
 
   it('入池 key 的归属来自台账；账号没指定出口时退回 Tier 1 推导', () => {
@@ -326,6 +335,9 @@ describe('出口归属（E 接缝：台账 → 快照缓存）', () => {
     assert.equal(h.store.refresh(), true);
 
     assert.deepEqual(h.store.secrets.egressOf(k.id), { egressId: 'a.example.com', accountId: account });
+    // 出站面上必须是**同一个值**：批二给 `EgressLimitedInput.subject.accountId` 喂的就是它。
+    // 两个读点各算一遍，就是"计数按账号去重"和"断言看的账号"分叉的老路。
+    assert.equal(h.store.secrets.resolve(k.id)?.accountId, account);
   });
 
   it('账号指定出口（Tier 2）→ 原样取那一列，**不做 URL 归一化**；空串按"没指定"处理', () => {
@@ -340,6 +352,8 @@ describe('出口归属（E 接缝：台账 → 快照缓存）', () => {
     // 拿 `egressIdOfUrl` 去"归一化"一个 id，`new URL('egress_hk_1')` 会抛 → 恒 null，
     // 于是出口被整个丢掉 —— 那正是"一个出口零个桶 ⇒ 无上限"那条事故。
     assert.deepEqual(h.store.secrets.egressOf(k.id), { egressId: 'egress_hk_1', accountId: account });
+    // 原样透传到**出站面**（引擎读的是这一个），而不是只在观测口上对
+    assert.equal(h.store.secrets.resolve(k.id)?.egressId, 'egress_hk_1');
 
     // 空串不是"一个叫 '' 的出口"：它会绕开宿主出口兜底，所以归一到 Tier 1。
     // 这里顺带钉住一条**给 Tier 2 写路径的约定**：改 `supplier_accounts.egress_id` 必须同时
@@ -349,6 +363,7 @@ describe('出口归属（E 接缝：台账 → 快照缓存）', () => {
     appendChange(h.db, 'key', k.id, 'update', null);
     assert.equal(h.store.refresh(), true);
     assert.equal(h.store.secrets.egressOf(k.id)?.egressId, 'a.example.com');
+    assert.equal(h.store.secrets.resolve(k.id)?.egressId, 'a.example.com', '出站面同步退回 Tier 1');
   });
 });
 

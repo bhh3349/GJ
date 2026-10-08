@@ -12,6 +12,7 @@
 import assert from 'node:assert/strict';
 import { describe, it, vi } from 'vitest';
 
+import { egressIdOfUrl } from '../egress/port.js';
 import { createGatewayEngine } from './engine.js';
 import type { FetchLike, ForwardResult } from './engine.js';
 import { createKeyPool } from './key-pool.js';
@@ -26,6 +27,17 @@ const now = (): number => clock;
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+
+/**
+ * 上游桩：出口归属按 `secrets.ts` 的同一条口径算 —— `supplier_accounts.egress_id` 缺席 ⇒ 退回
+ * Tier 1 的 `egressIdOfUrl(baseUrl)`。写死 `null` 会让"由 base URL 推出来的出口桶"在本文件的
+ * 用例里凭空消失，于是用例验的是一个生产上不存在的行为；而桩与真实解析器不同形，
+ * 恰恰是这类"接缝测试全绿、线上不生效"的来源。
+ */
+function upstreamTarget(upstreamId: string, apiKey: string): UpstreamTarget {
+  const baseUrl = `https://${upstreamId}.example.com/v1`;
+  return { upstreamId, baseUrl, apiKey, egressId: egressIdOfUrl(baseUrl), accountId: null };
+}
 
 const GROUP: GroupContext = { groupId: 'grp_1', name: '测试组', enabled: true, rpm: null, tpm: null, dailyQuota: null };
 
@@ -151,7 +163,7 @@ function makeHarness(options: {
       ((keyId) => {
         const found = options.keys.find((k) => k.keyId === keyId);
         if (found === undefined) return null;
-        const target: UpstreamTarget = { upstreamId: found.upstreamId, baseUrl: `https://${found.upstreamId}.example.com/v1`, apiKey: `sk-${keyId}` };
+        const target: UpstreamTarget = upstreamTarget(found.upstreamId, `sk-${keyId}`);
         return target;
       }),
   };
@@ -257,7 +269,7 @@ describe('0 真实尝试的分型（ADR-0011：不再合流成 502 UPSTREAM_ERRO
     };
   }
 
-  const target = (keyId: string): UpstreamTarget => ({ upstreamId: 'up1', baseUrl: 'https://up1.example.com/v1', apiKey: `sk-${keyId}` });
+  const target = (keyId: string): UpstreamTarget => upstreamTarget('up1', `sk-${keyId}`);
 
   it('池饱和（候选非空但并发槽位全满）→ 429 RATE_LIMITED + retry-after，而不是 502', async () => {
     const pool = stubPool([{ keyId: 'k1', upstreamId: 'up1', category: 'balance', weight: 1 }, { keyId: 'k2', upstreamId: 'up1', category: 'balance', weight: 1 }], () => false);
@@ -420,7 +432,7 @@ describe('首字节前换 key（验收 2 / 7）', () => {
     // 把首字节超时压到 1ms 触发真实超时路径
     const engine = createGatewayEngine({
       pool: h.pool,
-      secrets: { resolve: () => ({ upstreamId: 'up1', baseUrl: 'https://up1.example.com/v1', apiKey: 'sk-x' }) },
+      secrets: { resolve: () => upstreamTarget('up1', 'sk-x') },
       models: { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m },
       fetchImpl: () =>
         new Promise<Response>((_resolve, reject) => {
@@ -732,7 +744,7 @@ describe('并发与运行态', () => {
   it('密钥解析不到（密文缺失）的 key 被跳过，且不计失败', async () => {
     const h = makeHarness({
       keys: [keyConfig('k1', 'up1', { weight: 2 }), keyConfig('k2', 'up1', { weight: 1 })],
-      resolveSecret: (keyId) => (keyId === 'k1' ? null : { upstreamId: 'up1', baseUrl: 'https://up1.example.com/v1', apiKey: 'sk-k2' }),
+      resolveSecret: (keyId) => (keyId === 'k1' ? null : upstreamTarget('up1', 'sk-k2')),
       steps: [() => jsonResponse({ choices: [], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } })],
     });
 
@@ -754,7 +766,7 @@ describe('并发与运行态', () => {
 
     const engine = createGatewayEngine({
       pool,
-      secrets: { resolve: () => ({ upstreamId: 'up1', baseUrl: 'https://up1.example.com/v1', apiKey: 'sk-k1' }) },
+      secrets: { resolve: () => upstreamTarget('up1', 'sk-k1') },
       models: { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m },
       fetchImpl: (_url, init) =>
         new Promise<Response>((_resolve, reject) => {

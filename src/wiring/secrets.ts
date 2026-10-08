@@ -69,9 +69,9 @@ export interface DbSecretResolver extends SecretResolver {
   /**
    * 这把 key 在**本版快照**里的出口归属（只读观测口）。
    *
-   * 与 `resolve()` 分开是因为两者面向的时刻不同：`resolve()` 每次出站都调用、只回出站必需的两个值；
-   * 这里是给单测与自检一个**能断言**的读点 —— 否则缓存里算好的 `egressId` 在接线之前
-   * 是一块没有任何断言的死数据，写错了也不会有人知道。
+   * 与 `resolve()` 分开是因为两者面向的时刻不同：`resolve()` 每次出站都调用、只回出站必需的那几个值；
+   * 这里是给单测与自检一个**独立于出站面**的读点 —— 出站面是冻结形状（多个值就多一份漂移面），
+   * 而归属要能被断言，否则缓存里算好的 `egressId` 是一块没有断言的死数据，写错了也不会有人知道。
    */
   egressOf(keyId: string): { egressId: string | null; accountId: string | null } | null;
   /** 丢弃全部明文。关停时调用，别让进程带着 key 走到退出流程的后半段 */
@@ -157,7 +157,15 @@ export function createSecretResolver(options: SecretResolverOptions): DbSecretRe
       const baseUrl = baseUrlByUpstream.get(hit.upstreamId);
       // 没有 base URL（上游被删）→ 无法出站。返回 null 让引擎跳过这把 key，不计失败。
       if (baseUrl === undefined || baseUrl === '') return null;
-      return { upstreamId: hit.upstreamId, baseUrl, apiKey: hit.apiKey };
+      return {
+        upstreamId: hit.upstreamId,
+        baseUrl,
+        apiKey: hit.apiKey,
+        // 出口归属与明文同批算好（`update()` 里一次），这里只做一次哈希查找后的读 —— 零额外成本。
+        // 红线：**不得**在这个位置现算/现查（见文件头「为什么必须是同步内存读」）。
+        egressId: hit.egressId,
+        accountId: hit.accountId,
+      };
     },
   };
 }

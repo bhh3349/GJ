@@ -12,6 +12,7 @@
 
 import { describe, expect, it, vi } from 'vitest';
 
+import { egressIdOfUrl } from '../egress/port.js';
 import { createGatewayStack } from '../gateway/stack.js';
 import { createKeyPool } from '../gateway/key-pool.js';
 import type { KeyPoolInternal } from '../gateway/key-pool.js';
@@ -113,10 +114,14 @@ function stubSecrets(keys: KeyConfig[]): SecretResolver {
     resolve: (keyId) => {
       const found = keys.find((k) => k.keyId === keyId);
       if (found === undefined) return null;
+      // 出口口径同 `secrets.ts`：桩里没有台账 ⇒ Tier 1 按 base URL 推导
+      const baseUrl = `https://${found.upstreamId}.example.com/v1`;
       const target: UpstreamTarget = {
         upstreamId: found.upstreamId,
-        baseUrl: `https://${found.upstreamId}.example.com/v1`,
+        baseUrl,
         apiKey: `sk-${keyId}`,
+        egressId: egressIdOfUrl(baseUrl),
+        accountId: null,
       };
       return target;
     },

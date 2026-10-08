@@ -18,7 +18,15 @@ export type HintCode =
   | 'BALANCE_QUERY_UNSUPPORTED'
   | 'BALANCE_PARSE_MISMATCH'
   | 'BALANCE_UPSTREAM_UNREACHABLE'
-  | 'BALANCE_AUTH_REJECTED';
+  | 'BALANCE_AUTH_REJECTED'
+  /**
+   * v1.7.0 新增（契约 §2 / §14.2，ADR-0017 补遗 3）—— **判据 = HTTP 状态码 `429` 本身，不看标记头**。
+   *
+   * 上游真 429 与本地合成的 429（出口预算耗尽）**归同一行**：决策 4 让两者"证据面同形"，
+   * 目的正是不按来源分型。**文案不得越证据** —— 429 无专用码、出口级与 key 级同形（§16.7 v1.6.2），
+   * 故只能说"可能是出口预算、也可能是该 key 自身撞到限额"，**不得**写成"出口被限流"。
+   */
+  | 'BALANCE_EGRESS_RATE_LIMITED';
 
 /** 契约 §2 内置余额查询 preset 的命中情况。**只读、可推导**，传了也不生效。 */
 export interface BalancePresetDto {

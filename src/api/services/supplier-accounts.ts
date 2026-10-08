@@ -420,7 +420,7 @@ class BatchTally {
    * 只给"上游不可达"这一档出 hint。
    *
    * `BALANCE_AUTH_REJECTED` 的文案写的是"这把 key"，套到账号会话失效上会指错对象 ——
-   * 现有 `HintCode` 四个成员里没有为账号面写过的那一个，所以这一档**不出 hint**，
+   * `HintCode` 现有成员里没有为账号面写过的那一个，所以这一档**不出 hint**，
    * 原因留在逐行 `message` 里（那里能说清是密码错还是会话过期）。
    */
   private pickHint(): SupplierBatchResult['hintCode'] {
@@ -431,7 +431,7 @@ class BatchTally {
 /**
  * "上游不可达"那一档的 hint（§15.3 `hintCode` 的**唯一生产者**）。
  *
- * 写成单个常量而不是 `Record<HintCode, string>` 表：现有 `HintCode` 四个成员里
+ * 写成单个常量而不是 `Record<HintCode, string>` 表：`HintCode` 现有成员里
  * 只有这一个能用在账号面上。`BALANCE_AUTH_REJECTED` 的文案写的是"这把 key"，
  * 套到账号会话失效上会指错对象；把它和本常量并排摆在一张表里，等于邀请下一个人
  * 顺手把那一档也接上 —— 而接上的那一刻错的是**文案里的对象**，不会报错。

@@ -46,6 +46,10 @@ const HINT_TEXT: Record<HintCode, string> = {
     '上游不可达、超时或返回了错误状态。这多半是暂时的，稍后重试即可，不必改配置。',
   BALANCE_AUTH_REJECTED:
     '上游以 401/403 拒绝了这把 key：可能它已失效，也可能该端点需要另一种凭据（例如账号 access token，而不是转发用的 sk- 接口 key）。',
+  // 文案**不得越证据**（契约 §2 / ADR-0017 补遗 3）：429 无专用码、出口级与 key 级同形
+  // （§16.7 v1.6.2），故只列两种可能，**不得**写成"出口被限流"这类确定性归因。
+  BALANCE_EGRESS_RATE_LIMITED:
+    '本次请求被限流（429）：可能是出口 IP 的请求预算已用尽，也可能该 key 自身撞到限额；稍后重试即可，不必改配置。',
 };
 
 /** `hint` 是面向用户的一句话，可直接展示；中文写死在这里，避免前后端各写一份逐渐走样。 */
@@ -66,6 +70,10 @@ export function hintForQueryResult(result: {
 }): HintCode | null {
   if (result.errorCode === 'PARSE_FAILED') return 'BALANCE_PARSE_MISMATCH';
   if (result.errorCode === 'UPSTREAM_UNREACHABLE') {
+    // 429 一行通吃：**判据是状态码本身，不是标记头**（ADR-0017 补遗 3「实现落点」2）。
+    // 按标记头分流会造出一个新的误报类 —— 未带标记的**上游出口级** 429（上游按 IP 限我们）
+    // 会被判成"key 自身限额"，与补遗 3 要消灭的误报**镜像同形**。
+    if (result.httpStatus === 429) return 'BALANCE_EGRESS_RATE_LIMITED';
     return result.httpStatus === 401 || result.httpStatus === 403
       ? 'BALANCE_AUTH_REJECTED'
       : 'BALANCE_UPSTREAM_UNREACHABLE';
@@ -80,15 +88,23 @@ export function hintForQueryResult(result: {
  * 三型计数可能同时非零（50 把 key 里有 3 把 401、47 把正常），而 hint 只能给一句。
  * 取**最需要用户动作**的那一档：先失败（有东西坏了）、再未知（配置要改）、
  * 最后未支持（什么都还没配）。顺序写死在这里，前端与测试都按它断言。
+ *
+ * `rateLimited` 是**第 5 个旁路计数**（ADR-0017 补遗 3「实现落点」1）：不参与三型计数口径，
+ * 只服务 hint。它插在 `authRejected` 与 `BALANCE_UPSTREAM_UNREACHABLE` **之间** ——
+ * 401/403 最具体且要用户动作，429 次之（等等就行），其余才算"上游坏了"。
+ * 只接单查询侧（`hintForQueryResult`）的话，批量路径**永远给不出这个码**，而批量恰恰是会被打满的那条路。
  */
 export function hintForSummary(counts: {
   failed: number;
   unknown: number;
   skipped: number;
   authRejected: number;
+  rateLimited: number;
 }): HintCode | null {
   if (counts.failed > 0) {
-    return counts.authRejected > 0 ? 'BALANCE_AUTH_REJECTED' : 'BALANCE_UPSTREAM_UNREACHABLE';
+    if (counts.authRejected > 0) return 'BALANCE_AUTH_REJECTED';
+    if (counts.rateLimited > 0) return 'BALANCE_EGRESS_RATE_LIMITED';
+    return 'BALANCE_UPSTREAM_UNREACHABLE';
   }
   if (counts.unknown > 0) return 'BALANCE_PARSE_MISMATCH';
   if (counts.skipped > 0) return 'BALANCE_QUERY_UNSUPPORTED';

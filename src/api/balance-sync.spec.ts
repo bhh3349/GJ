@@ -948,3 +948,64 @@ describe('判据 9 / 10 —— 热路径零回退与零新增枚举', () => {
     expect(tasks.n).toBe(0);
   });
 });
+
+describe('§2 引导码 —— 429 不再报成"上游坏了"（ADR-0017 补遗 3）', () => {
+  it('批量刷新撞 429 → BALANCE_EGRESS_RATE_LIMITED（不是"上游不可达"）', async () => {
+    // 判据是**状态码 429 本身**，不看标记头（ADR-0017 补遗 3「实现落点」2）：
+    // 这里没有标记头，是"上游真 429"，与本地合成的 429 归同一行。
+    const h = makeHarness({ handler: () => ({ status: 429, body: '{"error":"rate limited"}' }) });
+    const up = addUpstream(h, 'up-a', '/balance');
+    const a = addKey(h, up, null);
+
+    const summary = await refreshBalances(h.db, MASTER_KEY, { keyIds: [a] }, NOOP_REPORTER, {
+      trigger: 'manual',
+      onUpstreamDone: h.sync.onRefreshDone,
+      fetchImpl: h.fetchImpl,
+    });
+
+    expect(summary.failed).toBe(1);
+    expect(summary.hintCode).toBe('BALANCE_EGRESS_RATE_LIMITED');
+    // 文案**不得越证据**：只给两种可能，不写成"出口被限流"这种确定性归因
+    expect(summary.hint).toContain('429');
+    expect(summary.hint).not.toContain('出口被限流');
+  });
+
+  it('401 与 429 同时出现时"鉴权被拒"优先 —— 429 插在它与"上游不可达"之间', async () => {
+    // 只接单查询侧的实现会让这条**给出"上游不可达"**：批量路径必须自己数 429（补遗 3「实现落点」1）。
+    const h = makeHarness({
+      handler: (path) => (path === '/a' ? { status: 401, body: '{}' } : { status: 429, body: '{}' }),
+    });
+    const up1 = addUpstream(h, 'up-a', '/a');
+    const up2 = addUpstream(h, 'up-b', '/b');
+    addKey(h, up1, null);
+    addKey(h, up2, null);
+
+    const summary = await refreshBalances(h.db, MASTER_KEY, {}, NOOP_REPORTER, {
+      trigger: 'manual',
+      onUpstreamDone: h.sync.onRefreshDone,
+      fetchImpl: h.fetchImpl,
+    });
+
+    expect(summary.failed).toBe(2);
+    expect(summary.hintCode).toBe('BALANCE_AUTH_REJECTED');
+  });
+
+  it('429 与真失败同时出现时 429 优先 —— 它不是"上游挂了"', async () => {
+    const h = makeHarness({
+      handler: (path) => (path === '/a' ? { status: 429, body: '{}' } : { status: 500, body: '{}' }),
+    });
+    const up1 = addUpstream(h, 'up-a', '/a');
+    const up2 = addUpstream(h, 'up-b', '/b');
+    addKey(h, up1, null);
+    addKey(h, up2, null);
+
+    const summary = await refreshBalances(h.db, MASTER_KEY, {}, NOOP_REPORTER, {
+      trigger: 'manual',
+      onUpstreamDone: h.sync.onRefreshDone,
+      fetchImpl: h.fetchImpl,
+    });
+
+    expect(summary.failed).toBe(2);
+    expect(summary.hintCode).toBe('BALANCE_EGRESS_RATE_LIMITED');
+  });
+});

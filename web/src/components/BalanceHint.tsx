@@ -6,6 +6,11 @@
  *   所以这里也不用 `ErrorState`，而是按几种形态给可操作的说明。
  * - `BALANCE_UPSTREAM_UNREACHABLE` 只提示重试，**不引导改配置**（上游挂了不是配置错）。
  * - `hintCode=null` 表示出数了，无需引导，本组件应直接不渲染。
+ * - 老前端 + 新后端：后端先上新码时，旧 bundle 的 `HINT_CONFIG` 查不到该值。`Record` 的穷尽性
+ *   只在编译期成立，运行时 `config` 会是 `undefined`，直接读 `.title` 会把整个组件炸掉 ——
+ *   所以渲染层必须有 `?? fallback`（ADR-0017 补遗 3 · 后果 2）。兜底文案同样**不越证据**：
+ *   只说"遇到一种未知的失败状态"，**不猜**是哪一类，也**不**指向任何"改配置"的动作 ——
+ *   与其余四码同一条纪律，这里能给的只有"刷新 / 重试"这类与成因无关的选项。
  *
  * `Record<HintCode, …>` **没有 fallback 项是刻意的**：`HintCode` 加值时这里不补就编译不过 ——
  * 一条新的引导码如果没人写文案，会在 UI 上变成空白提示，而空白提示比没有提示更坏
@@ -68,7 +73,16 @@ export interface BalanceHintProps {
 export function BalanceHint({ hintCode, hint, action }: BalanceHintProps) {
   if (!hintCode) return null;
 
-  const config = HINT_CONFIG[hintCode];
+  // 运行时兜底：`Record<HintCode, …>` 的穷尽性只在**编译期**成立，而 `hintCode` 直接来自 REST
+  // 响应（没有运行时校验）—— 后端先上新码、前端 bundle 未更新时这里取到 `undefined`，
+  // 直接读 `.title` 就当场抛错、整个组件渲染失败（不只是缺文案）。文案纪律见文件头。
+  const config =
+    HINT_CONFIG[hintCode] ??
+    ({
+      type: 'warning',
+      title: '遇到一种未知的失败状态',
+      description: '后端返回了本版本未收录的引导码，可能是前端版本落后于后端。请刷新页面或稍后重试。',
+    } as const);
   return (
     <Alert
       type={config.type}

@@ -66,6 +66,7 @@ import {
   type TaskAccepted,
 } from '@/api/types';
 import { BalanceText } from '@/components/BalanceText';
+import { confirmManualRefresh } from '@/components/ManualRefreshConfirm';
 import { PageHeader } from '@/components/PageHeader';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { EgressPoolCard } from '@/pages/upstreams/EgressPoolCard';
@@ -108,24 +109,11 @@ const BATCH_ACTIONS: readonly BatchActionSpec[] = [
   },
 ];
 
-/** 二次确认正文：「打谁」+「代价」+「量级不由前端给」。 */
-function BatchCostBody({ scope, cost }: { scope: string; cost: string }) {
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
-      <Text>{scope}</Text>
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        {cost}
-      </Text>
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        会有几次请求由服务端说了算（契约 §14.7：量级由服务端给，
-        <Text strong style={{ fontSize: 12 }}>
-          前端不得自造承诺
-        </Text>
-        ）—— 提交后本页等到终态，逐行结论见明细浮层。
-      </Text>
-    </div>
-  );
-}
+/**
+ * 二次确认正文已抽到 `@/components/ManualRefreshConfirm`（§14.7 的唯一实现）——
+ * 本页只负责给出「打谁」与「代价」，那句"量级由服务端给"的纪律文案不在页面里复述。
+ * 末句挂本页专属的终态去处：逐行结论在明细浮层。
+ */
 
 /** 展开行第二级：套餐摘要表（§15.8 第 6 问的口径与详情里那张同源）。 */
 const SUBSCRIPTION_COLUMNS: ColumnsType<SupplierSubscription> = [
@@ -256,12 +244,11 @@ export default function SupplierAccountsPage() {
   const runBatch = (spec: BatchActionSpec): void => {
     if (!upstreamId) return;
     const body: SupplierBatchRequest = { upstreamId, ...(ids ? { ids } : {}) };
-    modal.confirm({
+    confirmManualRefresh(modal, {
       title: spec.label,
-      width: 480,
-      content: <BatchCostBody scope={scopeOf()} cost={spec.cost} />,
-      okText: '执行（会打上游）',
-      cancelText: '取消',
+      scope: scopeOf(),
+      cost: spec.cost,
+      outcome: '逐行结论见明细浮层。',
       onOk: async () => {
         const accepted = await run(spec.key, () => spec.submit(body), '已提交任务');
         if (accepted === null) return;

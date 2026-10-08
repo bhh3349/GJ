@@ -6,6 +6,9 @@
  * - `health` 是网关运行态：这里只读展示，可写的只有 `enabled`。
  * - 所有写请求带 `revision`（乐观锁）；不符则 409 REVISION_MISMATCH，页面提示并拉最新。
  * - 余额实时性走验收 3：WS `balance` 帧到达即覆盖该行，不等列表重拉。
+ * - 「全量查余额」是**最大的一批**（扫全部上游、每把被查到的 key 一次请求），出口预算与数据面共用
+ *   同一条（§16.7 Tier 1.5）⇒ §14.7 二次确认，走 `confirmManualRefresh`，本页不自造请求数。
+ *   单把 key 的刷新**刻意不弹**：一次请求，"批"的代价量级不成立，且同一个动作问两遍会让人盲点「确定」。
  */
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import {
@@ -40,6 +43,7 @@ import {
 import { BalanceHint } from '@/components/BalanceHint';
 import { BalanceText } from '@/components/BalanceText';
 import { HealthTag, failureReasonLabel } from '@/components/HealthTag';
+import { confirmManualRefresh } from '@/components/ManualRefreshConfirm';
 import { PageHeader } from '@/components/PageHeader';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { BalanceModal, KeyFormModal } from '@/pages/keys/KeyModals';
@@ -167,6 +171,23 @@ export default function KeysPage() {
     } else {
       list.reload();
     }
+  };
+
+  /** 全量刷新 = 扫全部上游、每把被查到的 key 一次请求（§14.7）⇒ 先过一次机会成本。 */
+  const confirmRefreshAll = (): void => {
+    confirmManualRefresh(modal, {
+      title: '查全部上游的余额？',
+      scope: '打谁：全部上游名下所有配了余额查询方式的 key（没配的跳过）—— 这是跨上游的全量动作',
+      cost: '会真的打上游，而且这是最大的一“批”：每把被查到的 key 一次请求（§14.7），而出口预算与网关数据面共用同一条 ⇒ 这一下最可能挤到客户端流量。',
+      onOk: async () => {
+        const result = await run(
+          'refreshAll',
+          () => keysApi.refreshAllBalances(),
+          '已提交全量余额刷新任务',
+        );
+        if (result !== null) task.start(result.taskId);
+      },
+    });
   };
 
   const batch = async (action: 'enable' | 'disable') => {
@@ -385,13 +406,8 @@ export default function KeysPage() {
               icon={<ReloadOutlined />}
               loading={isPending('refreshAll') || task.running}
               disabled={(upstreams.data?.items.length ?? 0) === 0}
-              onClick={async () => {
-                const result = await run(
-                  'refreshAll',
-                  () => keysApi.refreshAllBalances(),
-                  '已提交全量余额刷新任务',
-                );
-                if (result !== null) task.start(result.taskId);
+              onClick={() => {
+                confirmRefreshAll();
               }}
             >
               全量查余额

@@ -18,6 +18,9 @@
  *   **契约里不存在** `min_interval_minutes` 这类每上游可写字段，也**没有**写这个配置的端点 ——
  *   所以这里只显示 + 指路部署配置，不造一个点了就 404 的假开关。
  * - 手动「查余额」三个端点语义**零变更**（§14.1），本页只把运行态（退避 / 单飞 / 上次同步）显示出来。
+ * - 但「查余额」**不是一次请求**：它是该上游被查到的 key **一把一次**的一批，而出口预算与数据面共用
+ *   同一条（§16.7 Tier 1.5 / ADR-0021）⇒ §14.7 要求二次确认、且必须说出代价。走
+ *   `confirmManualRefresh`（那句"量级由服务端给"的纪律文案只有一个落点），本页不自造请求数。
  */
 import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import {
@@ -51,6 +54,7 @@ import {
 import { BalanceDriftBanner } from '@/components/BalanceDriftBanner';
 import { BalanceHint } from '@/components/BalanceHint';
 import { BalanceText } from '@/components/BalanceText';
+import { confirmManualRefresh } from '@/components/ManualRefreshConfirm';
 import { PageHeader } from '@/components/PageHeader';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { UpstreamModal } from '@/pages/upstreams/UpstreamModal';
@@ -184,6 +188,19 @@ export default function UpstreamsPage() {
       '已提交余额查询任务',
     );
     if (result !== null) task.start(result.taskId);
+  };
+
+  /**
+   * 「查余额」先要一次机会成本（§14.7）。代价三样必须说全：**真打上游**、**占出口预算**、
+   * 可能**挤到数据面**；而"几次请求"不在这里预告 —— 那个数只有服务端的 result 说了算。
+   */
+  const confirmRefreshBalance = (row: Upstream): void => {
+    confirmManualRefresh(modal, {
+      title: `查「${row.name}」的余额？`,
+      scope: '打谁：这一条上游名下全部配了余额查询方式的 key（没配的会被跳过）',
+      cost: '会真的打上游，而且这是一“批”：该上游被查到的 key 一把一次请求（§14.7）。出口预算与网关数据面共用同一条 ⇒ key 多时可能挤到客户端流量。',
+      onOk: () => refreshBalance(row),
+    });
   };
 
   /**
@@ -444,7 +461,7 @@ export default function UpstreamsPage() {
               style={{ padding: 0 }}
               loading={isPending(`refresh:${row.id}`)}
               onClick={() => {
-                void refreshBalance(row);
+                confirmRefreshBalance(row);
               }}
             >
               查余额

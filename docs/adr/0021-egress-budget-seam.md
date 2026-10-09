@@ -455,7 +455,7 @@ export type EgressFetchFor = (egressId: string | null, consumer: EgressConsumer)
 - **"必填"要落到每一层**：漏传 = 编译错误（`ports.ts` 已有的必填纪律）。装饰器 `inner` 缺省 = 全局 fetch
   那条**相反，保留**（决策 4：测试注入假 fetch 时**仍要经过闸**）。
 - **Tier 2 下单一个 `fetchImpl` 字段本身也不够**：一轮刷新里不同 key 可能绑不同出口 ⇒ 管理面要的是
-  `fetchFor(egressId, 'management')`，而出口得**贴着 key 走**：`DecryptedKeyRef`（`src/db/repo/keys.ts:526`）
+  `fetchFor(egressId, 'management')`，而出口得**贴着 key 走**：`DecryptedKeyRef`（`src/db/repo/keys.ts:559`）
   补 `egressId`，`KEYS_SQL`（`src/wiring/store.ts:59`）快照 join 台账带出，各循环按 `ref.egressId` 取 fetch。
 - **`src/wiring/secrets.ts` 的缓存刷新必须纳入 `egressId`，且不得挂在 `revision` 上**：`update()` 的 skip 判据
   现为 `cached.revision === row.revision && cached.upstreamId === row.upstream_id`（`:64`）——

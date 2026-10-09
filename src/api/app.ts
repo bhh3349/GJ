@@ -33,6 +33,7 @@ import { registerAuthRoutes } from './routes/auth.js';
 import { registerGroupRoutes } from './routes/groups.js';
 import { registerKeyRoutes } from './routes/keys.js';
 import { createLiveHub, registerLiveRoutes, type LiveHub } from './routes/live.js';
+import { registerEgressRoutes } from './routes/egress.js';
 import { registerMiscRoutes } from './routes/misc.js';
 import { registerModelRoutes } from './routes/models.js';
 import { registerObservabilityRoutes } from './routes/observability.js';
@@ -241,6 +242,11 @@ export interface BuildAppOptions {
    * 而那正是这条缝要防的事）。批二接线时连同 `src/server.ts` 的造一次注入两处一起收。
    */
   egress?: EgressGate;
+  /**
+   * §16.7 出口 /test 探活的出站缝（缺省全局 fetch）。测试注入假件回 203.0.113.7 ⇒ 用例零网络。
+   * 与 supplier.fetchImpl 同一条纪律：缺省在装配层填（见 registerEgressRoutes 默认参），路由层必填。
+   */
+  egressProbeFetch?: typeof fetch;
 }
 
 /**
@@ -361,7 +367,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     req.auth = { ...requireSession(db, sessionCookieValue(req), config.sessionTtlHours), viaMachineToken: false };
   });
 
-  app.setErrorHandler((error: unknown, req, reply) => {
+  app.setErrorHandler((error: unknown, req: FastifyRequest, reply) => {
     if (error instanceof ApiError) {
       void reply.code(error.status).send(error.toBody());
       return;
@@ -405,6 +411,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   });
 
   registerAuthRoutes(app, ctx);
+  registerEgressRoutes(app, ctx, opts.egressProbeFetch);
   registerUpstreamRoutes(app, ctx);
   registerKeyRoutes(app, ctx);
   registerGroupRoutes(app, ctx);

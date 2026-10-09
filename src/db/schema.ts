@@ -363,6 +363,8 @@ CREATE TABLE IF NOT EXISTS egress_proxies (
   created_at     TEXT NOT NULL,
   updated_at     TEXT NOT NULL,
   -- 没有原因的 retired 半年后没人判断得了它能不能删 ⇒ 退役必须带原因。
+  last_test_at   TEXT,                              -- ISO8601；最近一次 /test；NULL = 未测
+  last_test_ok   INTEGER,                           -- 0/1；NULL = 未测（未知 != 失败）
   CHECK (status <> 'retired' OR retired_reason IS NOT NULL)
 );
 
@@ -519,6 +521,24 @@ export function migrate(db: SqliteDatabase): void {
     // 而 upstream_id / key_id 那种低基数列必须带 ts，否则一个 key 会拖出全表。
     db.exec('CREATE INDEX IF NOT EXISTS idx_logs_request_id ON usage_logs(request_id)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_err_request_id ON gateway_error_events(request_id)');
+  })();
+
+  // v1.7.1：egress_proxies 的 last_test_at / last_test_ok。
+  //
+  // 为什么这两列要 ALTER：这张表在早期批次（v1.4.8 Tier 2 DDL）就已随开库建进**运行中的库**，
+  // 而两列是后来才加进 CREATE TABLE 文本的 —— `CREATE TABLE IF NOT EXISTS` 撞上已存在的表
+  // 是空操作，那些库的列永远进不来，`SELECT last_test_at`（GET /api/egress 的 DTO 需要）一跑就炸。
+  // 可空、无默认：老行 NULL = 未测（DTO `lastTestOk: null`），"没测过"既不是 ok 也不是 failed，
+  // 不是缺一个默认值。判据同前两批用"列在不在"，同一句代码覆盖新库与老库，幂等。
+  db.transaction(() => {
+    for (const [column, decl] of [
+      ['last_test_at', 'TEXT'],
+      ['last_test_ok', 'INTEGER'],
+    ] as const) {
+      if (!hasColumn(db, 'egress_proxies', column)) {
+        db.exec(`ALTER TABLE egress_proxies ADD COLUMN ${column} ${decl}`);
+      }
+    }
   })();
 
   // v1.4.x：供应商能力位 + key 模型白名单（契约 §15.7，ADR-0018 / ADR-0019）。**纯加列**，SCHEMA_VERSION 不递增。

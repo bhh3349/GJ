@@ -320,3 +320,81 @@ describe('台账 pooled_key_id 部分唯一索引', () => {
     expect(indexNames(db)).toContain('uq_supplier_account_keys_pooled');
   });
 });
+
+// ---------------------------------------------------------------------------
+// v1.7.1：egress_proxies 的 last_test_at / last_test_ok 老库升版
+// ---------------------------------------------------------------------------
+//
+// 与 v1.4.x 三列同一形状的缺环：这两列是后来才加进 CREATE TABLE 文本的，而早期批次
+// 已随开库把这张表建进了运行中的库 —— CREATE TABLE IF NOT EXISTS 撞上已存在的表是
+// 空操作，那些库的列永远进不来，GET /api/egress 的 SELECT 一跑就炸。
+// 三条判据：新库自带、老库真被 ALTER 到、重复跑不抛 duplicate column name。
+
+function seedPreEgressTestColsDatabase(path: string): void {
+  const legacy = new Database(path);
+  legacy.exec(`
+    CREATE TABLE egress_proxies (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      url TEXT NOT NULL UNIQUE,
+      secret BLOB,
+      region TEXT,
+      note TEXT,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','retired')),
+      retired_reason TEXT,
+      retired_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      CHECK (status <> 'retired' OR retired_reason IS NOT NULL)
+    );
+  `);
+  const at = '2026-10-08T00:00:00.000Z';
+  legacy
+    .prepare(
+      `INSERT INTO egress_proxies (id, name, url, status, created_at, updated_at)
+       VALUES (?, ?, ?, 'active', ?, ?)`,
+    )
+    .run('eg_old', '老出口', 'https://legacy.example:8443', at, at);
+  legacy.close();
+}
+
+describe('v1.7.1 加列（egress_proxies last_test_at / last_test_ok）', () => {
+  it('新库直接带两列', () => {
+    const db = open(tempDbPath());
+    expect(columnsOf(db, 'egress_proxies')).toEqual(
+      expect.arrayContaining(['last_test_at', 'last_test_ok']),
+    );
+  });
+
+  it('老库必须真发 ALTER，老行 NULL = 未测（不是 0 / false）', () => {
+    const path = tempDbPath();
+    seedPreEgressTestColsDatabase(path);
+
+    // 前置断言：种子库确实没有这两列
+    const legacy = new Database(path);
+    expect(columnsOf(legacy, 'egress_proxies')).not.toContain('last_test_at');
+    expect(columnsOf(legacy, 'egress_proxies')).not.toContain('last_test_ok');
+    legacy.close();
+
+    const db = open(path);
+    expect(columnsOf(db, 'egress_proxies')).toEqual(
+      expect.arrayContaining(['last_test_at', 'last_test_ok']),
+    );
+    const row = db
+      .prepare('SELECT last_test_at, last_test_ok FROM egress_proxies WHERE id = ?')
+      .get('eg_old') as { last_test_at: string | null; last_test_ok: number | null };
+    expect(row.last_test_at).toBeNull();
+    expect(row.last_test_ok).toBeNull();
+  });
+
+  it('加列幂等：重复 migrate 不抛 duplicate column name', () => {
+    const path = tempDbPath();
+    seedPreEgressTestColsDatabase(path);
+    const db = open(path);
+    expect(() => {
+      migrate(db);
+      migrate(db);
+    }).not.toThrow();
+    expect(columnsOf(db, 'egress_proxies').filter((c) => c === 'last_test_ok')).toHaveLength(1);
+  });
+});

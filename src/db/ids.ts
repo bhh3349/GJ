@@ -27,16 +27,19 @@ const ID_PREFIX = {
   // 不出响应体，前缀只为日志可读。**不共用 `sak_`** —— 两种行会同时出现在
   // 同一个账号的写入日志里，共用前缀会让"这一行到底是 key 还是套餐"要靠翻 SQL 才分得清。
   supplierSubscription: 'sas',
+  // 出口条目（契约 §16.7.2）。id 不透明、契约不写死前缀形状，这里纯为日志可读性；
+  // **不共用 `up_`** —— 出口与上游会同时出现在审计 / change_log 里，共用前缀
+  // 会让"这一行是上游配置变更还是出口配置变更"要靠翻表才分得清（§9 两个广播面的读者不同）。
+  egress: 'eg',
 } as const;
 
 export type IdKind = keyof typeof ID_PREFIX;
 
-/** 6 字节随机 → 48 bit，单机量级下碰撞概率可忽略；真撞了主键约束会立刻报错，不会静默覆盖。 */
 export function newId(kind: IdKind): string {
   return `${ID_PREFIX[kind]}_${randomBytes(6).toString('hex')}`;
 }
 
-/** 会话 id 与网关 key 明文用同一档随机源；网关 key 明文长度见 gatewayKeySecret()。 */
+/** 会话 id 形状与网关 key 一致但独立随机源；与网关 key 的等级类似 gatewayKeySecret()。 */
 export function newSessionToken(): string {
   return randomBytes(32).toString('base64url');
 }

@@ -66,7 +66,7 @@ const TEXT_EXT: ReadonlySet<string> = new Set([
   '.css',
   '.txt',
   '.sh',
-  // 出口节点清单（deploy/vps-egress/nodes.example.tsv）：**设计上就是要放 `user:pass@host:port` 的文件**。
+  // 出口节点清单（deploy/vps-egress/nodes.example.tsv）：**设计上就要放代理凭据的示例文件**。
   // 不把它纳入扫描面，等于「仓库里唯一注定含凭据的文件类型」正好是扫描器从不看的那一类。
   '.tsv',
 ]);
@@ -100,6 +100,14 @@ export const RULES: readonly Rule[] = [
     pattern:
       /(?:api[_-]?key|apikey|secret|password|passwd|token)\s*[:=]\s*["'][A-Za-z0-9_\-+/=]{24,}["']/gi,
     note: '给 key/secret/token 硬编码赋值，改从 env 读',
+  },
+  {
+    // §16.7 出口面纪律：代理凭据只落在 egress_proxies.secret（aes-256-gcm BLOB）与
+    // 运维清单里。仓库内的 .ts/.md 出现「user:pass 内嵌代理 URL」形态即视为凭据落盘。
+    // （nodes.example.tsv 是设计上就要放占位凭据的示例清单，由占位符豁免拦下。）
+    id: 'proxy-url-credentials',
+    pattern: /\w+:[^@/\s"']+@[A-Za-z0-9.\-]+/g,
+    note: '代理 URL 内嵌了明文凭据，改存 egress_proxies.secret（密文）或运维清单占位符',
   },
   {
     id: 'plaintext-key-identifier',
@@ -153,8 +161,10 @@ function scanFile(absPath: string, relPath: string): ScanHit[] {
       let m: RegExpExecArray | null;
       while ((m = rule.pattern.exec(line)) !== null) {
         const match = m[0];
-        if (rule.id === 'assigned-secret' && isPlaceholder(match)) continue;
-        if (rule.id === 'provider-key-literal' && isPlaceholder(match)) continue;
+        // 占位符豁免覆盖所有"匹配值"的规则：nodes.example.tsv 里 sub2api:CHANGE_ME@host 是
+        // 设计上的占位写法，proxy-url-credentials 不能把示例清单判成泄漏；
+        // plaintext-key-identifier 匹配的是标识符本身，无占位概念，不参与豁免。
+        if (rule.id !== 'plaintext-key-identifier' && isPlaceholder(match)) continue;
         hits.push({ file: relPath, line: i + 1, rule: rule.id, excerpt: redact(match) });
         if (m.index === rule.pattern.lastIndex) rule.pattern.lastIndex++;
       }

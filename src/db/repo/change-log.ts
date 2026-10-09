@@ -10,7 +10,9 @@
 import { nowIso } from '../../util/time.js';
 import type { Db } from '../database.js';
 
-export type ChangeEntity = 'upstream' | 'key' | 'group' | 'gateway_key' | 'model' | 'balance';
+// 'egress'（§16.7）：出口配置的广播。出口不是 upstream —— 写 'upstream' 会让网关把
+// "改了个出口"误当成"上游配置变了"而空转重载；两个广播面的读者不同，不共用实体名。
+export type ChangeEntity = 'upstream' | 'key' | 'group' | 'gateway_key' | 'model' | 'balance' | 'egress';
 export type ChangeOp = 'insert' | 'update' | 'delete';
 
 export function appendChange(

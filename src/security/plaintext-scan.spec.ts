@@ -53,6 +53,8 @@ describe('plaintext-scan 规则集', () => {
       'provider-key-literal': `const k = "${fakeOpenAiKey()}";`,
       'assigned-secret': fakeAssignedSecret(),
       'plaintext-key-identifier': `const ${fakePlaintextIdentifier()} = cipher;`,
+      // 分片拼装：源码里不得出现完整的 user:pass@域名 形态字面量，否则本文件自命中
+      'proxy-url-credentials': `const u = "${['http://svc', ':', 'K9w'.repeat(8), '@203.0.113.9:8080'].join('')}";`,
     };
 
     // 规则集增删时这里会失败，强制补正对照
@@ -96,5 +98,25 @@ describe('真实仓库', () => {
 
     expect(filesScanned).toBeGreaterThan(20);
     expect(bytesScanned).toBeGreaterThan(10_000);
+  });
+});
+
+describe('proxy-url-credentials（§16.7 出口面，台账 deny-case 证据）', () => {
+  it('deny：.ts 里出现 user:pass@ 明文凭据 → 命中', () => {
+    // 源码里运行时拼装，避免本文件被扫描器自命中
+    // host 用 TEST-NET IP 而不是 proxy.example：PLACEHOLDER 豁免含 "example"，
+    // 用带 example 的域名会让 deny 样本被自己豁免掉（假阴性）。
+    const url = ['http://sub2api', ':', 'S3cret-Vault-9', '@203.0.113.9:8080'].join('');
+    const dir = makeTempRepo({ 'a.ts': `const egressUrl = "${url}";` });
+    const { hits } = scanRepo(dir);
+    const matched = hits.filter((h: ScanHit) => h.rule === 'proxy-url-credentials');
+    expect(matched).toHaveLength(1);
+  });
+
+  it('正对照：nodes.example.tsv 的 CHANGE_ME 占位不命中（示例清单不是泄漏）', () => {
+    const line = 'hk-1\thttp://sub2api:CHANGE_ME@203.0.113.10:8080\t203.0.113.10\thk';
+    const dir = makeTempRepo({ 'nodes.example.tsv': line });
+    const { hits } = scanRepo(dir);
+    expect(hits).toEqual([]);
   });
 });

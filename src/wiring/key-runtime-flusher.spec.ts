@@ -228,13 +228,59 @@ describe('差集刷写', () => {
     assert.equal(h.flusher.flush(), 0);
   });
 
-  it('key 移出快照后表里的行保留（只 upsert 不删行，清理归 M4）', () => {
+  /**
+   * P3 #4 的两条：孤儿行的产生与收掉。
+   *
+   * 上面那条用例钉的是「移出快照但父行还活着」**不能**被清掉（禁用/暂时不在快照里的 key，
+   * 管理端照样读得到它的运行态，删了就是丢数据）。
+   * 下面两条钉的是另一半：父行已经不活的行，既不能再被刷新（守卫），也不能一直留着（清理）。
+   */
+  it('池里还持着"父行已被物理删除"的 key：镜像不再整批失败，且该行被清掉（ADR-0016 登记的窗口）', () => {
+    const h = setup();
+    h.flusher.flush();
+
+    // 管理端把 k2 整把删掉（父行消失），但网关池这一拍还持着它 —— 这正是 ADR-0016
+    // 末尾给本层留的那条待评估项。原来 VALUES 形态在这里抛外键、整批回滚：
+    // k1 的运行态也写不进去，表现为"健康灯不动"，日志里只有一行 onError。
+    h.db.pragma('foreign_keys = OFF');
+    h.db.prepare('DELETE FROM upstream_keys WHERE id = ?').run(h.keyIds[1]);
+    h.db.pragma('foreign_keys = ON');
+    h.pool.reportFailure(h.keyIds[1], 'NETWORK');
+    h.pool.reportFailure(h.keyIds[0], 'AUTH_INVALID');
+
+    assert.equal(h.flusher.flush(), 1, '只写活的那条；死的那条被守卫跳过，不连坐');
+    assert.equal(h.errors.length, 0, '不该再有 onError —— 死 key 不是故障');
+
+    const k1 = runtimeRows(h.db).find((r) => r.key_id === h.keyIds[0]);
+    assert.ok(k1, 'k1 的运行态必须在（原形态下它被整批回滚带走了）');
+    assert.equal(k1.consecutive_failures, 1);
+    assert.equal(runtimeRows(h.db).find((r) => r.key_id === h.keyIds[1]), undefined, '父行已消失的镜像行由清理收掉');
+    assert.deepEqual(h.db.prepare('PRAGMA foreign_key_check').all(), [], '清完不留外键违反');
+    assert.equal(h.flusher.orphansDeleted(), 1);
+  });
+
+  it('软删 key 的镜像行也被收掉，而"只是移出快照"的不收（孤儿判据 = 父行不活）', () => {
+    const h = setup();
+    h.flusher.flush();
+    assert.equal(runtimeRows(h.db).length, 2);
+
+    // k1 被软删（管理端从此读不到它）；k2 只是被移出快照，父行仍活着且可读
+    h.db.prepare("UPDATE upstream_keys SET enabled = 0, deleted_at = ? WHERE id = ?").run('2026-10-08T00:00:00.000Z', h.keyIds[0]);
+    h.pool.applySnapshot({ revision: 2, upstreams: [{ upstreamId: h.upstreamId, enabled: true, models: null }], keys: [keyConfig(h.keyIds[1], h.upstreamId)] });
+
+    h.flusher.flush();
+    const left = runtimeRows(h.db).map((r) => r.key_id);
+    assert.deepEqual(left, [h.keyIds[1]], '软删的那条收掉，仍可读的那条留着');
+    assert.equal(h.flusher.orphansDeleted(), 1);
+  });
+
+  it('key 移出快照但父行还活着：表里的行保留（孤儿判据 = 父行不活，不是"池里没有了"）', () => {
     const h = setup();
     h.flusher.flush();
     h.pool.applySnapshot({ revision: 2, upstreams: [{ upstreamId: h.upstreamId, enabled: true, models: null }], keys: [] });
 
     assert.equal(h.flusher.flush(), 0);
-    assert.equal(runtimeRows(h.db).length, 2, '残留行的清理规则是 ADR-0010 的已知缺口，不在本层');
+    assert.equal(runtimeRows(h.db).length, 2, '禁用/暂时移出快照的 key 不是孤儿：管理端照样读得到，清掉就是丢数据');
   });
 
   it('状态没变就不重复写：冷却时刻是绝对时刻，不是每拍递减的倒计时', () => {

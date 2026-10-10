@@ -126,7 +126,11 @@ export default function UpstreamsPage() {
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<Upstream | null>(null);
   const [removingId, setRemovingId] = useState<string | null>(null);
-  const [refreshHint, setRefreshHint] = useState<{ hintCode: HintCode; hint: string | null } | null>(null);
+  const [refreshHint, setRefreshHint] = useState<{
+    hintCode: HintCode;
+    hint: string | null;
+    retryAfterSeconds: number | null;
+  } | null>(null);
 
   const queryKey = JSON.stringify({ q, enabled, page, pageSize });
   const list = useResource(
@@ -151,7 +155,9 @@ export default function UpstreamsPage() {
   const task = useTaskPolling((finished) => {
     const result = finished.result as BalanceRefreshResult | null;
     setRefreshHint(
-      result && result.hintCode ? { hintCode: result.hintCode, hint: result.hint } : null,
+      result && result.hintCode
+        ? { hintCode: result.hintCode, hint: result.hint, retryAfterSeconds: result.retryAfterSeconds ?? null }
+        : null,
     );
     message.success('余额查询完成');
     list.reload();
@@ -582,7 +588,11 @@ export default function UpstreamsPage() {
 
       {refreshHint ? (
         <div style={{ marginBottom: tokens.space.md }}>
-          <BalanceHint hintCode={refreshHint.hintCode} hint={refreshHint.hint} />
+          <BalanceHint
+            hintCode={refreshHint.hintCode}
+            hint={refreshHint.hint}
+            retryAfterSeconds={refreshHint.retryAfterSeconds}
+          />
         </div>
       ) : null}
 

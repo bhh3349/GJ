@@ -168,7 +168,9 @@ export interface BalanceTemplateTestRequest extends BalanceTestTemplate {
   keyId?: string;
 }
 
-/** 余额刷新任务的 `result`：原计数 + 失败引导两字段（非破坏新增，计数语义不变）。 */
+/**
+ * 余额刷新任务的 `result`：原计数 + 失败引导两字段（非破坏新增，计数语义不变）。
+ */
 export interface BalanceRefreshResult {
   checked: number;
   ok: number;
@@ -177,6 +179,12 @@ export interface BalanceRefreshResult {
   skipped: number;
   hintCode: HintCode | null;
   hint: string | null;
+  /**
+   * #12（共享形状，PM 钉死）：本地拒绝带回的 `Retry-After`，单位**整数秒**。
+   * `null` / 字段缺席 = 无建议 —— 展示位**不渲染**，不编默认秒数。
+   * 后端（管家 #16）把该字段带进刷新结果；`hintCode` 非 429 型时恒为 `null`。
+   */
+  retryAfterSeconds: number | null;
 }
 
 export interface Upstream {

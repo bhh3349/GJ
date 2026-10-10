@@ -1,107 +1,154 @@
 /**
- * 出口池卡片 —— **本期是一个只读占位**（契约 v1.6.4 裁定 + §15.12 锚 3 + §16.7 绑定纪律之三）。
+ * 出口池卡片 —— 消费 §7 池级差分帧 `egress_pool`（v1.6.4 登记；producer 与发射缝已随
+ * ② 收口笔 `308804a` 合 main，本卡是 ③ 接线笔）。
  *
- * 这张卡上**没有任何数据，也不该有任何数据**，三条理由按依赖顺序：
+ * 三态**不可塌缩成两态**（契约 §7 纪律一）：
+ * - **从未收到帧**（`snapshot.egressPool === null`）= 未接线 / 未发射 ⇒ **缺省不是证据**，
+ *   这里只显示"等待首帧"，**不得**渲染「0 个出口」或「全部离线」；
+ * - **`nodes: []`** = 已接线且当前 0 个出口 ⇒ 「未配置出口」空态（是事实，不是故障）；
+ * - **`nodes` 有值** = 正常渲染，N 节点自适应（长度由后端给，前端不写死、不按节点数自推池容量）。
  *
- * 1. **出口状态没有 REST 读面**。`egress_id` 不进任何 DTO；§15.1 的 `SupplierAccount` 是**穷尽**的
- *    （§15.12 锚 3 逐字写着"不加 `egressId` / 出口字段"）。所以**不能**像别的卡片那样去 `GET` 一个端点
- *    —— 没有那样一个端点。凭空造一个形状，就是这一格最贵的错：它会让"出口池有几个"变成一个
- *    看起来有来源的数字。
- * 2. **唯一的读面是 §7 的池级差分帧 `egress_pool`**，而它**本期不发射**（v1.6.4 ④：形状已冻结、
- *    生产者未落地）。接线它等于订阅一个永不到来的帧，然后在一块卡片上渲染出"0 个出口"——
- *    而"0 个出口"正是契约专门要避免的歧义：池级帧存在的全部理由，就是让「已接线且当前 0 个出口」
- *    与「根本没接线」在通道上不同形。
- * 3. **更前置的一条**：它的三个关键字段 `status` / `lastHeartbeatAt` / `exitIp` 的**生产者不存在**
- *    （`deploy/vps-egress/pool-probe.sh` 按设计是无状态的：不摘除、不回池，**心跳没有接收端**）。
- *    按 v1.5.0 写死的「**禁止先加字段、后补生产者**」，这三条必须与**心跳上报链**同一批落地 ——
- *    所以它不是一个"等后端跑起来就有"的字段，而是一整条链。
+ * 两条展示红线：
+ * 1. `exitIp ≠ expectedExitIp` 必须显式标红告警 —— 这是「填了代理但流量仍走宿主 IP」这类
+ *    静默故障**唯一的告警点**，丢了它配错代理等于全绿。
+ * 2. `status`（探活态）与 `cooldownUntil`（上游限流态）是**两种不可用**，**并列成列展示**，
+ *    不得合成"健康分"、不得用一个盖住另一个。
  *
- * 于是这张卡**只登记形状、不显示状态**：字段名照 §7 帧原样列出，并逐条标注"生产者不存在"。
- * 将来接上时的改动只有一处 —— 把帧里的 `nodes` 接过来渲染；**在此之前，"无数据源"是唯一诚实的显示**。
- *
- * 顺带一条反向纪律：本卡片**不得**渲染「0 个出口」「全部离线」这类结论。
- * 现在没有读面 ⇒ 我们不知道有几个出口，而"不知道"与"没有"是两件事（ADR-0003 同一条刀）。
+ * 前端不合成健康态：`status` 只由探活链给出，**不得**按 `lastHeartbeatAt` 的"新鲜度"自算。
+ * 断线期间不把旧帧当实时值：非 ready 时表头显式标注"快照可能已过期"。
+ * 依旧**不从 REST 取出口状态**（`egress_id` 不进任何 DTO，§15.12 锚 3）。
  */
-import { Alert, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { Alert, Empty, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
+import dayjs from 'dayjs';
+import type { ReactNode } from 'react';
 
+import type { EgressPoolNode } from '@/api/types';
+import { useLive } from '@/realtime/useLive';
 import { tokens } from '@/theme/tokens';
 
-const { Text, Paragraph } = Typography;
+const { Text } = Typography;
 
-interface EgressFieldRow {
-  /** §7 `egress_pool` 帧的字段名，原样（不翻译成别名 —— 接线上的人要按这个名字取）。 */
-  field: string;
-  meaning: string;
-  /** 生产者状态。**没有一条写"已就绪"**：本期三条关键字段全部没有生产者。 */
-  producer: string;
+function formatTime(iso: string | null): string {
+  if (iso === null) return '—';
+  // 契约发 ISO8601 UTC 绝对时刻；展示按本地时区渲染。
+  return dayjs(iso).format('HH:mm:ss');
 }
 
-const FIELDS: readonly EgressFieldRow[] = [
-  { field: 'egressId', meaning: '出口标识（不透明字符串，前端不解析）', producer: '帧本身' },
-  {
-    field: 'name',
-    meaning: '出口名（`egress_proxies.name`，唯一）',
-    producer: '建表已落（`src/db/schema.ts`）',
-  },
-  {
-    field: 'status',
-    meaning: '出口在线状态',
-    producer: '不存在 —— 心跳没有接收端',
-  },
-  { field: 'exitIp', meaning: '出口实际出口 IP', producer: '不存在 —— 心跳没有接收端' },
-  {
-    field: 'expectedExitIp',
-    meaning: '期望出口 IP（与实际的偏差即"出口漂了"）',
-    producer: '配置侧（`egress_proxies`）',
-  },
-  {
-    field: 'lastHeartbeatAt',
-    meaning: '最近一次心跳时刻',
-    producer: '不存在 —— 心跳没有接收端',
-  },
-  { field: 'cooldownUntil', meaning: '出口级冷却解除时刻', producer: '进程内注册表（重启归零）' },
-];
+function StatusTag({ node }: { node: EgressPoolNode }) {
+  const online = node.status === 'online';
+  return (
+    <Tag
+      bordered={false}
+      style={{
+        marginInlineEnd: 0,
+        background: online ? tokens.tint.success : tokens.tint.error,
+        color: online ? tokens.color.success : tokens.color.error,
+      }}
+    >
+      {online ? '在线' : '离线'}
+    </Tag>
+  );
+}
 
 export function EgressPoolCard() {
-  const columns: ColumnsType<EgressFieldRow> = [
+  const live = useLive();
+  const frame = live.egressPool;
+
+  const columns: ColumnsType<EgressPoolNode> = [
     {
-      title: '字段',
-      dataIndex: 'field',
-      width: 170,
-      render: (value: string) => (
-        <Text style={{ fontFamily: tokens.font.mono, fontSize: 12 }}>{value}</Text>
+      title: '出口',
+      dataIndex: 'name',
+      width: 160,
+      render: (value: string, node) => (
+        <Tooltip title={`egressId: ${node.egressId}（不透明键，前端不解析）`}>
+          <Text style={{ fontSize: 12, fontWeight: 600 }}>{value}</Text>
+        </Tooltip>
       ),
     },
     {
-      title: '含义',
-      dataIndex: 'meaning',
-      render: (value: string) => <Text style={{ fontSize: 12 }}>{value}</Text>,
+      title: '探活态',
+      key: 'status',
+      width: 90,
+      render: (_, node) => <StatusTag node={node} />,
     },
     {
-      title: '生产者',
-      dataIndex: 'producer',
-      width: 240,
-      render: (value: string) => {
-        const missing = value.startsWith('不存在');
+      /** 与探活态**并列**、不合并：冷却中的节点探活可以仍是 online，两列各说各的事。 */
+      title: '限流冷却',
+      key: 'cooldown',
+      width: 150,
+      render: (_, node) => {
+        if (node.cooldownUntil === null) return <Text type="secondary">—</Text>;
+        const active = dayjs(node.cooldownUntil).valueOf() > dayjs().valueOf();
         return (
           <Tag
             bordered={false}
             style={{
               marginInlineEnd: 0,
-              background: missing ? tokens.tint.warning : tokens.tint.neutral,
-              color: missing ? tokens.color.warning : tokens.color.textSecondary,
-              fontSize: 11,
+              background: active ? tokens.tint.warning : tokens.tint.neutral,
+              color: active ? tokens.color.warning : tokens.color.textTertiary,
             }}
           >
-            {value}
+            {active
+              ? `冷却至 ${formatTime(node.cooldownUntil)}`
+              : `已到期 ${formatTime(node.cooldownUntil)}`}
           </Tag>
         );
       },
     },
+    {
+      title: '出口 IP',
+      key: 'exitIp',
+      render: (_, node) => {
+        const mismatch =
+          node.exitIp !== null &&
+          node.expectedExitIp !== null &&
+          node.exitIp !== node.expectedExitIp;
+        if (mismatch) {
+          return (
+            <Space size={tokens.space.xs} wrap>
+              <Text
+                style={{
+                  fontFamily: tokens.font.mono,
+                  fontSize: 12,
+                  color: tokens.color.error,
+                  fontWeight: 600,
+                }}
+              >
+                {node.exitIp}
+              </Text>
+              <Text
+                style={{
+                  fontFamily: tokens.font.mono,
+                  fontSize: 12,
+                  color: tokens.color.textTertiary,
+                }}
+              >
+                ≠ 期望 {node.expectedExitIp}
+              </Text>
+            </Space>
+          );
+        }
+        return (
+          <Text style={{ fontFamily: tokens.font.mono, fontSize: 12 }}>
+            {node.exitIp ?? '未带回'}
+          </Text>
+        );
+      },
+    },
+    {
+      title: '最近心跳',
+      dataIndex: 'lastHeartbeatAt',
+      width: 100,
+      render: (value: string | null) => (
+        <Tooltip title={value ?? '冷启动，尚无真证据'}>
+          <Text style={{ fontFamily: tokens.font.mono, fontSize: 12 }}>{formatTime(value)}</Text>
+        </Tooltip>
+      ),
+    },
   ];
 
-  return (
+  const shell = (children: ReactNode) => (
     <div
       style={{
         border: `1px solid ${tokens.color.border}`,
@@ -110,58 +157,115 @@ export function EgressPoolCard() {
         padding: tokens.space.lg,
       }}
     >
+      {children}
+    </div>
+  );
+
+  const header = (label: string, tone: 'neutral' | 'info') => (
+    <Space size={tokens.space.sm} align="center" wrap style={{ marginBottom: tokens.space.md }}>
+      <Text style={{ fontSize: 13, fontWeight: 600 }}>出口池</Text>
+      <Tag
+        bordered={false}
+        style={{
+          marginInlineEnd: 0,
+          background: tone === 'info' ? tokens.tint.info : tokens.tint.neutral,
+          color: tone === 'info' ? tokens.color.info : tokens.color.textSecondary,
+        }}
+      >
+        {label}
+      </Tag>
+    </Space>
+  );
+
+  // ── 三态渲染 ────────────────────────────────────────────────────────────
+
+  // 态一：从未收到池帧 = 未接线 / 未发射。缺省不是证据 —— 不推断出口数量。
+  if (frame === null) {
+    return shell(
+      <>
+        {header('等待首帧', 'neutral')}
+        <Alert
+          type="info"
+          showIcon
+          style={{ background: tokens.tint.neutral, border: 'none' }}
+          message={
+            <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
+              尚未收到 §7 池级帧 <Text code>egress_pool</Text>。收不到帧只说明「未接线 /
+              未发射」—— 缺省不是证据，这里不推断出口数量，也不显示「0 个出口」或「全部离线」。
+            </Text>
+          }
+        />
+      </>,
+    );
+  }
+
+  // 态二：已接线、当前 0 个出口 = 「未配置出口」空态（这是事实，不是故障）。
+  if (frame.nodes.length === 0) {
+    return shell(
+      <>
+        {header('已接线 · 0 个出口', 'neutral')}
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description={
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              未配置出口 —— 通道已接线且回报池为空，不是离线故障。
+            </Text>
+          }
+        />
+      </>,
+    );
+  }
+
+  // 态三：有节点，正常渲染（N 自适应，不写死数量）。
+  const stale = live.status !== 'ready';
+  const anyMismatch = frame.nodes.some(
+    (n) => n.exitIp !== null && n.expectedExitIp !== null && n.exitIp !== n.expectedExitIp,
+  );
+  return shell(
+    <>
       <Space size={tokens.space.sm} align="center" wrap style={{ marginBottom: tokens.space.md }}>
         <Text style={{ fontSize: 13, fontWeight: 600 }}>出口池</Text>
         <Tag
           bordered={false}
-          style={{
-            marginInlineEnd: 0,
-            background: tokens.tint.neutral,
-            color: tokens.color.textSecondary,
-          }}
+          style={{ marginInlineEnd: 0, background: tokens.tint.info, color: tokens.color.info }}
         >
-          形状已冻结 · 本期无数据源
+          {frame.nodes.length} 个出口
         </Tag>
+        {stale ? (
+          <Tag
+            bordered={false}
+            style={{
+              marginInlineEnd: 0,
+              background: tokens.tint.warning,
+              color: tokens.color.warning,
+            }}
+          >
+            连接 {live.status} · 快照可能已过期
+          </Tag>
+        ) : null}
       </Space>
 
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: tokens.space.md, background: tokens.tint.neutral, border: 'none' }}
-        message={
-          <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-            这一格现在读不到任何出口状态，原因是三件叠在一起：出口状态不走 REST（`egress_id`
-            不进任何 DTO）；唯一读面是 §7 的池级帧 <Text code>egress_pool</Text>，而它本期不发射；
-            且其中 status / exitIp / lastHeartbeatAt 三条的
-            <Text strong style={{ fontSize: 12 }}>
-              生产者尚不存在
+      {anyMismatch ? (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: tokens.space.md, background: tokens.tint.error, border: 'none' }}
+          message={
+            <Text style={{ fontSize: 12, color: tokens.color.error }}>
+              有出口的实测 IP 与登记期望值不符 —— 可能「填了代理但流量仍走宿主 IP」。
+              这是该静默故障唯一的告警点，不可忽略。
             </Text>
-            （心跳没有接收端）。所以这里只登记字段形状，不显示任何出口状态 —— 包括不显示「0
-            个出口」：现在没有读面，我们不知道有几个出口，而「不知道」与「没有」是两件事。
-          </Text>
-        }
-      />
+          }
+        />
+      ) : null}
 
-      <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: tokens.space.sm }}>
-        下表的字段名照 §7 <Text code>egress_pool</Text> 帧原样列出（不翻译成别名）——
-        接线时按这些名字取，形状无需再对。其中「生产者不存在」的三条按 v1.5.0
-        「禁止先加字段、后补生产者」必须与<Text strong style={{ fontSize: 12 }}>心跳上报链同一批</Text>落地。
-      </Paragraph>
-
-      <Table<EgressFieldRow>
-        rowKey="field"
+      <Table<EgressPoolNode>
+        rowKey="egressId"
         size="small"
         columns={columns}
-        dataSource={[...FIELDS]}
+        dataSource={frame.nodes}
         pagination={false}
-        locale={{ emptyText: <Text type="secondary">（字段形状见契约 §7，此处不重复实现取数）</Text> }}
       />
-
-      <Tooltip title="§16.7 处置三档里的 Tier 2：出口 IP 池。DDL 已落（egress_proxies），余下是实配与标定；账号侧绑定为账号级（非 key 级）。">
-        <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: tokens.space.sm }}>
-          出口池对应的处置档位是 Tier 2（出口 IP 池）：DDL 已落，实配与标定未做。
-        </Text>
-      </Tooltip>
-    </div>
+    </>,
   );
 }

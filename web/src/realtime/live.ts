@@ -12,6 +12,7 @@ import { SESSION_EXPIRED_EVENT } from '@/api/http';
 import {
   WS_CLOSE,
   type LiveBalanceMessage,
+  type LiveEgressPoolMessage,
   type LiveErrorMessage,
   type LiveKeyHealthMessage,
   type LiveMessage,
@@ -43,6 +44,13 @@ export interface LiveSnapshot {
   /** 按 keyId 收敛的最近余额变化（验收 3：5s 内呈现）。 */
   balances: Record<string, LiveBalanceMessage>;
   tasks: Record<string, LiveTaskMessage>;
+  /**
+   * 最近一帧池级 `egress_pool`。**三态不可塌缩成两态**（契约 §7 v1.6.4 纪律一）：
+   * - `null` = 从未收到本帧 ⇒ 未接线/未发射，**缺省不是证据**，不得据此渲染「0 个出口」或「全离线」；
+   * - 非 null 且 `nodes: []` = **已接线且当前 0 个出口** ⇒ 「未配置出口」空态；
+   * - 非 null 且 `nodes` 有值 = 正常渲染（N 节点自适应，不写死数量）。
+   */
+  egressPool: LiveEgressPoolMessage | null;
   /** 服务端主动报错（`{type:"error"}`）的最近一条。 */
   lastError: LiveErrorMessage | null;
   /** 已发起的连接次数，便于排障。 */
@@ -58,6 +66,7 @@ const EMPTY: LiveSnapshot = {
   keyHealth: {},
   balances: {},
   tasks: {},
+  egressPool: null,
   lastError: null,
   attempt: 0,
 };
@@ -143,6 +152,11 @@ function handleMessage(raw: string): void {
     }
     case 'task': {
       emit({ tasks: { ...snapshot.tasks, [parsed.taskId]: parsed } });
+      break;
+    }
+    case 'egress_pool': {
+      // 整帧替换（池级一帧覆盖全池，不做按节点合并 —— 差分键就一个，没有"部分更新"这回事）。
+      emit({ egressPool: parsed });
       break;
     }
     case 'error': {

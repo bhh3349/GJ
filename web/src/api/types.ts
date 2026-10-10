@@ -811,12 +811,41 @@ export interface LiveErrorMessage {
   message: string;
 }
 
+/** §7 `egress_pool` 帧的单个节点（**终局名**，与 `src/egress/heartbeat.ts` 的 `EgressPoolNode` 逐字对应）。 */
+export interface EgressPoolNode {
+  /** **不透明字符串**，只当键用，前端不得解析其内容（契约 §7 v1.6.4）。 */
+  egressId: string;
+  /** 显示名（用户可改）—— 只作展示，不作键。 */
+  name: string;
+  /** 池化层探活态。前端**不得**按 `lastHeartbeatAt` 的新鲜度自算健康。 */
+  status: 'online' | 'offline';
+  /** 探活观测到的出口 IP；null = 本次心跳未带回。 */
+  exitIp: string | null;
+  /** 登记期望值；null = 未登记。与 `exitIp` 不等时必须显式告警。 */
+  expectedExitIp: string | null;
+  /** 最近一次真证据的绝对时刻（ISO8601 UTC）；冷启动 = null。 */
+  lastHeartbeatAt: string | null;
+  /** 上游限流冷却解除时刻。**与 `status` 是两种不可用**，并列展示、不得互盖。 */
+  cooldownUntil: string | null;
+}
+
+export interface LiveEgressPoolMessage {
+  type: 'egress_pool';
+  serverTime: Iso8601;
+  /**
+   * **池级一帧**。`[]` = 已接线且当前 0 个出口 ⇒ 「未配置出口」空态；
+   * **收不到本帧 ≠ 0 个出口**（= 未接线/未发射，缺省不是证据）。N 节点自适应，不得写死数量。
+   */
+  nodes: EgressPoolNode[];
+}
+
 export type LiveMessage =
   | LiveReadyMessage
   | LiveMetricsMessage
   | LiveKeyHealthMessage
   | LiveBalanceMessage
   | LiveTaskMessage
+  | LiveEgressPoolMessage
   | LiveErrorMessage;
 
 /** 服务端可识别的入站帧（首帧 `auth` 仅作就绪确认，**不传 token**）。 */

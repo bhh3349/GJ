@@ -10,7 +10,7 @@
  * 1. **账号池**（`GET /api/supplier-accounts?upstreamId=`）—— 账号是**主语**，套餐与 key 都挂在它下面。
  * 2. **套餐台账**（`GET /api/supplier-accounts/subscriptions`）—— 服务端那条扁平列表**自己没有主语**，
  *    所以它在那一格里按 `accountId` 分组后才可读（§15.8 第 6 问）。
- * 3. **出口池** —— **本期无 REST 读面**，只读占位；理由三条写在 `EgressPoolCard` 顶部。
+ * 3. **出口池** —— 无 REST 读面（`egress_id` 不进任何 DTO）；数据源是 §7 池级帧 `egress_pool`，三态纪律写在 `EgressPoolCard` 顶部。
  *
  * ## 批量动作：四个入口，两条纪律
  *

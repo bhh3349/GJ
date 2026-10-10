@@ -29,6 +29,7 @@ import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { WebSocket } from 'ws';
 import type { AppConfig } from '../../config.js';
+import type { EgressPoolNode } from '../../egress/heartbeat.js';
 import { openDatabase, type Db } from '../../db/database.js';
 import { buildApp } from '../app.js';
 import { bootstrapAdmin } from '../auth.js';
@@ -93,20 +94,25 @@ function makeConfig(dbPath: string): AppConfig {
     maxConcurrencyPerKey: 4,
     cooldownLadderSeconds: [0, 60, 300, 900, 1800],
     assistantModel: null,
+    egressHeartbeatInboxDir: null,
     // 余额自动同步在测试配置里默认关：本套用例不为它开后台定时器（它有自己的 spec）
     balanceSyncMinutes: 0,
     balanceSnapshotRetentionDays: 90,
   };
 }
 
-async function setup(): Promise<Harness> {
+async function setup(
+  seams: { egressPool?: () => readonly EgressPoolNode[] } = {},
+): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'live-probe-'));
   dirs.push(dir);
   const dbPath = join(dir, 'gateway.db');
   const db = openDatabase({ path: dbPath });
   // 关掉真实的 1s 推帧定时器：拍子只由 `tick(h, box, n)` 驱动。
   // 留着它的话，一条用例只要跑过 1s，屏障计数就会被它插进来的拍污染。
-  const app = buildApp({ db, config: makeConfig(dbPath), liveAutoTick: false });
+  // 默认**不注入**出口池 provider：发射缝必须能在「压根没接线」这个状态下被验，
+  // 而不是只验「接线了但池子空」—— 那是两个不同的事实（方案 A 的缺省语义）。
+  const app = buildApp({ db, config: makeConfig(dbPath), liveAutoTick: false, ...seams });
   bootstrapAdmin(db, { ADMIN_USERNAME: ADMIN_USER, ADMIN_PASSWORD: ADMIN_PASS });
 
   const res = await app.inject({
@@ -432,6 +438,72 @@ describe('WS /api/stats/live 推帧', () => {
     // 新连接的首拍推全量（它什么都没记过），此后状态没变就不该再有 key_health
     expect(box.count('key_health')).toBe(1);
     expect(box.count('metrics')).toBe(4); // 每拍恰好一帧
+  });
+
+  it('egress_pool 未接线：每拍首连发一帧 `nodes: []`，状态没变就不重复推', async () => {
+    // 方案 A 的缺省语义 —— 这条是本笔发射缝的**唯一**判据，别删：
+    // 「没接线」必须表现成**一帧空池**（生产者在场、池为空），而不是**没有帧**。
+    // 少了这一帧，前端 EgressPoolCard 会永远停在「等待数据」，而它等的东西根本不会来。
+    const h = await setup();
+    const box = await attach(h);
+
+    await tick(h, box, 1);
+    const pool = await box.waitFor('egress_pool');
+    expect(pool['serverTime']).toBeTruthy();
+    expect(pool['nodes']).toEqual([]);
+
+    await tick(h, box, 2);
+    await tick(h, box, 3);
+    await tick(h, box, 4); // 屏障：第 3 拍全部到齐
+
+    // 差分：指纹没变（仍是空池）就只该有第一帧那一条
+    expect(box.count('egress_pool')).toBe(1);
+  });
+
+  it('egress_pool 接线后：状态翻转推新帧；`cooldownUntil` 自然到期也推（不靠写入动作）', async () => {
+    // 这台状态机是可造的（provider 每次调用回什么由测试决定），所以能精确钉住
+    // 「同 tick 同一份快照」与指纹纪律。真实生产者由 heartbeat.spec.ts 判。
+    const node = (over: Partial<EgressPoolNode>): EgressPoolNode => ({
+      egressId: '10.0.0.9:8080',
+      name: 'vps-hk-1',
+      status: 'online',
+      exitIp: '203.0.113.7',
+      expectedExitIp: '203.0.113.7',
+      lastHeartbeatAt: '2026-10-09T00:00:00.000Z',
+      cooldownUntil: null,
+      ...over,
+    });
+    let current: readonly EgressPoolNode[] = [node({})];
+    const h = await setup({ egressPool: () => current });
+    const box = await attach(h);
+
+    await tick(h, box, 1);
+    const first = await box.waitFor('egress_pool');
+    expect(first['nodes']).toEqual(current);
+
+    // 一次状态翻转（在线 → 摘除）必须推新帧
+    current = [node({ status: 'offline', exitIp: null, cooldownUntil: null })];
+    await tick(h, box, 2);
+    await box.waitForFrame(
+      (f) =>
+        f['type'] === 'egress_pool' &&
+        (f['nodes'] as Array<Record<string, unknown>>)[0]?.['status'] === 'offline',
+      'egress_pool=offline',
+    );
+
+    // 冷却**自然到期**那一刻没有任何写入：指纹不带 cooldownUntil 的话，
+    // 卡片会停在「冷却中」直到下一次状态变化 —— 与 key_health 同一个坑。
+    current = [node({ status: 'online', exitIp: '203.0.113.7' })];
+    await tick(h, box, 3);
+    await box.waitForFrame(
+      (f) =>
+        f['type'] === 'egress_pool' &&
+        (f['nodes'] as Array<Record<string, unknown>>)[0]?.['status'] === 'online',
+      'egress_pool 回池',
+    );
+    await tick(h, box, 4); // 屏障
+
+    expect(box.count('egress_pool')).toBe(3);
   });
 
   it('会话在连接中途失效：4401 关连接（不是等到自然过期）', async () => {

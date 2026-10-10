@@ -26,7 +26,9 @@ import { LoginRateLimiter, bootstrapAdmin, purgeExpiredSessions } from './api/au
 import { loadConfig } from './config.js';
 import { openDatabase } from './db/database.js';
 import { pruneLogs } from './db/repo/logs.js';
+import { listEgressProxies } from './db/repo/egress.js';
 import { EGRESS_BUDGET_PLACEHOLDER, createEgressGate } from './gateway/egress.js';
+import { startHeartbeatProducer } from './egress/heartbeat.js';
 import type { EgressShadowRecord } from './egress/port.js';
 import {
   createAssistantInvoker,
@@ -105,6 +107,29 @@ async function main(): Promise<void> {
           metrics: assistantMetrics,
         });
 
+  // 出口心跳生产者（ADR-0020 决策 8 / 契约 §7 `egress_pool`）—— 发射面的数据源。
+  // 建在管理面**之前**：下面 `buildApp({ egressPool })` 要闭包引用它（用 `app.log` 会是 TDZ），
+  // 而它的 `stop()` 由冻结顺序第 1 步的 `stops` 摘（见 shutdown.ts）。
+  //
+  // 接线的三个决策：
+  //   1. **节点清单在本层读表**：`egress_proxies` 的 `active` 行 → `EgressNodeConfig`。
+  //      `heartbeat.ts` 不 import `src/db`（AGENTS.md §8），「读哪张表」留在装配层。
+  //      清单取**启动时快照**：新增/退休出口要重启进程才进池 —— 本期接受这个成本，
+  //      换来的是连败计数不会被一次改名清零（「配置变更」与「健康劣化」不进同一台机器）。
+  //   2. `gate` 传**同一个闸实例**：帧里的 `cooldownUntil` 与数据面/管理面同源，
+  //      入口 B 的探活也扣同一张 management 预算表（决策 4c）。
+  //   3. `inboxDir` 取自 config（空/缺省 = null = 入口 A 关）。入口 B（`probe`）**默认关**：
+  //      它吃 management 预算（成本口径写在 heartbeat.ts 文件头），开启要另有一笔明确决策。
+  // `nodes` 为空数组时生产者照跑：`poolSnapshot()` 回 `[]`，发射面据此发「未配置出口」的空池帧。
+  const egressProducer = startHeartbeatProducer({
+    gate: egress,
+    nodes: listEgressProxies(db)
+      .filter((row) => row.status === 'active')
+      .map((row) => ({ egressId: row.id, name: row.name, proxyUrl: row.url })),
+    inboxDir: config.egressHeartbeatInboxDir,
+    onLog: (line) => gateway.app.log.info({ egressHeartbeat: line }, '出口心跳证据'),
+  });
+
   // 管理面：`droppedEvents` 接到网关侧的事件队列上（见文件头第 4 条）。
   // 只传一个取值函数而不是 sink 本身：管理面只需要那一个**累计数**，
   // 拿到 sink 就等于拿到了往事件流里写的能力 —— 观测面不该有写入口。
@@ -118,6 +143,9 @@ async function main(): Promise<void> {
     assistantMetrics,
     // 同一个闸实例（见上面"造一次、注入两处"）—— 决策 4c 的验收就压在"这是同一个对象"上。
     egress,
+    // §7 `egress_pool` 发射缝（方案 A）：闭包现取 producer 的 `poolSnapshot()`（同步、无副作用）。
+    // 刻意不传数组：状态机每拍都在变（收件箱证据进来就翻），发出去的必须是**这一拍**的快照。
+    egressPool: () => egressProducer.poolSnapshot(),
   });
 
   if (config.assistantModel === null) {
@@ -125,6 +153,7 @@ async function main(): Promise<void> {
   } else {
     app.log.info({ model: config.assistantModel }, '内置助手已接线');
   }
+
 
   // 维护任务一律 try/catch 吞掉异常：清垃圾失败不该把整台服务带走，
   // 下一次 tick 还会再来一遍。
@@ -161,6 +190,8 @@ async function main(): Promise<void> {
     app,
     db,
     timers,
+    // 冻结顺序第 1 步（PM 裁定 2）：先摘节拍再走 2/3/4，关停期间不再多打一次上游。
+    stops: [egressProducer],
     log: app.log,
     exit: (code) => process.exit(code),
   });

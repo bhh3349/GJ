@@ -83,6 +83,7 @@ function makeConfig(dbPath: string, over: Partial<AppConfig> = {}): AppConfig {
     maxConcurrencyPerKey: 4,
     cooldownLadderSeconds: [0, 60, 300, 900, 1800],
     assistantModel: null,
+    egressHeartbeatInboxDir: null,
     balanceSyncMinutes: 0,
     balanceSnapshotRetentionDays: 90,
     ...over,

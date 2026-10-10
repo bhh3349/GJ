@@ -93,6 +93,7 @@ function makeConfig(dbPath: string, over: Partial<AppConfig> = {}): AppConfig {
     maxConcurrencyPerKey: 4,
     cooldownLadderSeconds: [0, 60, 300, 900, 1800],
     assistantModel: null,
+    egressHeartbeatInboxDir: null,
     // 默认关：本文件不测调度器节奏，只测路由。要测 `auto.enabled=true` 的用例自己覆盖。
     balanceSyncMinutes: 0,
     balanceSnapshotRetentionDays: 90,

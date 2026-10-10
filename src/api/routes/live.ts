@@ -23,6 +23,11 @@
 import type { FastifyBaseLogger, FastifyInstance, FastifyRequest } from 'fastify';
 import type { WebSocket } from 'ws';
 import { computeGlobalBalance } from '../../db/balance.js';
+// **type-only** import（方案 A 的关键约束）：发射面只消费 `EgressPoolNode` 这个**形状**，
+// 不在运行时依赖心跳生产者 —— 否则 `src/api/` 会在模块图上拉起 `src/egress/heartbeat.ts`
+// 的文件 IO 与定时器，而那件事属于接线层（`src/server.ts`）。终局名由 `heartbeat.ts` 持有，
+// 契约 §7 冻结；这里引用它而不是重抄一遍，是为了让"字段漂移"在编译期就红。
+import type { EgressPoolNode } from '../../egress/heartbeat.js';
 import type { Db } from '../../db/database.js';
 import { listLiveKeyStates } from '../../db/repo/keys.js';
 import { listLiveTasks } from '../../db/repo/tasks.js';
@@ -133,18 +138,50 @@ interface DiffFrame {
   json: string;
 }
 
+/** 发射缝的读面形状：**同步、无副作用**（契约 §7「同一 tick、同一份出口快照」）。 */
+export type EgressPoolProvider = () => readonly EgressPoolNode[];
+
+/** 池级帧的**唯一**差分键（契约 §7 v1.6.4：一帧覆盖全池，不是每出口一帧）。 */
+export const EGRESS_POOL_FRAME_ID = 'egress:pool';
+
+/**
+ * 池级帧的指纹。**必带 `lastHeartbeatAt` 与 `cooldownUntil`**（契约 §7 四条纪律之四）：
+ * 前者每 30s 一次心跳 = 真变化，该推；后者会**自然到期**，那一刻没有任何写入动作、
+ * 只有时间流逝 —— 与 `key_health` 同一个坑、同一个解法。
+ * 另带 `status` / `exitIp` / `expectedExitIp`（三条都是终局值），以及 `name`：
+ * 改名是用户动作，不带进指纹的话卡片会停在旧名字直到下一次状态变化。
+ * 顺序按 `egressId` 排定 —— 指纹必须与 Map 迭代顺序无关，否则一次进程重启就会白推一帧。
+ */
+function egressPoolSig(nodes: readonly EgressPoolNode[]): string {
+  return [...nodes]
+    .sort((a, b) => (a.egressId < b.egressId ? -1 : a.egressId > b.egressId ? 1 : 0))
+    .map((n) => `${n.egressId}|${n.status}|${n.name}|${n.exitIp ?? ''}|${n.expectedExitIp ?? ''}|${n.lastHeartbeatAt ?? ''}|${n.cooldownUntil ?? ''}`)
+    .join(';');
+}
+
 interface TickFrames {
   metricsJson: string;
   health: DiffFrame[];
   balance: DiffFrame[];
   task: DiffFrame[];
+  /**
+   * 池级帧（**恒长 1**，见 `egressPoolFrames`）。
+   * 刻意不是 `[] | [frame]`：契约要求「`nodes` 为空也要注册」，而"空数组"这个形状
+   * 会让 `tickNow` 里的 `live` 集合注册退化成条件分支 —— 那条分支就是"0 个出口 = 零帧"
+   * 这个 bug 的诞生地。类型上收不掉的错误，就别留给调用方自觉。
+   */
+  egressPool: DiffFrame[];
 }
 
 /**
  * 一次 tick 的全部快照。**每个 tick 只查一遍库**，然后分发给所有客户端 ——
  * 每客户端各查一次的话，连接数就是查询数的乘数。
  */
-function buildTickFrames(db: Db, serverTime: string): TickFrames {
+function buildTickFrames(
+  db: Db,
+  serverTime: string,
+  egressPool: EgressPoolProvider,
+): TickFrames {
   const overview = computeOverview(db, WINDOW_SECONDS);
   const global = computeGlobalBalance(db);
 
@@ -208,7 +245,31 @@ function buildTickFrames(db: Db, serverTime: string): TickFrames {
     }),
   }));
 
-  return { metricsJson, health, balance, task };
+
+  // 池级帧（方案 A 发射缝的唯一产出点）。**恒长 1**，且未接线也发 —— 见 TickFrames.egressPool
+  // 的注释：「0 个出口 = 零帧」这个 bug 的诞生地就是把它写成条件分支。
+  // 读面是同步的 provider：本 tick 的所有帧共享同一条 serverTime，
+  // 出口快照与 metrics 因此同拍，前端不必猜两帧的先后。
+  const egressFrames: DiffFrame[] = egressPoolFrames(egressPool(), serverTime);
+
+  return { metricsJson, health, balance, task, egressPool: egressFrames };
+}
+
+/**
+ * 造**一帧**池级帧：一帧覆盖全池（契约 §7 v1.6.4），不是每出口一帧。
+ *
+ * `nodes: []` 也要注册差分键：它说的是「当前没有出口」这件事本身，
+ * 从有到零是一次真变化，前端据此切「未配置出口」空态。
+ * 空数组在 JSON 里是 `"nodes":[]`（有生产者、池为空），与字段缺失是两回事。
+ */
+function egressPoolFrames(nodes: readonly EgressPoolNode[], serverTime: string): DiffFrame[] {
+  return [
+    {
+      id: EGRESS_POOL_FRAME_ID,
+      sig: egressPoolSig(nodes),
+      json: JSON.stringify({ type: 'egress_pool', serverTime, nodes }),
+    },
+  ];
 }
 
 interface LiveClient {
@@ -248,6 +309,8 @@ class Hub implements LiveHub {
     private readonly log: FastifyBaseLogger,
     /** false = 不装真实定时器（拍子只由 `tickNow()` 驱动，见 `LiveHubOptions`）。 */
     private readonly autoTick: boolean = true,
+    /** 发射缝（方案 A）：每拍现取出口池快照；缺省 = 未接线 = 每拍空 nodes。 */
+    private readonly egressPool: EgressPoolProvider = () => [],
   ) {}
 
   size(): number {
@@ -307,7 +370,7 @@ class Hub implements LiveHub {
 
     let frames: TickFrames;
     try {
-      frames = buildTickFrames(this.db, nowIso());
+      frames = buildTickFrames(this.db, nowIso(), this.egressPool);
     } catch (err) {
       // 一帧失败**不关连接**：断线会让前端把整块仪表盘降级成"已断开·重连中"，
       // 而实际上只是这一秒的聚合查询出了错，下一 tick 大概率就恢复了。
@@ -322,6 +385,9 @@ class Hub implements LiveHub {
     for (const f of frames.health) live.add(f.id);
     for (const f of frames.balance) live.add(f.id);
     for (const f of frames.task) live.add(f.id);
+    // 池级帧恒在（哪怕 nodes 为空）：它的差分键不随出口增减消失，
+    // 从 live 集合里漏掉它 = 下一拍会被 seen 清理剪除，「池从有到空」那次变化就丢了。
+    for (const f of frames.egressPool) live.add(f.id);
 
     for (const client of [...this.clients.values()]) {
       if (client.socket.readyState !== WS_OPEN) {
@@ -355,6 +421,7 @@ class Hub implements LiveHub {
       for (const f of frames.health) this.pushIfChanged(client, f);
       for (const f of frames.balance) this.pushIfChanged(client, f);
       for (const f of frames.task) this.pushIfChanged(client, f);
+      for (const f of frames.egressPool) this.pushIfChanged(client, f);
 
       for (const key of [...client.seen.keys()]) {
         if (!live.has(key)) client.seen.delete(key);
@@ -375,10 +442,16 @@ export interface LiveHubOptions {
    * 测试传 `false`，把拍子完全交给 `tickNow()` —— 理由与 `BuildAppOptions.liveAutoTick` 同。
    */
   autoTick?: boolean;
+  /**
+   * 出口池读面（方案 A 的注入点）。**缺省 = 未接线**：每拍发 `nodes: []`。
+   * 发射面只经 type-only import 消费形状，运行时不依赖心跳生产者 ——
+   * 实例由接线层（`src/server.ts` → `buildApp`）持有并注入。
+   */
+  egressPool?: EgressPoolProvider;
 }
 
 export function createLiveHub(db: Db, log: FastifyBaseLogger, options: LiveHubOptions = {}): LiveHub {
-  return new Hub(db, log, options.autoTick ?? true);
+  return new Hub(db, log, options.autoTick ?? true, options.egressPool ?? (() => []));
 }
 
 /**

@@ -206,6 +206,23 @@ IP 级 429  →  key₁ 被冷 60s  →  引擎换 key₂ 重试
 这与决策 2 是同一把刀（**谁没错，不给谁记过**）的另一个切面，但**证据不足以判断**：
 **不据此改 `classify`、不据此动冷却**，等带 key 往返。
 
+## 决策 8：出口池心跳生产者的状态机参数（v1.7.1 补遗，随接线笔落盘）
+
+（2026-10-09 落盘；生产者本体先行提交（`c113b1a`，`src/egress/heartbeat.ts`）并引用本节 —— 本节就是它等的那份"冻结依据"。PM 代路由者落盘，Bo 既有技术授权，一句话可推翻。）
+
+§7 `egress_pool` 帧的 `status` / `exitIp` / `lastHeartbeatAt` 三条冻结字段需要一个生产者（v1.6.4 那句「生产者不存在」由此关闭）。本节冻结它的**状态机参数与证据语义**：
+
+1. **节奏三参数（保守起步值，标定输入到了只改数、不改结构）**：心跳 **30s** 一拍（`HEARTBEAT_INTERVAL_MS`，契约 §7 的 30s）；连续 **3** 次失败摘除（`HEARTBEAT_EVICT_AFTER_FAILURES`）；摘除后 **5min 滞回**回池（`HEARTBEAT_REJOIN_HYSTERESIS_MS`，滞回期内的成功**不回池**、但记 IP，也不推翻失败计数）。
+2. **冷启动 = `online` + `null`**（exitIp / lastHeartbeatAt 皆 null）。摘除/回池是**内存态、不落库**（ADR-0021 决策 9(4)）：重启回到冷启动是**契约内行为**，不是 bug；写进 `egress_proxies.status` 才会造出第二套健康语义。
+3. **`status` 只由证据翻转，不做新鲜度推断**。契约 §7 禁前端按 `lastHeartbeatAt` 新鲜度算健康；同一把刀对生产者成立：心跳断供、进程停摆、收件箱断写都**不**翻转状态 —— 停摆时该看到的是 `lastHeartbeatAt` 变旧，**不是**状态翻转。`lastHeartbeatAt` = 最近一次**真证据**的绝对时刻（ISO8601 UTC）；**失败证据照记**（心跳到了，只是报告坏消息），连败 +1。
+4. **本地合成拒绝 = 零证据**（决策 4a 同源）：入口 B 探活走 `fetchFor(egressId,'management')`，"预算耗尽 / 正在冷却"会以**合成 429** 回来 —— 那是我们自己拒的，不是对面挂了。判据唯一处 `isLocalEgressReject()`（字面量归 `src/egress/port.ts`），被拒**不计连败、不进帧**，只在内存计数供验收。缺了这条，一次人工全量刷新就能把整池出口摘除（ADR-0011 §4 修掉的错误同形）。
+5. **两个证据入口、一台状态机**（`applyEvidence` 唯一入口）：
+   **A 文件收件箱**（默认、推荐；`EGRESS_HEARTBEAT_INBOX_DIR` 配了才开）：VPS 侧 `pool-probe.sh --json` 由 systemd timer 定时写入，生产者每拍取「最新且未吃过的那份」（内容 SHA-256 记账防重吃）—— **0 次上游请求**，不占 TierFlow 配额；证据时刻取文档 `checkedAt`（VPS 真跑的那一刻），不是网关读到它的时刻 —— 收件箱天然滞后，用读取时刻会把传输延迟抹平成 0。
+   **B 进程内探活**（默认关）：接线传 `probe: true` 才开。代价写死：它吃 `management` 预算（capacity 5/60s − reserveForData 1 = 4 枚），两节点按 30s 一拍就是 4 枚/60s，会把 /test 与余额刷新的额度吃干 —— **开启要另有一笔明确决策**。
+   同一拍 **A 优先**：A 已给证据的节点不再跑 B（一份证据 = 一次采样，叠加会把「连续 3 次失败」变成「连续 3 拍 6 个样本」，节奏口径当场失真）。
+6. **导出面（七字段终局名，别改名）**：`startHeartbeatProducer` / `HeartbeatProducer.{setIntervalMs|tick|poolSnapshot|stop}` / `EgressPoolNode`（`egressId|name|status|exitIp|expectedExitIp|lastHeartbeatAt|cooldownUntil`，与契约 §7 字段表逐字对应）。`poolSnapshot()` **同步、无副作用**；`cooldownUntil` 从 `EgressGate.cooldownUntil()` **现取**（探活态与上游限流态各有唯一事实源，两种不可用并列展示、不互相盖掉）。`stop()` 是同步清定时器形状，适配 `ShutdownTarget.stops?`。
+7. **落位与依赖**：`src/egress/heartbeat.ts`，**不 import `src/db`**（AGENTS.md §8）—— 节点清单由接线层（`src/server.ts`）注入，「读哪张表」留在装配层；也不 import `src/api` / `src/gateway`（同 §8 反向依赖禁令）。
+
 ## 影响
 
 - **契约**：新增 §16.7；§16.4 加一句反向指引；§15.5 依据降级（值不变）。

@@ -946,3 +946,14 @@ CREATE TABLE IF NOT EXISTS egress_proxies (
 | 4 | 自拒绝要不要写出口冷却（决策 5 表内第 1 行，A/B 并列） | **A：不写冷却**。连带三条语义照决策 5 写成文（阶梯只由上游证据推进 / 数据面暴露窗口降为"到下一枚 token" / **§7 帧不因桶拒绝发射**） |
 
 **仍在 PM 手上的**：无。放行即按"落地清单"执行（契约正文按 ADR-0017 补遗 5 的九条落，代码按影响表两条车道各自动工）。
+
+## 补遗 v1.7.1：生产者落位与发射面接线（2026-10-09，随接线笔落盘）
+
+（决策 8 的**参数冻结**在 ADR-0020；本节只记**落位与接线**。生产者本体 = `c113b1a`，接线笔随本补遗同批提交。PM 代路由者落盘，Bo 既有技术授权，一句话可推翻。）
+
+1. **生产者落位**：`src/egress/heartbeat.ts`（参数见 ADR-0020 决策 8）。`gate` 与数据面/管理面是**同一个闸实例** —— `src/server.ts` 造一次、注入**三处**：网关装配、`buildApp({ egress })`、`startHeartbeatProducer({ gate })`。决策 4c 的"造一次"延伸到第三处：`cooldownUntil` 帧字段同源、入口 B 的探活扣同一张 management 预算表。
+2. **节点清单 = 接线层读表**：`src/server.ts` 从 `egress_proxies` 读 `status='active'` 行，映射成 `EgressNodeConfig`（egressId=id / name / proxyUrl=url）注入；`heartbeat.ts` 不 import `src/db`（AGENTS.md §8）。本期取**启动时快照**：新增/退休出口要重启进程才进池/出池 —— 接受这个成本，换来连败计数不会被一次改名清零（「配置变更」与「健康劣化」不进同一台状态机）。`nodes` 为空数组时生产者照跑：`poolSnapshot()` 回 `[]`，发射面据此发「未配置出口」空池帧。
+3. **发射缝 = 方案 A（PM 裁定，Bo 授权技术自决）**：`src/api/app.ts` `BuildAppOptions.egressPool?`（`() => readonly EgressPoolNode[]`）+ `src/api/routes/live.ts` tick 注入。**type-only import**（发射面只消费形状，运行时零依赖生产者 —— 管理面的模块图里没有 `heartbeat.ts` 的文件 IO 与定时器）。**缺省 = 未接线 = 每拍发 `nodes: []`**（不是"没有帧" —— 「没接」和「接了但池空」必须可区分）。发射面约 20 行 + 1 条 spec（`live.spec.ts`「未接线发空帧」）。
+4. **停机 = `ShutdownTarget.stops?: readonly Stoppable[]`（PM 裁定 2）**：`producer.stop()` 与维护定时器同处冻结顺序第 1 步；不用 `process.on('exit')`（win32 无 POSIX 信号语义、单测够不着，且会绕开 `shutdown.ts` 那条被 spec 钉死的判据顺序）。单 `stop()` 抛出不中断链条（既有判据；缺省空数组不改变既有调用方与既有判据的行为）。
+5. **config**：`EGRESS_HEARTBEAT_INBOX_DIR`（`AppConfig.egressHeartbeatInboxDir`；空/未设 = `null` = 入口 A 关，沿 `ADMIN_TOKEN` 空串纪律）；入口 B（`probe`）默认关（吃 management 预算，成本口径在 `heartbeat.ts` 文件头，开启另有一笔决策）。
+6. **验收**：四闸（typecheck / test / build / check:secrets）+ `live.spec.ts` 两条 `egress_pool` 用例（未接线发空池帧；状态翻转与 `cooldownUntil` 自然到期推新帧）+ 红线（账号相关信息）0 命中。一帧**真实** WS 发射样例另行产出（运行时注入，不进仓不贴群），形状样例不是验收物。

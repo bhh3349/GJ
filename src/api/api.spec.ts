@@ -92,6 +92,7 @@ function makeConfig(dbPath: string): AppConfig {
     cooldownLadderSeconds: [0, 60, 300, 900, 1800],
     // 助手未接线：本套用例只覆盖管理面 REST，助手端点有自己的 spec（routes/assistant.spec.ts）
     assistantModel: null,
+    egressHeartbeatInboxDir: null,
     // 余额自动同步在测试配置里默认关：本套用例不为它开后台定时器（它有自己的 spec）
     balanceSyncMinutes: 0,
     balanceSnapshotRetentionDays: 90,

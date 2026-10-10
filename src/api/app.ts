@@ -20,6 +20,7 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import type { AppConfig } from '../config.js';
 import type { Db } from '../db/database.js';
 import { NO_ASSISTANT_METRICS } from '../db/observability.js';
+import type { EgressPoolNode } from '../egress/heartbeat.js';
 import { permissiveEgressGate, type EgressGate } from '../egress/port.js';
 import { unwiredAssistantInvoker, type AssistantModelInvoker } from './assistant-port.js';
 import { LoginRateLimiter, requireSession, type SessionInfo } from './auth.js';
@@ -102,6 +103,11 @@ export interface ApiContext {
    * 在批二。所以现在断言它的唯一有意义的东西是**实例身份** —— 见 `resolveEgressGate`。
    */
   egress: EgressGate;
+  /**
+   * 出口池读面（§7 发射缝）。`null` = 未接线：live hub 挂缺省 provider，每拍发 `nodes: []`。
+   * 与 `egress` 分开：预算闸与「池现在什么状态」是两件事，注入点也分属两笔接线。
+   */
+  egressPool: (() => readonly EgressPoolNode[]) | null;
 }
 
 /** 唯一免鉴权路径（契约 §0.5）。用 method+path 精确匹配，不用前缀。 */
@@ -247,6 +253,15 @@ export interface BuildAppOptions {
    * 与 supplier.fetchImpl 同一条纪律：缺省在装配层填（见 registerEgressRoutes 默认参），路由层必填。
    */
   egressProbeFetch?: typeof fetch;
+  /**
+   * 出口池读面（§7 `egress_pool` 发射缝，方案 A）。缺省 = **未接线**：每拍发 `nodes: []`。
+   *
+   * 与 `egress`（预算闸）刻意分开成两个选项：闸管的是「出站花多少预算」，
+   * 这个 provider 答「出口池现在什么状态」。形状经 type-only import 消费（见 routes/live.ts），
+   * 管理面的模块图里**没有** `src/egress/heartbeat.ts` 的运行时依赖 ——
+   * 实例由接线层持有（同一份 `poolSnapshot()`），这里只收读函数。
+   */
+  egressPool?: () => readonly EgressPoolNode[];
 }
 
 /**
@@ -310,6 +325,8 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     supplier,
     // 同一条纪律：默认值只在这一处填，业务代码拿到的永远是填好的闸。
     egress: resolveEgressGate(opts.egress),
+    // 发射缝（§7）：缺省未接线 = live 通道每拍发 nodes:[]（见 routes/live.ts）。
+    egressPool: opts.egressPool ?? null,
   };
 
   app.decorateRequest('auth', null);
@@ -401,7 +418,12 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   //   2. WS 路由必须写在 `register` 回调里（见下面那段）。这不是风格问题 ——
   //      直接 `registerLiveRoutes(app, ...)` 会让这条路由**静默地变成一个普通 GET**。
   //   3. 其余路由不这么写，因为它们的注册只依赖已经就绪的钩子，与加载次序无关。
-  const liveHub = createLiveHub(db, app.log, { autoTick: opts.liveAutoTick ?? true });
+  const liveHub = createLiveHub(db, app.log, {
+    autoTick: opts.liveAutoTick ?? true,
+    // 未接线（null）= 传 undefined，hub 落回缺省 provider 发空池帧；
+    // 刻意不在这一层编一个假快照 —— 「没接」和「接了但池空」必须可区分。
+    egressPool: ctx.egressPool ?? undefined,
+  });
   app.decorate('liveHub', liveHub);
   app.register(fastifyWebsocket, {
     preClose: (done) => {

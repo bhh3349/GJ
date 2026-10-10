@@ -68,6 +68,7 @@ function makeConfig(dbPath: string): AppConfig {
     cooldownLadderSeconds: [0, 60, 300, 900, 1800],
     // 助手未接线：本探针不碰 /api/assistant/*
     assistantModel: null,
+    egressHeartbeatInboxDir: null,
   };
 }
 

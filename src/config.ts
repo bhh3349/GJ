@@ -58,6 +58,23 @@ export interface AppConfig {
    * （而不是挂到超时），启动日志里也有一条 warn 说明原因。
    */
   assistantModel: string | null;
+  /**
+   * 出口心跳**文件收件箱**目录（ADR-0020 决策 8 的入口 A）。**空 / 未设 = `null` = 入口 A 关闭**。
+   *
+   * 为什么是**目录**而不是单个文件路径：`pool-probe.sh --json` 由项目服务器侧的 systemd timer
+   * **整份覆写**（当前 30s 一档），生产者每拍取「最新且没吃过的那份」（按内容 SHA-256 记账）。
+   * 给它一个固定文件名 = 写入方与读取方在同一个 inode 上赛跑，半截 JSON 会被读走。
+   *
+   * 为什么**缺省关闭**：入口 A 是「有人配了出口池」才成立的事实。默认给一个目录会让每台开发机
+   * 都起一个周期性 `readdir` 的定时器，而它对没配出口的机器**什么也证明不了**。
+   * 空串按"未配置"处理（与 `ADMIN_TOKEN` / `ASSISTANT_MODEL` 同一条纪律）：
+   * `EGRESS_HEARTBEAT_INBOX_DIR=` 是部署脚本里最常见的"这行先留着"写法，把它当成一个空目录名
+   * 会让入口 A 静默启成一个永远读不到的监视器 —— 那种"配了但没生效"比拒绝启动难查得多。
+   *
+   * 本字段只被**接线层**（`src/server.ts`）读：`src/egress/heartbeat.ts` 不解释环境变量，
+   * 也不 import `src/db`（AGENTS.md §8）—— 它收的是**已解析的目录字符串或 null**。
+   */
+  egressHeartbeatInboxDir: string | null;
 }
 
 /**
@@ -222,5 +239,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     // 空串按"未配置"处理（同两把令牌的写法）：`ASSISTANT_MODEL=` 是部署脚本里最常见的
     // "这一行先留着"写法，把它当成一个叫空字符串的模型名会让助手静默走 503。
     assistantModel: (env['ASSISTANT_MODEL'] ?? '').trim() === '' ? null : (env['ASSISTANT_MODEL'] ?? '').trim(),
+    egressHeartbeatInboxDir: (env['EGRESS_HEARTBEAT_INBOX_DIR'] ?? '').trim() === '' ? null : (env['EGRESS_HEARTBEAT_INBOX_DIR'] ?? '').trim(),
   };
 }

@@ -252,7 +252,7 @@ describe('egressIdOfUrl（原 egressHostOf fixture 表整张迁来）', () => {
     assert.match(source, /createGatewayRuntime\(\{[^}]*\begress\b[^}]*\}\)/, '数据面（网关装配）拿到它');
     assert.match(source, /buildApp\(\{[^}]*\begress\b[^}]*\}\)/, '管理面（`ApiContext.egress`）拿到的是同一个变量');
     assert.match(source, /EGRESS_BUDGET_PLACEHOLDER/, '预算值引用端口那一份，不在这里抄数字（标定只改一处）');
-    assert.ok(!/mode:\s*'active'/.test(source), '判据本期只记不动 —— 接线层不得顺手放行（决策 10(6)）');
+    assert.match(source, /mode:\s*'active'/, '⑧ 转正：判据真正启用，接线层显式注入 active（PM 裁定 1）');
   });
 });
 

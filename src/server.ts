@@ -57,13 +57,15 @@ async function main(): Promise<void> {
   // 预算值引用 `EGRESS_BUDGET_PLACEHOLDER` 这**一份**常量，不在这里抄数字：
   // 标定回填时"只改数、不改结构"（决策 8），抄第二遍就等于标定只改到了一半。
   //
-  // **mode 保持缺省 `'shadow'`**：判据本期只记不动（决策 10(6)），放行要另有一笔；
-  // 回执里不得把这一步写成"判据已生效"。
+  // **mode: 'active'**（⑧ 转正，PM 裁定 1）：判据从此真正启用 —— 上游确认的出口级 429
+  // 会真的置起冷却，§7 `egress_cooldown` 帧从此开始发射（v1.4.9「本期不发射」由本笔翻篇）。
+  // 判据照 §16.7.3 v6 `distinctAccounts` 窗口化落（同出口 60s 滑动窗内 ≥3 个不同账号）。
   //
   // shadow 记录的去处在下面 `logShadow` 那一跳 —— 见那里的注释（为何要晚绑到网关 app 的 logger）。
   let logShadow: (record: EgressShadowRecord) => void = () => {};
   const egress = createEgressGate({
     budget: EGRESS_BUDGET_PLACEHOLDER,
+    mode: 'active',
     onShadow: (record) => logShadow(record),
   });
 

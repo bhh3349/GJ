@@ -126,6 +126,21 @@ export const egressRateLimitedError = (retryAfterSec: number): GatewayError =>
   );
 
 /**
+ * 503 `NO_AVAILABLE_EGRESS`（契约 §10 v1.7.0 行 / ADR-0021 决策 9(5) v9·v10）：绑定的出口全部
+ * `retired`（或池启用后零登记）⇒ 候选集合**永久为空**。§10 里**唯一**「只能改配置」的 503：
+ * **码值级永不带 `Retry-After`**（等待无效，v10 不变量①），**不回落宿主直连**。
+ * 0 次真实尝试、不计 key 健康、不写出口冷却。与 `poolMisconfiguredError`（`NO_AVAILABLE_KEY`）
+ * 同族不同码：那边是「密文/配置异常」，这边是「池子里没有活出口」。
+ */
+export const noAvailableEgressError = (deadCandidates: number): GatewayError =>
+  new GatewayError(
+    503,
+    GATEWAY_ERROR_CODES.NO_AVAILABLE_EGRESS,
+    `no active egress binding: ${deadCandidates} candidate(s) bound to retired/absent egress`,
+    'server_error',
+  );
+
+/**
  * 0 次真实尝试且非纯饱和：密文缺失/解析不到等配置侧异常。
  * 复用 `NO_AVAILABLE_KEY`(503) 不新增码值 —— 对客户端而言「池里没有能派发的 key」与「一把都选不出来」
  * 是同一种处置（别重试到这个组上）；归因差别在 message 里给值班看。见 ADR-0011。

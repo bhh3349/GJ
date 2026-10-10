@@ -26,7 +26,7 @@ import type { EgressFetchFor, EgressGate } from '../egress/port.js';
 // 出口预算的 fetch 装饰器（ADR-0021 决策 4 / 4a）：**唯一集散点**。本文件不自己写 `reserve`，
 // 只用它包住 `doFetch` —— 两条车道的七类出站最终都收敛到同一个装饰器上。
 import { createEgressFetch, isLocalEgressReject } from '../egress/fetch-gate.js';
-import { GatewayError, GATEWAY_ERROR_CODES, POOL_SATURATED_RETRY_AFTER_SEC, egressRateLimitedError, noAvailableKeyError, openAIError, poolMisconfiguredError, poolSaturatedError, upstreamError } from './errors.js';
+import { GatewayError, GATEWAY_ERROR_CODES, POOL_SATURATED_RETRY_AFTER_SEC, egressRateLimitedError, noAvailableEgressError, noAvailableKeyError, openAIError, poolMisconfiguredError, poolSaturatedError, upstreamError } from './errors.js';
 import type {
   ErrorEventEntry,
   ErrorEventSink,
@@ -74,6 +74,18 @@ export interface EngineOptions {
    * （决策 4c）—— 引擎这边不认识预算数值，也就不可能自己编一套。
    */
   egress?: EgressGate;
+  /**
+   * 出口池判据缝（ADR-0021 决策 9(5) / 装配层注入方案 A）：「这个出口此刻在不在活集」，
+   * 装配层**请求期现查**（判据 = `egress_proxies` 行数与各行 `status`；引擎**不认识库**，
+   * AGENTS.md §8）。返回 `false` 的候选按**死绑定**跳过；全部候选都死 ⇒ 503
+   * `NO_AVAILABLE_EGRESS`（不带 `Retry-After`、不回落宿主直连）；与冷却/饱和混现 ⇒
+   * 429 优先（那边有确定性恢复时刻）。
+   *
+   * **缺省不注入 = 恒活**：回调根本不被调用，行为与未接池时逐字节相同（决策 7「接缝 ≠ 修」）。
+   * 判据抛异常**不捕获**：判据炸了还放行 = 决策 9(5) 点名的「静默回落」，宁炸勿瞒。
+   * `egress_id IS NULL`（账号级未绑）是配置事实，**不经过本缝**、照常走宿主出口。
+   */
+  egressSelectable?: (egressId: string) => boolean;
   /** 逐次尝试的观测钩子（指标/日志用，抛异常会被吞掉） */
   onAttempt?: (event: AttemptEvent) => void;
   /**
@@ -166,6 +178,8 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
   // 出口级状态（§16.7）：未注入时用**缺省闸**（恒放行 + 恒判 key 级）——
   // 这不等于"内部建了一份冷却表"：引擎不持有出口状态，状态归接线层注入的那个实例。
   const egress = options.egress ?? permissiveEgressGate;
+  // 池判据缺省 = 恒活（未注入时回调不被调用，零漂移；见 EngineOptions.egressSelectable）
+  const egressSelectable = options.egressSelectable ?? (() => true);
 
   /**
    * 数据面出站取件（ADR-0021 决策 4c）：`egressId → 绑定了预算闸的 fetch`。
@@ -337,6 +351,9 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
     // 与 key 级冷却的分野：key 级「换一把就好」，出口级「换一把必然再撞」。
     let skippedEgress = 0;
     let egressRetryAfterMs = 0; // 上述跳过里最长的剩余冷却 → 回给客户端的 Retry-After
+    // 死绑定计数（决策 9(5)）：绑定出口全 retired / 已从池摘除 ⇒ 该候选**永远**选不出。
+    // 与「现在用不了」的冷却/饱和（429 + Retry-After）分型；全部候选都死 ⇒ 503 NO_AVAILABLE_EGRESS。
+    let skippedEgressDead = 0;
 
     for (const candidate of candidates) {
       if (attempts >= maxAttempts) break;
@@ -356,6 +373,14 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
         // 密文缺失 / key 已被删：配置侧问题，不计 key 失败
         skippedUnresolvable += 1;
         pool.endAttempt(candidate.keyId);
+        emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'skipped' });
+        continue;
+      }
+
+      // 死绑定分型（决策 9(5)，方案 A 判据缝）：装配层判「这个出口还在不在活集」。放在并发
+      // 占位**之前**——永远选不出的候选不占 `beginAttempt`/`endAttempt`；判据纯只读、零副作用。
+      if (target.egressId !== null && !egressSelectable(target.egressId)) {
+        skippedEgressDead += 1;
         emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'skipped' });
         continue;
       }
@@ -628,6 +653,15 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
     //   - attempts === 0 且有候选：全是「跳过」—— 分饱和与配置异常两型，都不许报 502
     //   - 真实失败发生在中途、后续候选被剪掉：lastReason 已带住，走 502/504
     if (attempts === 0 && attemptableCandidates > 0) {
+      // 决策 9(5)：全部候选都挂着**死绑定** ⇒ 503 NO_AVAILABLE_EGRESS —— §10 里唯一「只能改配置」
+      // 的 503：**不带 Retry-After**（等待无效）、不回落宿主直连；attempts 恒 0、不计 key 健康。
+      // 死绑定不计入 429 的 retryable 口径；与冷却/饱和混现时 429 优先（有确定性恢复时刻）。
+      if (skippedEgressDead >= attemptableCandidates) {
+        logAttempt(req, { keyId: '', upstreamId: '', statusCode: 503, usage: null, ttfbMs: now() - started, attempts, failureReason: null, started });
+        const error = noAvailableEgressError(skippedEgressDead);
+        reportGatewayError(req, started, error, { attempts, candidates: candidates.length });
+        return { kind: 'error', error, attempts };
+      }
       // 「上游没故障、退避后可重试」的两型：出口级冷却（§16.7）与池饱和（ADR-0011）。
       // 两型都用 429 + `Retry-After`，与 §16.7「不新增错误码、不新增 HTTP 状态」一致。
       // 出口级优先报：它的退避窗口更粗（分钟级），对客户端更接近事实。

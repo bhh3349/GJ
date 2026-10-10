@@ -4,10 +4,10 @@
  * 要回答的五件事（每笔一个可核验产物，PM 派单口径）：
  *   P0 基线探活      —— 网关面活着、鉴权面认探针 key、模型清单可发现
  *   P1 单出口轮换    —— 同一出口下多账号轮换，不得恒钉一个账号
- *   P2 池内切换      —— 多出口之间按台账切换；全 retired 走 503、全冷却走 429（带 Retry-After）
+ *   P2 池内切换      —— 多出口之间按生命周期台账切换；全 retired 走 503、全冷却走 429（带 Retry-After）
  *   P3 冷却写入窗口  —— v6 判据：同出口同上游 60s 内 ≥3 个**不同账号**上游 429 才写冷却；
  *                       本地拒与 key 级失败不得混进计数；写入时长 = max(Retry-After, 60s)，封顶 30min
- *   P4 落帧验证      —— `egress_cooldown` 三处接线（造帧 / 推帧 / 注册进 live 集合）+ 冻结帧形逐字
+ *   P4 落帧验证      —— `egress_cooldown` 三处接线（造帧 / 推帧 / 注册进 live 集合）+ 冻结帧形逐字；出口 IP / 心跳读 §7 `egress_pool` 帧（WS live），永不读 REST 配置面
  *
  * ── 凭据纪律（与 S4 同款，本脚本「凭据无关」设计）───────────────────────────
  * 仓库不存放任何会话、手机号、密码、明文 key。凭据只由执行者在运行时以环境变量注入，
@@ -35,6 +35,9 @@
  * 所以「P0–P4 一次全跑」在这条出口上结构上做不到：后半段必然被前半段自己打出的 429
  * 污染成假结论。故默认预算 5 次，撞 429 立刻停本片，等冷却窗口退干净再分片重跑。
  */
+
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
 
 import { classifyUpstreamStatus } from '../src/gateway/classify.js';
 import { scrubCredentials } from '../src/util/redact.js';
@@ -117,8 +120,25 @@ type CooldownFrame = {
   id?: string;
 };
 
-/** 台账里一条出口绑定 */
-type EgressRow = { id: string; status: string; exitIp: string | null; lastHeartbeatAt: string | null };
+/** 生命周期台账一行（`GET /api/egress`）—— 只取它真有的字段（EgressProxyDto **没有** exitIp / lastHeartbeatAt） */
+type EgressRow = { id: string; status: string };
+
+/** §7 `egress_pool` 帧节点（WS /api/stats/live）—— exitIp / expectedExitIp / lastHeartbeatAt / cooldownUntil 的唯一读面 */
+type PoolNode = {
+  egressId: string;
+  name: string;
+  status: string;
+  exitIp: string | null;
+  expectedExitIp: string | null;
+  lastHeartbeatAt: string | null;
+  cooldownUntil: string | null;
+};
+
+/**
+ * null 的逐字段语义（§7 字段表）：exitIp null = 本次心跳未带回；lastHeartbeatAt null = 冷启动；
+ * cooldownUntil null = 当前不在冷却（解除推 null）。它们都是**真证据**，必须按各自语义报，
+ * 不得统一写成「未观测」——「缺省不是证据」管的是**字段不存在**（读错源），那由 runtimeField 炸掉。
+ */
 
 const WINDOW_MS = 60_000;
 const MIN_DISTINCT_ACCOUNTS = 3;
@@ -186,8 +206,12 @@ function judgeRotation(hits: Map<string, number>): { distinct: number; top: numb
  *   全冷却/预算耗尽 → 429 `RATE_LIMITED`，**恒带** Retry-After。
  * 二者被压成同形就是回归，这一条把「形状」钉成断言而不是靠人读代码。
  */
-function judgeExhausted(rows: EgressRow[], status: number, retryAfter: string | null): string[] {
+function judgeExhausted(activeIds: readonly string[], retiredIds: readonly string[], status: number, retryAfter: string | null): string[] {
   const errs: string[] = [];
+  const rows: EgressRow[] = [
+    ...activeIds.map((id) => ({ id, status: 'active' })),
+    ...retiredIds.map((id) => ({ id, status: 'retired' })),
+  ];
   const active = rows.filter((r) => r.status === 'active');
   if (status === 503) {
     if (active.length > 0 && rows.every((r) => r.status !== 'retired')) {
@@ -276,12 +300,18 @@ function offlineSelfCheck(): number {
     judgeFrame(undefined, 'eg-1').length > 0, '');
 
   console.log('── P2 终态分型（429 恒带 RA / 503 恒不带）──');
-  const retiredOnly: EgressRow[] = [{ id: 'eg-1', status: 'retired', exitIp: null, lastHeartbeatAt: null }];
-  const activeOnly: EgressRow[] = [{ id: 'eg-1', status: 'active', exitIp: 'e1', lastHeartbeatAt: '2026-10-10T00:00:00.000Z' }];
-  say('全 retired + 503 + 无 RA → 合规', judgeExhausted(retiredOnly, 503, null).filter((e) => !e.startsWith('[归因参考]')).length === 0, '');
-  say('503 却带 RA → 精确抓到', judgeExhausted(retiredOnly, 503, '60').some((e) => e.includes('违反冻结终态')) === true, '');
-  say('429 未带 RA → 精确抓到（v10②）', judgeExhausted(activeOnly, 429, null).some((e) => e.includes('v10')) === true, '');
-  say('无 active 却 2xx → 精确抓到', judgeExhausted(retiredOnly, 200, null).some((e) => e.includes('2xx')) === true, '');
+  say('全 retired + 503 + 无 RA → 合规', judgeExhausted([], ['eg-1'], 503, null).filter((e) => !e.startsWith('[归因参考]')).length === 0, '');
+  say('503 却带 RA → 精确抓到', judgeExhausted([], ['eg-1'], 503, '60').some((e) => e.includes('违反冻结终态')) === true, '');
+  say('429 未带 RA → 精确抓到（v10②）', judgeExhausted(['eg-1'], [], 429, null).some((e) => e.includes('v10')) === true, '');
+  say('无 active 却 2xx → 精确抓到', judgeExhausted([], ['eg-1'], 200, null).some((e) => e.includes('2xx')) === true, '');
+
+  console.log('── 读面错源防回退（null ≠ 字段缺失，「缺省不是证据」进代码）──');
+  say('字段缺失（undefined）→ 必须抛错，绝不回落 null', (() => { try { runtimeField({}, 'exitIp'); return false; } catch { return true; } })(), '');
+  say('字段为 null（冷启动/未带回/未冷却）→ 放行，按字段语义报', runtimeField({ exitIp: null }, 'exitIp') === null, '');
+  say('字段有值 → 原样读出', runtimeField({ lastHeartbeatAt: '2026-10-10T00:00:00.000Z' }, 'lastHeartbeatAt') === '2026-10-10T00:00:00.000Z', '');
+  say('池帧缺 nodes 字段 → 必须抛错（字段缺失不是空池证据）', (() => { try { nodesOfPoolFrame({ type: 'egress_pool' }); return false; } catch { return true; } })(), '');
+  say('池帧 nodes=[] → 放行（已接线、当前 0 出口）', nodesOfPoolFrame({ type: 'egress_pool', nodes: [] }).length === 0, '');
+  say('池帧 type 漂移 → 必须抛错', (() => { try { nodesOfPoolFrame({ type: 'metrics', nodes: [] }); return false; } catch { return true; } })(), '');
 
   console.log('── P1/P2 轮换分布 ──');
   const stuck = new Map([['eg-1', ROUNDS]]);
@@ -291,7 +321,7 @@ function offlineSelfCheck(): number {
 
   console.log('');
   console.log(pass
-    ? '离线自检：PASS（判据核对合规样本全过、对 12 条违例样本各自精确报错）'
+    ? '离线自检：PASS（判据核对合规样本全过、对每条违例样本各自精确报错）'
     : '离线自检：FAIL（判据核本身有缺陷，别接凭据跑在线）');
 
   /* 顺手把在线所需抓手打全，省掉一轮「缺什么」问答 */
@@ -300,7 +330,7 @@ function offlineSelfCheck(): number {
   for (const [name, need] of [
     ['P0', 'PROBE_GATEWAY_KEY, PROBE_MODEL'],
     ['P1', 'PROBE_GATEWAY_KEY, PROBE_MODEL, PROBE_ADMIN_SESSION(读命中归属)'],
-    ['P2', 'PROBE_GATEWAY_KEY, PROBE_MODEL, PROBE_ADMIN_SESSION(读 /api/egress 台账)'],
+    ['P2', 'PROBE_GATEWAY_KEY, PROBE_MODEL, PROBE_ADMIN_SESSION(生命周期台账 /api/egress + §7 egress_pool 帧)'],
     ['P3', 'PROBE_GATEWAY_KEY ×≥3 个不同账号的 key 或同一出口多号，PROBE_ADMIN_SESSION'],
     ['P4', 'PROBE_ADMIN_SESSION(订 WS /api/stats/live)'],
   ] as [string, string][]) {
@@ -315,7 +345,7 @@ function offlineSelfCheck(): number {
 
 type Hit = { atMs: number; egressId: string | null; account: string | null; status: number; retryAfter: string | null };
 
-const state = { requests: 0, budgetUsed: 0, hits: [] as Hit[], frames: [] as CooldownFrame[], rows: [] as EgressRow[], createdTokenNo: null as string | null };
+const state = { requests: 0, budgetUsed: 0, hits: [] as Hit[], frames: [] as CooldownFrame[], ledger: [] as EgressRow[], pool: [] as PoolNode[], createdTokenNo: null as string | null };
 
 async function call(url: string, opts: RequestInit = {}, admin = false): Promise<Response> {
   if (state.requests >= BUDGET) throw new Error(`出网预算已用尽（${BUDGET} 次/片），本片终止`);
@@ -342,15 +372,114 @@ async function chatOnce(): Promise<{ status: number; retryAfter: string | null; 
   return { status: res.status, retryAfter: res.headers.get('retry-after'), ms };
 }
 
-async function readLedger(): Promise<EgressRow[]> {
+/** 生命周期台账（GET /api/egress）—— **只取它真有的字段**（id/status）。
+ * EgressProxyDto 没有 exitIp / lastHeartbeatAt：从配置面读这两条正是 e9e7747 复核揪出的缺陷
+ * （把「字段不存在」读成「冷启动 null」）。出口 IP / 心跳归 §7 `egress_pool` 帧（readPoolPerspective）。 */
+async function readLedgerShapes(): Promise<EgressRow[]> {
   const res = await call(`${ADMIN}/api/egress`, { method: 'GET' }, true);
   if (!res.ok) throw new Error(`台账读取 HTTP ${res.status}`);
   const json = (await res.json()) as { items?: Array<Record<string, unknown>> };
   return (json.items ?? []).map((r) => ({
     id: String(r.id ?? ''),
     status: String(r.status ?? ''),
-    exitIp: r.exitIp === undefined || r.exitIp === null ? null : safe(String(r.exitIp), 40),
-    lastHeartbeatAt: r.lastHeartbeatAt === undefined || r.lastHeartbeatAt === null ? null : String(r.lastHeartbeatAt),
+  }));
+}
+
+/** 最小 ws 客户端形状（不依赖 ws 类型：ws 是 @fastify/websocket 的传递依赖，类型可能到不了 scripts/）。 */
+interface WsSocket {
+  send(text: string): void;
+  close(): void;
+  on(event: string, cb: (data?: unknown) => void): void;
+}
+type WsCtor = new (url: string, opts: { headers?: Record<string, string> }) => WsSocket;
+
+/** 解析 ws 构造器：不新增依赖，走**真实依赖图**两跳（项目 package.json → @fastify/websocket → ws）。
+ * 任一跳解析不到 = 读面破了，抛错而不是静默降级成「未观测」。 */
+function resolveWsCtor(): WsCtor {
+  const root = createRequire(join(process.cwd(), 'package.json'));
+  let fwPath: string;
+  try {
+    fwPath = root.resolve('@fastify/websocket');
+  } catch {
+    throw new Error('live 面读源破损：@fastify/websocket 解析不到（探针必须在仓库依赖图内运行）');
+  }
+  let wsPath: string;
+  try {
+    wsPath = createRequire(fwPath).resolve('ws');
+  } catch {
+    throw new Error('live 面读源破损：ws 解析不到（应经 @fastify/websocket 真实依赖图到达）');
+  }
+  const mod = createRequire(wsPath)('ws') as { default?: WsCtor; WebSocket?: WsCtor };
+  const ctor = mod.WebSocket ?? mod.default;
+  if (typeof ctor !== 'function') throw new Error('ws 构造器形状异常（依赖图破损）');
+  return ctor;
+}
+
+/** §7 `egress_pool` 帧读面（WS /api/stats/live）—— exitIp / expectedExitIp / lastHeartbeatAt / cooldownUntil 的唯一来源。
+ * 握手协议按契约 §7：客户端首帧 `{"type":"auth"}`，随后按 tick 推帧（新连接首个 tick 拿全量状态）。 */
+async function readPoolPerspective(): Promise<PoolNode[]> {
+  const WS = resolveWsCtor();
+  const socket = new WS(`${ADMIN.replace(/^http/, 'ws')}/api/stats/live`, {
+    headers: ADMIN_SESSION === '' ? {} : { cookie: `session=${ADMIN_SESSION}` },
+  });
+  try {
+    return await new Promise<PoolNode[]>((resolve, reject) => {
+      const fail = (err: unknown): void => {
+        clearTimeout(timer);
+        reject(err instanceof Error ? err : new Error(safe(String(err ?? 'ws error'), 160)));
+      };
+      const timer = setTimeout(
+        () => fail(new Error('live 面 6s 未交付 egress_pool 帧（帧面未接线或会话失效）—— 未观测，拒绝折叠成空池')),
+        6000,
+      );
+      socket.on('open', () => socket.send(JSON.stringify({ type: 'auth' })));
+      socket.on('error', fail);
+      socket.on('message', (data?: unknown) => {
+        const text = typeof data === 'string' ? data : Buffer.isBuffer(data) ? data.toString('utf8') : '';
+        let parsed: unknown;
+        try { parsed = JSON.parse(text); } catch { return; }
+        if (parsed === null || typeof parsed !== 'object') return;
+        const type = (parsed as { type?: unknown }).type;
+        if (type !== 'egress_pool') return;
+        try {
+          resolve(nodesOfPoolFrame(parsed as Record<string, unknown>));
+        } catch (err) {
+          fail(err);
+        } finally {
+          clearTimeout(timer);
+          socket.close();
+        }
+      });
+    });
+  } finally {
+    try { socket.close(); } catch { /* 连接已关 */ }
+  }
+}
+
+/** 读面取字段：**缺失（undefined）抛错、null 放行**。
+ * 「缺省不是证据」（契约 v1.6.5）落进代码：读到 null = 冷启动/尚无证据的真证据；
+ * 读到 undefined = 字段不在这个 DTO 上 = 读错源，必须炸，绝不折叠成 null。 */
+function runtimeField(row: Record<string, unknown>, field: string): string | null {
+  if (!(field in row) || row[field] === undefined) {
+    throw new Error(`读面字段 ${field} 不存在（读错源——这个 DTO 不是该字段的属主），拒绝折叠成 null`);
+  }
+  const v = row[field];
+  return v === null ? null : safe(String(v), 40);
+}
+
+/** §7 `egress_pool` 帧 → 节点列表。帧源破损（type 漂移 / 缺 nodes）必须抛错；nodes=[] 合规（「已接线、当前 0 个出口」）。 */
+function nodesOfPoolFrame(frame: Record<string, unknown> | undefined): PoolNode[] {
+  if (frame === undefined) throw new Error('live 面未交付 egress_pool 帧（帧面未接线或连接中断）—— 拒绝折叠成空池');
+  if (frame.type !== 'egress_pool') throw new Error(`live 面帧 type 漂移：${safe(String(frame.type), 40)}（期望 egress_pool）`);
+  if (!Array.isArray(frame.nodes)) throw new Error('egress_pool 帧缺 nodes 字段（帧源破损）—— 字段缺失不是空池证据');
+  return (frame.nodes as Array<Record<string, unknown>>).map((n) => ({
+    egressId: String(n.egressId ?? ''),
+    name: String(n.name ?? ''),
+    status: String(n.status ?? ''),
+    exitIp: runtimeField(n, 'exitIp'),
+    expectedExitIp: runtimeField(n, 'expectedExitIp'),
+    lastHeartbeatAt: runtimeField(n, 'lastHeartbeatAt'),
+    cooldownUntil: runtimeField(n, 'cooldownUntil'),
   }));
 }
 
@@ -410,15 +539,17 @@ async function runOnline(): Promise<number> {
         const count = (safeJson(text) as { data?: unknown[] } | null)?.data?.length ?? null;
         console.log(`P0 基线探活 → HTTP ${res.status} 模型数=${count ?? '(不可析)'} 样例=${safe(text.slice(0, 120), 120)}`);
       } else if (id === 'P1' || id === 'P2') {
-        state.rows = await readLedger();
-        const active = state.rows.filter((r) => r.status === 'active');
-        console.log(`${id} 台账：共 ${state.rows.length} 行，active=${active.length} retired=${state.rows.filter((r) => r.status === 'retired').length}`);
-        for (const r of active.slice(0, 6)) {
-          console.log(`     · ${safe(r.id, 24)} exitIp=${r.exitIp ?? '(未登记)'} 心跳=${r.lastHeartbeatAt ?? '(冷启动 null)'}`);
+        state.ledger = await readLedgerShapes();
+        const active = state.ledger.filter((r) => r.status === 'active');
+        console.log(`${id} 生命周期台账(/api/egress)：共 ${state.ledger.length} 行，active=${active.length} retired=${state.ledger.filter((r) => r.status === 'retired').length}`);
+        state.pool = await readPoolPerspective();
+        for (const n of state.pool.slice(0, 6)) {
+          console.log(`     · ${safe(n.egressId, 24)} exitIp=${n.exitIp ?? '(未带回)'} expectedIp=${n.expectedExitIp ?? '(未登记)'} 心跳=${n.lastHeartbeatAt ?? '(冷启动)'} 冷却至=${n.cooldownUntil ?? '(未冷却)'}`);
         }
+        if (state.pool.length === 0) console.log('     egress_pool 帧：0 节点（已接线、当前无活出口/心跳生产者未起）—— exitIp/心跳未观测，不写成结论');
         if (active.length === 0) {
           const one = await chatOnce();
-          const errs = judgeExhausted(state.rows, one.status, one.retryAfter);
+          const errs = judgeExhausted(active.map((r) => r.id), state.ledger.filter((r) => r.status === 'retired').map((r) => r.id), one.status, one.retryAfter);
           console.log(`${id} 池空终态 → HTTP ${one.status} Retry-After=${one.retryAfter ?? '(无)'}`);
           for (const e of errs) console.log(`     ${e}`);
           incomplete = incomplete || errs.some((e) => !e.startsWith('[归因参考]'));
@@ -441,8 +572,8 @@ async function runOnline(): Promise<number> {
         }
       } else if (id === 'P3') {
         console.log('P3 冷却写入窗口 —— 判据核已在离线自检钉死；在线只做一件事：观测真实上游 429 是否带 Retry-After，以及窗口内不同账号数');
-        state.rows = await readLedger();
-        console.log(`     台账 active 行数=${state.rows.filter((r) => r.status === 'active').length}（同出口多号需 ≥${MIN_DISTINCT_ACCOUNTS} 个不同账号才能验写入，预算通常不够 → 缺则标未观测）`);
+        state.ledger = await readLedgerShapes();
+        console.log(`     生命周期台账 active 行数=${state.ledger.filter((r) => r.status === 'active').length}（同出口多号需 ≥${MIN_DISTINCT_ACCOUNTS} 个不同账号才能验写入，预算通常不够 → 缺则标未观测）`);
         console.log('     结论口径：本探针**不制造** 429 来逼写入（那会吃掉整片预算并污染后续）；P3 的在线部分等真有自然 429 样本时补，判据核以离线自检 + src/egress 单测为准');
       } else if (id === 'P4') {
         console.log('P4 落帧验证 —— 需 WS 订阅 /api/stats/live；探针按 HTTP 侧只验台账与冷却可观测性，帧面由 src/api/routes/live.ts 单测 + 真帧三张（.ekko-tmp/egress-realframe/frames.json）钉死');
@@ -458,7 +589,7 @@ async function runOnline(): Promise<number> {
 
   console.log('');
   console.log('════ 汇总（全脱敏）════');
-  console.log(`出网 ${state.requests}/${BUDGET} 次；台账 ${state.rows.length} 行；命中 ${state.hits.length} 条`);
+  console.log(`出网 ${state.requests}/${BUDGET} 次；生命周期台账 ${state.ledger.length} 行；egress_pool 帧 ${state.pool.length} 节点；命中 ${state.hits.length} 条`);
   console.log(state.requests >= BUDGET
     ? `⚠ 本片在出口预算处用尽：其余分片用 PROBE_ONLY=<id,...> PROBE_COOLDOWN_MS=180000 重跑。「没发出去」不等于「没观察到」。`
     : `预算未用尽（已用 ${state.requests} 次）`);

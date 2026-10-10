@@ -695,6 +695,7 @@ interface DoneOver {
   failed?: number;
   unknown?: number;
   skipped?: number;
+  rateLimited?: number;
   wholeUpstream?: boolean;
 }
 
@@ -713,6 +714,7 @@ function done(over: DoneOver): RefreshDone {
         failed: over.failed ?? 0,
         unknown: over.unknown ?? 0,
         skipped: over.skipped ?? 0,
+        rateLimited: over.rateLimited ?? 0,
       },
     ],
   };
@@ -1007,5 +1009,121 @@ describe('§2 引导码 —— 429 不再报成"上游坏了"（ADR-0017 补遗 
 
     expect(summary.failed).toBe(2);
     expect(summary.hintCode).toBe('BALANCE_EGRESS_RATE_LIMITED');
+  });
+});
+
+/* ------------- 补遗 2 / 补遗 4：§14.1 三判据退让 + §14.4 漂移前置（v1.7.0 判据改写） ------------- */
+
+describe('§14.1 三判据 —— 429 与低比例不再读成健康（ADR-0017 补遗 2）', () => {
+  it('25 成功 + 1 个 429 → 退避 +1（判据③一票退让；比例 96% 达标也救不了它）', async () => {
+    // 共用出口预算被压缩的真实形状：绝大多数 key 查得动，个别撞 429。
+    // 判据 = **状态码 429 本身**（上游真 429 与本地合成的 429 归同一行）；
+    // 旧口径 `ok - unknown > 0` 会把这一轮读成健康 ⇒ 每 15 分钟准时再烧一次窗口、永不退让。
+    let n = 0;
+    const h = makeHarness({
+      handler: () => {
+        n += 1;
+        return n % 26 === 0 ? { status: 429, body: '{"error":"rate limited"}' } : balanceBody(10);
+      },
+    });
+    const up = addUpstream(h, 'up-a', '/balance');
+    for (let i = 0; i < 26; i += 1) addKey(h, up, null);
+
+    await runDueRound(h);
+
+    expect(upstreamState(h, up)?.consecutiveFailures).toBe(1);
+    expect(nextDelayMs(h, up)).toBe(30 * MIN); // 2^1 × 15m —— 退一档，而不是回到基准
+  });
+
+  it('10 成功 / 16 失败（比例 38% < 80%）→ 退避 +1（判据②；旧口径会因"有值"读成健康）', async () => {
+    let n = 0;
+    const h = makeHarness({
+      handler: () => {
+        n += 1;
+        return n <= 10 ? balanceBody(10) : upstreamError();
+      },
+    });
+    const up = addUpstream(h, 'up-a', '/balance');
+    for (let i = 0; i < 26; i += 1) addKey(h, up, null);
+
+    await runDueRound(h);
+
+    expect(upstreamState(h, up)?.consecutiveFailures).toBe(1);
+    expect(nextDelayMs(h, up)).toBe(30 * MIN);
+  });
+
+  it('全部成功（比例 100%）→ 归零不变（三判据同时成立的原路径零漂移）', async () => {
+    const h = makeHarness({ handler: () => balanceBody(10) });
+    const up = addUpstream(h, 'up-a', '/balance');
+    for (let i = 0; i < 4; i += 1) addKey(h, up, null);
+
+    await runDueRound(h);
+
+    expect(upstreamState(h, up)?.consecutiveFailures).toBe(0);
+    expect(nextDelayMs(h, up)).toBe(BASE_MINUTES * MIN);
+  });
+
+  it('钩子面直驱：noop 不看 429 —— 什么都没做的一轮无从谈"本轮有 429"', () => {
+    const h = makeHarness();
+    const up = addUpstream(h, 'up-a', '/balance');
+    addKey(h, up, null);
+
+    // 全 skipped（没配查询方式）：即便带一个脏的 rateLimited 计数也不罚
+    h.sync.onRefreshDone(done({ upstreamId: up, trigger: 'auto', checked: 2, ok: 0, skipped: 2, rateLimited: 5 }));
+    expect(upstreamState(h, up)?.consecutiveFailures).toBe(0);
+  });
+
+  it('钩子面直驱：25 成功 + 1 个 429 的汇总 → 退避 +1（与真实 groupByUpstream 聚合同形）', () => {
+    const h = makeHarness();
+    const up = addUpstream(h, 'up-a', '/balance');
+    addKey(h, up, null);
+
+    h.sync.onRefreshDone(done({ upstreamId: up, trigger: 'auto', checked: 26, ok: 25, failed: 1, rateLimited: 1 }));
+    expect(upstreamState(h, up)?.consecutiveFailures).toBe(1);
+
+    // 下一轮干净（rateLimited=0 且比例 100%）→ 归零
+    h.sync.onRefreshDone(done({ upstreamId: up, trigger: 'auto', checked: 26, ok: 26 }));
+    expect(upstreamState(h, up)?.consecutiveFailures).toBe(0);
+  });
+});
+
+describe('§14.4 前置 —— 本轮有 429（rateLimited > 0）不判漂移（ADR-0017 补遗 4）', () => {
+  it('余额停在旧值 + 窗口内有流量 + 本轮 rateLimited=1 → 两个码都不判定（挤压的读数不是漂移证据）', () => {
+    // 触发链（契约 §14.4）：被 429 冻住的 key 一个字都不写（§14.2 正确）⇒ 余额停在旧值，
+    // 但流量照样计进 usedTokens ⇒ 若无前置，这一轮必报 BALANCE_UNCHANGED_WITH_TRAFFIC，
+    // 而它只是"出口被挤压"的读数 —— 宁缺勿假，不判。
+    const h = makeHarness();
+    const up = addUpstream(h, 'up-a', '/balance');
+    addKey(h, up, 5000);
+
+    h.sync.onRefreshDone({ ...done({ upstreamId: up }), at: at(0) });
+    seedUsage(h, up, at(5 * MIN), 12_000);
+    h.sync.onRefreshDone({ ...done({ upstreamId: up, rateLimited: 1 }), at: at(15 * MIN) });
+    h.advance(15 * MIN);
+
+    const st = h.sync.status(86_400);
+    expect(st.drift.counts).toEqual({
+      BALANCE_SPENT_WITHOUT_TRAFFIC: 0,
+      BALANCE_UNCHANGED_WITH_TRAFFIC: 0,
+    });
+    expect(st.drift.alerts).toEqual([]);
+    expect(h.warns).toEqual([]);
+    // 前置只挡**判定**，不挡落库：快照照写（asOf 不撒谎的那条线不动）
+    expect(listBalanceSnapshots(h.db)).toHaveLength(2);
+  });
+
+  it('对照：同样形状但 rateLimited=0 → 照判 BALANCE_UNCHANGED_WITH_TRAFFIC（挡门是 rateLimited 本身）', () => {
+    const h = makeHarness();
+    const up = addUpstream(h, 'up-a', '/balance');
+    addKey(h, up, 5000);
+
+    h.sync.onRefreshDone({ ...done({ upstreamId: up }), at: at(0) });
+    seedUsage(h, up, at(5 * MIN), 12_000);
+    h.sync.onRefreshDone({ ...done({ upstreamId: up, rateLimited: 0 }), at: at(15 * MIN) });
+    h.advance(15 * MIN);
+
+    const st = h.sync.status(86_400);
+    expect(st.drift.counts.BALANCE_UNCHANGED_WITH_TRAFFIC).toBe(1);
+    expect(h.warns.map((w) => w['code'])).toEqual(['BALANCE_UNCHANGED_WITH_TRAFFIC']);
   });
 });

@@ -205,12 +205,35 @@ export function createBalanceSync(options: BalanceSyncOptions): BalanceSync {
    * 不减掉它就会把"上游改了字段名、每次都成功但每次都拿不到数"读成健康 ——
    * 而那正是最该退避等人工介入的形态。
    */
+  /** 判据②的达标线（§14.1：**阈值是实现常量、不进契约**）。 */
+  const SUCCESS_RATIO_THRESHOLD = 0.8;
+
+  /**
+   * 本轮怎么记账（ADR-0017 补遗 2 / 契约 §14.1 三判据，v1.7.0 改写）：
+   *   ① 有值 —— `ok - unknown > 0`（原判据，不变）；
+   *   ② 成功比例达标 —— `(ok - unknown) / (checked - skipped) ≥ 80%`，**分母排除 `skipped`**；
+   *   ③ 本轮无 429 —— `rateLimited == 0`（429 是**压力在挤压**的直接证据：25 成功 + 1 个 429
+   *      也不是健康的一轮；判据 = 状态码本身，上游真 429 与本地合成的 429 归同一行）。
+   * 三条**同时成立**才算归零，推进条件照旧 `min(base × 2^n, 6h)`。
+   *
+   * `noop` 依旧不看 429：什么都没做的一轮（没配查询方式 / 压根没有 key）没有失败样本，
+   * `rateLimited` 恒为 0 —— 无从谈"本轮有 429"。
+   */
   function judgeRound(r: UpstreamRefreshResult): RoundVerdict {
     if (r.checked === 0) return 'noop';
-    if (r.ok - r.unknown > 0) return 'value';
-    // 一把都没发出去（该上游没配查询方式）：没做的事不该被罚
-    if (r.skipped === r.checked) return 'noop';
-    return 'failure';
+    const valued = r.ok - r.unknown;
+    // 判据①③：无有效值、或本轮出现过 429（挤压的直接证据）→ 不归零。
+    // 三判据是**同时成立**才算归零 —— 把 429 判据放在 return 'value' 之后会被 ① 短路，
+    // "25 成功 + 1 个 429"就会读成健康的一轮（ADR-0017 补遗 2 点名的反例）。
+    if (valued <= 0 || r.rateLimited > 0) {
+      // 一把都没发出去（该上游没配查询方式）：没做的事不该被罚
+      if (r.skipped === r.checked) return 'noop';
+      return 'failure';
+    }
+    // 判据②：分母排除 `skipped` —— 没做的事不算进"该成功的轮次"
+    const denominator = r.checked - r.skipped;
+    if (denominator > 0 && valued / denominator < SUCCESS_RATIO_THRESHOLD) return 'failure';
+    return 'value';
   }
 
   /**
@@ -232,12 +255,14 @@ export function createBalanceSync(options: BalanceSyncOptions): BalanceSync {
         } else if (verdict === 'failure' && whole) {
           // 只有**整上游**的一轮才推进退避：一把 key 单独失败（它自己坏了）不足以
           // 说明这个上游"查不通"，拿部分证据去退避只会让好上游一起被拖慢。
+          // §14.1（v1.7.0）改写后这里覆盖两型：0 有效值（原口径）与「有值但比例 <80%
+          // 或本轮有 429」—— 在共用出口预算下，后者若不退让就是"每 15 分钟准时再烧一次窗口"。
           st.consecutiveFailures += 1;
         }
 
         st.nextAttemptAt = now().getTime() + backoffMs(st.consecutiveFailures);
 
-        if (whole) writeSnapshotOnce(r.upstreamId, done.at, done.trigger);
+        if (whole) writeSnapshotOnce(r.upstreamId, done.at, done.trigger, r.rateLimited);
       }
     } catch (err) {
       log?.error({ err }, '余额快照写入失败（刷新本身的结果不受影响）');
@@ -250,7 +275,7 @@ export function createBalanceSync(options: BalanceSyncOptions): BalanceSync {
    * 数字直接取自 `computeGlobalBalance`（ADR-0003 的三口径），不再另写一套 SQL ——
    * 快照与 §6 余额页要是各算各的，迟早出现"总数对不上单上游之和"。
    */
-  function writeSnapshotOnce(upstreamId: string, at: string, trigger: 'auto' | 'manual'): void {
+  function writeSnapshotOnce(upstreamId: string, at: string, trigger: 'auto' | 'manual', rateLimitedThisRound: number): void {
     const u = computeGlobalBalance(db).byUpstream.find((x) => x.upstreamId === upstreamId);
     // 上游在刷新过程中被删了：不写"孤儿快照"（这一行会永远没有对应的上游可读）
     if (u === undefined) return;
@@ -269,7 +294,7 @@ export function createBalanceSync(options: BalanceSyncOptions): BalanceSync {
       tokenPlanKeyCount: u.tokenPlanKeyCount,
       trigger,
     });
-    judgeDrift(upstreamId, at, u.totalBalance);
+    judgeDrift(upstreamId, at, u.totalBalance, rateLimitedThisRound);
   }
 
   /**
@@ -281,12 +306,17 @@ export function createBalanceSync(options: BalanceSyncOptions): BalanceSync {
    * 回读要按 `(upstream_id, ts)` 精确命中，而同一毫秒完全可能落下两条 —— 读错一条
    * 就会算出一个不存在的差额。
    */
-  function judgeDrift(upstreamId: string, ts: string, totalBalanceCents: number | null): void {
+  function judgeDrift(upstreamId: string, ts: string, totalBalanceCents: number | null, rateLimitedThisRound: number): void {
     const prev = previousBalanceSnapshot(db, upstreamId, ts);
     if (prev === null) return; // 少于 2 条不判
     const a = prev.totalBalanceCents;
     // 任一端未知（含"那一刻全未知"）：未知与未知之间没有差额可言
     if (a === null || totalBalanceCents === null) return;
+    // 前置条件（v1.7.0 加，契约 §14.4）：本轮存在出口级限流时两个码都**不判定**。
+    // 被 429 冻住的 key "一个字都不写"（§14.2 正确）⇒ 余额停在旧值，但流量照样计进
+    // `usedTokens` —— "余额没动 + 有流量"是**挤压的读数**，不是漂移证据（宁缺勿假）。
+    // 零 DDL：判据输入就是 §14.1 已经算出来的那个 `rateLimited`。
+    if (rateLimitedThisRound > 0) return;
 
     const delta = totalBalanceCents - a;
     const usedTokens = sumTokensBetween(db, upstreamId, prev.ts, ts);

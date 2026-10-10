@@ -74,6 +74,13 @@ export interface UpstreamRefreshResult {
   failed: number;
   unknown: number;
   skipped: number;
+  /**
+   * 本轮 429 数（ADR-0017 补遗 2）：**判据 = `httpStatus === 429` 本身**，
+   * 不看标记头 —— 上游真 429 与本地合成的 429（闸接线后由装饰器合成）**归同一行**。
+   * 只穿**内部**的收尾汇总类型（§14.1 判据③ / §14.4 前置的判据输入），**不出 REST 面**，
+   * §14.2 的三型计数口径零变更。
+   */
+  rateLimited: number;
 }
 
 /** 一轮刷新收尾时交给钩子的东西。`trigger` 与 `wholeUpstream` 由本函数保证，调用方不必自证。 */
@@ -246,12 +253,16 @@ function groupByUpstream(attempts: readonly Attempt[]): UpstreamRefreshResult[] 
       failed: 0,
       unknown: 0,
       skipped: 0,
+      rateLimited: 0,
     };
     item.checked += 1;
     if (a.kind === 'skipped') {
       item.skipped += 1;
     } else if (!a.outcome.ok) {
       item.failed += 1;
+      // 补遗 3「实现落点」1：与 summarize 的旁路计数**同源同值、各自独立** ——
+      // 一个进收尾汇总类型（判据用），一个出 hint（`hintForSummary` 用），不得并成一个字段。
+      if (a.outcome.httpStatus === 429) item.rateLimited += 1;
     } else {
       item.ok += 1;
       // 与 summarize 同一条判据：请求成功但拿不到数 = 未知，不是失败也不是成功

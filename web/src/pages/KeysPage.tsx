@@ -85,7 +85,11 @@ export default function KeysPage() {
   const [editing, setEditing] = useState<UpstreamKey | null>(null);
   const [balanceTarget, setBalanceTarget] = useState<UpstreamKey | null>(null);
   const [testTarget, setTestTarget] = useState<UpstreamKey | null>(null);
-  const [refreshHint, setRefreshHint] = useState<{ hintCode: HintCode; hint: string | null } | null>(null);
+  const [refreshHint, setRefreshHint] = useState<{
+    hintCode: HintCode;
+    hint: string | null;
+    retryAfterSeconds: number | null;
+  } | null>(null);
 
   const upstreams = useResource(() => upstreamsApi.list({ pageSize: 200 }), []);
   const upstreamName = useMemo(() => {
@@ -113,7 +117,9 @@ export default function KeysPage() {
   const task = useTaskPolling((finished) => {
     const result = finished.result as BalanceRefreshResult | null;
     setRefreshHint(
-      result && result.hintCode ? { hintCode: result.hintCode, hint: result.hint } : null,
+      result && result.hintCode
+        ? { hintCode: result.hintCode, hint: result.hint, retryAfterSeconds: result.retryAfterSeconds ?? null }
+        : null,
     );
     message.success('余额刷新完成');
     list.reload();
@@ -559,7 +565,11 @@ export default function KeysPage() {
 
       {refreshHint ? (
         <div style={{ marginBottom: tokens.space.md }}>
-          <BalanceHint hintCode={refreshHint.hintCode} hint={refreshHint.hint} />
+          <BalanceHint
+            hintCode={refreshHint.hintCode}
+            hint={refreshHint.hint}
+            retryAfterSeconds={refreshHint.retryAfterSeconds}
+          />
         </div>
       ) : null}
 

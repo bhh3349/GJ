@@ -20,6 +20,7 @@ import { Alert } from 'antd';
 import type { ReactNode } from 'react';
 
 import type { HintCode } from '@/api/types';
+import { tokens } from '@/theme/tokens';
 
 const HINT_CONFIG: Record<HintCode, { type: 'info' | 'warning' | 'error'; title: string; description: string }> = {
   BALANCE_QUERY_UNSUPPORTED: {
@@ -66,12 +67,23 @@ export interface BalanceHintProps {
   hintCode: HintCode | null | undefined;
   /** 后端给的可读指引文案，若给则在说明下追加原文。 */
   hint?: string | null;
+  /**
+   * #12（共享形状，PM 钉死）：本地拒绝带回的 `Retry-After`，单位整数秒。
+   * `null` / `undefined` / 字段缺席 = 无建议 —— **整行不渲染**，不编默认秒数；
+   * 只有真拿到正整数（>0）才显示，文案**不归因**（与 hintCode 同一条纪律）。
+   */
+  retryAfterSeconds?: number | null;
   /** 可选操作按钮，如「打开自测表单」。 */
   action?: ReactNode;
 }
 
-export function BalanceHint({ hintCode, hint, action }: BalanceHintProps) {
+const hasRetryAfter = (value: number | null | undefined): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0;
+
+export function BalanceHint({ hintCode, hint, retryAfterSeconds, action }: BalanceHintProps) {
   if (!hintCode) return null;
+  // #12：`null` / 缺席 = 无建议，不显示；`0` / 非有限数同样按无建议处理（不渲染 0s 行）。
+  const retryAfterText = hasRetryAfter(retryAfterSeconds) ? `${retryAfterSeconds}s 后可重试` : null;
 
   // 运行时兜底：`Record<HintCode, …>` 的穷尽性只在**编译期**成立，而 `hintCode` 直接来自 REST
   // 响应（没有运行时校验）—— 后端先上新码、前端 bundle 未更新时这里取到 `undefined`，
@@ -92,6 +104,15 @@ export function BalanceHint({ hintCode, hint, action }: BalanceHintProps) {
         <>
           <div>{config.description}</div>
           {hint ? <div style={{ marginTop: 4, opacity: 0.85 }}>{hint}</div> : null}
+          {/*
+            #12：`retryAfterSeconds` 缺省 null/absent = 无建议，本行**不渲染**。
+            文案只陈述「多久后可重试」，**不归因**到出口或 key —— 归因归后端，与第 5 项同一条纪律。
+          */}
+          {retryAfterText ? (
+            <div style={{ marginTop: 4, color: tokens.color.info, fontSize: 12 }}>
+              {`建议 ${retryAfterText}`}
+            </div>
+          ) : null}
         </>
       }
       action={action}

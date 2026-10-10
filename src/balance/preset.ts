@@ -14,6 +14,7 @@
 // 查询方法」那句指令的正面实现：猜不出来的就不猜，直接问。
 
 import type { BalanceUnit } from '../db/balance-query.js';
+import { readLocalRetryAfterSeconds } from '../egress/fetch-gate.js';
 import { egressIdOfUrl } from '../egress/port.js';
 import { convertToCents, getByPath, toNumber, type ParsedBalance } from './template.js';
 
@@ -25,6 +26,8 @@ export interface PresetRunResult {
   message: string | null;
   /** HTTP 状态；0 = 没拿到响应（不可达 / 超时） */
   httpStatus: number;
+  /** 与 `QueryOutcome.retryAfterSeconds` 同名同语义（契约 v1.8.1）；缺省 = 无建议 */
+  retryAfterSeconds?: number;
   /** 上游响应体**原文**。调用方负责抹 key + 截断后才可外露（见 balance/raw.ts） */
   raw: unknown;
 }
@@ -77,6 +80,8 @@ interface HttpJson {
   ok: boolean;
   status: number;
   body: unknown;
+  /** 仅本地合成 429 带回（fetch-gate）；上游真 429 不读（同 `QueryOutcome` 纪律） */
+  retryAfterSeconds?: number;
   /** 面向用户的失败原因。**不含** URL 与任何凭据 —— 它们只出现在 header 里 */
   failure: { kind: HttpFailureKind; message: string } | null;
 }
@@ -111,7 +116,13 @@ async function getJson(
       body = text;
     }
     if (!res.ok) {
-      return { ok: false, status: res.status, body, failure: { kind: 'http', message: `上游返回 ${res.status}` } };
+      return {
+        ok: false,
+        status: res.status,
+        body,
+        retryAfterSeconds: readLocalRetryAfterSeconds(res),
+        failure: { kind: 'http', message: `上游返回 ${res.status}` },
+      };
     }
     // 先读文本再解析，而不是 res.json()：非 JSON 的响应（HTML 报错页、被网关拦下的页）
     // 是排查时最常见的一类，得让它和"网络不通"分开，否则用户会去查一个没坏的网络。
@@ -129,6 +140,7 @@ async function getJson(
         kind: 'network',
         message: aborted ? `查询超时（${timeoutMs}ms）` : '上游不可达',
       },
+      retryAfterSeconds: undefined,
     };
   } finally {
     clearTimeout(timer);
@@ -155,7 +167,15 @@ async function runOpenAi(input: PresetRunInput): Promise<PresetRunResult> {
   try {
     origin = new URL(input.baseUrl).origin;
   } catch {
-    return { ok: false, parsed: null, errorCode: 'PARSE_FAILED', message: '上游 baseUrl 不是合法地址', httpStatus: 0, raw: null };
+    return {
+      ok: false,
+      parsed: null,
+      errorCode: 'PARSE_FAILED',
+      message: '上游 baseUrl 不是合法地址',
+      httpStatus: 0,
+      raw: null,
+      retryAfterSeconds: undefined,
+    };
   }
 
   const { start, end } = billingWindow(new Date());
@@ -169,6 +189,10 @@ async function runOpenAi(input: PresetRunInput): Promise<PresetRunResult> {
       message: sub.failure?.message ?? null,
       httpStatus: sub.status,
       raw: { subscription: sub.body, usage: null },
+      // 双请求 preset 的**单一来源钉死**：`retryAfterSeconds` 只由**最后一个发出去的请求**透传 ——
+      // 第一腿失败时第二腿从未发出 ⇒ 第一腿就是最后发出的那个请求，它的本地拒绝值照样透传
+      //（丢掉它 = 明明拿得到"等多久"却报 null）；客户端与单查询结果拿到的是同一个数，不会出现两个答案。
+      retryAfterSeconds: sub.retryAfterSeconds,
     };
   }
 
@@ -179,7 +203,16 @@ async function runOpenAi(input: PresetRunInput): Promise<PresetRunResult> {
 
   const hardLimitUsd = toNumber(getByPath(sub.body, 'hard_limit_usd'));
   if (hardLimitUsd === null) {
-    return { ok: false, parsed: null, errorCode: 'PARSE_FAILED', message: '订阅接口未返回 hard_limit_usd', httpStatus: sub.status, raw };
+    return {
+      ok: false,
+      parsed: null,
+      errorCode: 'PARSE_FAILED',
+      message: '订阅接口未返回 hard_limit_usd',
+      httpStatus: sub.status,
+      raw,
+      // 两腿都发完了 ⇒ 最后发出的请求是用量腿；本地拒绝值照样透传（单一来源，见上）
+      retryAfterSeconds: usage.retryAfterSeconds,
+    };
   }
   // 总额度拿到了、已用量没拿到时**不猜**：直接拿 hard_limit_usd 当余额会给出一个
   // 偏大的假值（已用越多偏得越离谱）。宁可报失败，让它落到"稍后重试"。
@@ -192,11 +225,21 @@ async function runOpenAi(input: PresetRunInput): Promise<PresetRunResult> {
       message: usage.failure?.message ?? null,
       httpStatus: usage.status,
       raw,
+      // 第二腿是本轮最后一个真实请求：只有它的本地拒绝值透传（单一来源，见上）
+      retryAfterSeconds: usage.retryAfterSeconds,
     };
   }
   const totalUsageUsdCents = toNumber(getByPath(usage.body, 'total_usage'));
   if (totalUsageUsdCents === null) {
-    return { ok: false, parsed: null, errorCode: 'PARSE_FAILED', message: '用量接口未返回 total_usage', httpStatus: usage.status, raw };
+    return {
+      ok: false,
+      parsed: null,
+      errorCode: 'PARSE_FAILED',
+      message: '用量接口未返回 total_usage',
+      httpStatus: usage.status,
+      raw,
+      retryAfterSeconds: usage.retryAfterSeconds,
+    };
   }
 
   const balanceUsd = hardLimitUsd - totalUsageUsdCents / 100;
@@ -212,6 +255,7 @@ async function runOpenAi(input: PresetRunInput): Promise<PresetRunResult> {
     message: null,
     httpStatus: sub.status,
     raw,
+    retryAfterSeconds: undefined,
   };
 }
 

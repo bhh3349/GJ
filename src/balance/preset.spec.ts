@@ -32,6 +32,7 @@ function fakeFetch(routes: readonly (readonly [string, Route])[]): typeof fetch 
     return {
       ok: status >= 200 && status < 300,
       status,
+      headers: { get: (): null => null },
       text: async (): Promise<string> =>
         typeof hit[1].body === 'string' ? hit[1].body : JSON.stringify(hit[1].body),
     };

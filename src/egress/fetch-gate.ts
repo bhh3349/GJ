@@ -57,6 +57,20 @@ export function isLocalEgressReject(res: Response): boolean {
   return res.headers.get(EGRESS_LOCAL_HEADER) === EGRESS_LOCAL_VALUE;
 }
 
+/**
+ * 只读**本地**合成 429 带回的 `retry-after`（ADR-0017 清单 #16 / 契约 v1.8.1）。
+ *
+ * 值的唯一来源 = 我们自己的桶：上游对出口级 429 **从不发** `Retry-After`（§16.7 v1.6.2），
+ * 且按状态码分流是 `hintCode` 的判据 —— **值**不参与分型。解析与归一化（整数秒 ≥1）
+ * 只允许存在这一个实现：template.ts / preset.ts 都从这里拿，写第二遍就是第二个事实源。
+ * 上游真 429 / 无头桩 / 非整数 / 0 ⇒ `undefined`（调用方落 `null` = 无建议，前端不显示）。
+ */
+export function readLocalRetryAfterSeconds(res: Response): number | undefined {
+  if (!isLocalEgressReject(res)) return undefined;
+  const raw = Number(res.headers.get('retry-after'));
+  return Number.isInteger(raw) && raw >= 1 ? raw : undefined;
+}
+
 /** 合成一次本地拒绝。`reason`（`budget` / `cooldown`）**不进响应** —— 两者对调用方同形（决策 3） */
 function localRejectResponse(retryAfterMs: number): Response {
   return new Response(EGRESS_LOCAL_BODY, {

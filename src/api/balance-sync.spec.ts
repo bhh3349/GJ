@@ -32,6 +32,8 @@ import { createUpstream } from '../db/repo/upstreams.js';
 import { SCHEMA_VERSION } from '../db/schema.js';
 import { ERROR_CODES } from './errors.js';
 import { GATEWAY_ERROR_CODES } from '../gateway/errors.js';
+import { EGRESS_LOCAL_BODY } from '../egress/fetch-gate.js';
+import { EGRESS_LOCAL_HEADER, EGRESS_LOCAL_VALUE } from '../egress/port.js';
 import type { BalanceSyncLog } from './balance-sync.js';
 import {
   BALANCE_SYNC_BACKOFF_CAP_MINUTES,
@@ -88,6 +90,8 @@ interface StubResult {
   status?: number;
   ok?: boolean;
   body?: string;
+  /** v1.8.1：桩响应头（缺省 = 无头，`get` 恒 null —— 上游真 429 不带 Retry-After） */
+  headers?: { get(name: string): string | null };
 }
 
 type Handler = (path: string) => StubResult | Promise<StubResult>;
@@ -138,13 +142,15 @@ function makeHarness(over: HarnessOptions = {}): Harness {
   const warns: Record<string, unknown>[] = [];
   let ms = T0;
 
-  const fetchImpl = (async (input: unknown): Promise<{ ok: boolean; status: number; text(): Promise<string> }> => {
+  const fetchImpl = (async (input: unknown): Promise<{ ok: boolean; status: number; headers: { get(name: string): string | null }; text(): Promise<string> }> => {
     // 只取 pathname：`{key}` 已被替换成明文，URL 本体不许进任何数组/断言
     calls.push(new URL(String(input)).pathname);
     const r = await handler(new URL(String(input)).pathname);
     const status = r.status ?? 200;
     const body = r.body ?? '';
-    return { ok: r.ok ?? (status >= 200 && status < 300), status, text: async (): Promise<string> => body };
+    // v1.8.1：isLocalEgressReject 会读 headers.get —— 桩缺省无头（null），上游真 429 不带 Retry-After
+    const stubHeaders = r.headers ?? { get: (): null => null };
+    return { ok: r.ok ?? (status >= 200 && status < 300), status, headers: stubHeaders, text: async (): Promise<string> => body };
   }) as unknown as typeof fetch;
 
   const log: BalanceSyncLog = {
@@ -970,6 +976,61 @@ describe('§2 引导码 —— 429 不再报成"上游坏了"（ADR-0017 补遗 
     // 文案**不得越证据**：只给两种可能，不写成"出口被限流"这种确定性归因
     expect(summary.hint).toContain('429');
     expect(summary.hint).not.toContain('出口被限流');
+  });
+
+  it('§3 v1.8.1 —— 上游真 429 不带 retryAfterSeconds（值的唯一来源 = 本地拒绝）', async () => {
+    // 桩无头（headers.get ⇒ null）＝"上游真 429"：读不到值 ⇒ 字段恒 null。
+    // 防回退钉：按状态码分流是 hintCode 的判据，**值**只来自本地拒绝 —— 若这里出现数值，
+    // 说明有人把上游响应头也读了，违反契约 §3"值的唯一来源"。
+    const h = makeHarness({ handler: () => ({ status: 429, body: '{"error":"rate limited"}' }) });
+    const up = addUpstream(h, 'up-a', '/balance');
+    const a = addKey(h, up, null);
+
+    const summary = await refreshBalances(h.db, MASTER_KEY, { keyIds: [a] }, NOOP_REPORTER, {
+      trigger: 'manual',
+      onUpstreamDone: h.sync.onRefreshDone,
+      fetchImpl: h.fetchImpl,
+    });
+
+    expect(summary.retryAfterSeconds).toBeNull();
+  });
+
+  it('§3 v1.8.1 —— 本轮多个本地拒绝取最大 Retry-After；干净轮恒 null（写入/判据零变更）', async () => {
+    // 标记头 = 本地合成 429（ADR-0021 决策 4a）：retry-after 是 fetch-gate 写的恢复距离。
+    // 两个上游各有本地拒绝（3s / 7s）⇒ 取最大 7s；干净轮没有本地拒绝 ⇒ null。
+    const local429 = (secs: number): StubResult => ({
+      status: 429,
+      body: EGRESS_LOCAL_BODY,
+      headers: { get: (name: string): string | null => (name === EGRESS_LOCAL_HEADER ? EGRESS_LOCAL_VALUE : String(secs)) },
+    });
+    const h = makeHarness({
+      handler: (path) => (path === '/a' ? local429(3) : path === '/b' ? local429(7) : { status: 500, body: '{}' }),
+    });
+    const up1 = addUpstream(h, 'up-a', '/a');
+    const up2 = addUpstream(h, 'up-b', '/b');
+    addKey(h, up1, null);
+    addKey(h, up2, null);
+
+    const summary = await refreshBalances(h.db, MASTER_KEY, {}, NOOP_REPORTER, {
+      trigger: 'manual',
+      onUpstreamDone: h.sync.onRefreshDone,
+      fetchImpl: h.fetchImpl,
+    });
+
+    expect(summary.hintCode).toBe('BALANCE_EGRESS_RATE_LIMITED');
+    expect(summary.retryAfterSeconds).toBe(7);
+
+    const clean = makeHarness({ handler: () => balanceBody(10) });
+    const upC = addUpstream(clean, 'up-c', '/balance');
+    addKey(clean, upC, null);
+    const cKey = addKey(clean, upC, null);
+    const okSummary = await refreshBalances(clean.db, MASTER_KEY, { keyIds: [cKey] }, NOOP_REPORTER, {
+      trigger: 'manual',
+      onUpstreamDone: clean.sync.onRefreshDone,
+      fetchImpl: clean.fetchImpl,
+    });
+    expect(okSummary.ok).toBeGreaterThan(0);
+    expect(okSummary.retryAfterSeconds).toBeNull();
   });
 
   it('401 与 429 同时出现时"鉴权被拒"优先 —— 429 插在它与"上游不可达"之间', async () => {

@@ -73,6 +73,8 @@ export interface BalanceTestResult {
   errorCode: BalanceTestErrorCode | null;
   hintCode: HintCode | null;
   hint: string | null;
+  /** 契约 §2 v1.8.1：本地拒绝带回的 `Retry-After`（整数秒）；上游真 429 恒 `null`；`null` = 无建议 */
+  retryAfterSeconds: number | null;
 }
 
 /** 契约 §0.3 分页信封 */

@@ -102,6 +102,8 @@ interface HarnessOptions {
   pool?: KeyPoolInternal;
   /** 逐次尝试事件（判「有没有产假失败行」「轮换有没有终止」用） */
   attempts?: AttemptEvent[];
+  /** 503 选择器判据缝（ADR-0021 决策 9(5) 方案 A）：装配层注入的活集判定，缺省不注入 = 零漂移 */
+  selectable?: (egressId: string) => boolean;
 }
 
 function makeHarness(options: HarnessOptions) {
@@ -145,6 +147,7 @@ function makeHarness(options: HarnessOptions) {
     fetchImpl,
     now,
     egress: gate,
+    ...(options.selectable === undefined ? {} : { egressSelectable: options.selectable }),
     ...(options.attempts === undefined ? {} : { onAttempt: (e) => options.attempts?.push(e) }),
   });
 
@@ -1029,5 +1032,132 @@ describe('引擎：本地预算拒绝（标记头 ⇒ 不换 key、不记失败�
     assert.equal(calls.length, 1);
     const sent = Object.keys(calls[0]?.headers ?? {}).map((h) => h.toLowerCase());
     assert.ok(!sent.includes(EGRESS_LOCAL_HEADER), `进程内标记头不得上行：${JSON.stringify(sent)}`);
+  });
+});
+
+/* -------- 503 出口选择器：判据缝 + 收尾分型（ADR-0021 决策 9(5) v9/v10 / 契约 §10 v1.7.0 行） --------
+ * 本组钉死三件「拆掉一根就会静默做错」的事：
+ *   1. 「判据缝必须被装配层接线」—— 引擎只认注入的 `egressSelectable`，生产装配不接 = 永不判 503；
+ *   2. 「绑定的出口全部 retired ⇒ 503 NO_AVAILABLE_EGRESS，不带 Retry-After、不回落直连」；
+ *   3. 「启用后一个出口都未登记」在「启用 = 行数 > 0」判据下**不可达** —— 0 行 = 池未启用 = 恒活直连，
+ *      装配层以显式分支落地并由源码钉声明；若未来引入独立池开关使两支可分离，先改契约再改这里。
+ */
+
+describe('引擎：503 出口选择器（egressSelectable 判据缝，装配层方案 A）', () => {
+  it('绑定的出口全部 retired ⇒ 503 NO_AVAILABLE_EGRESS：不带 Retry-After、不回落直连、零出站', async () => {
+    const h = makeHarness({
+      keys: [keyConfig('k1'), keyConfig('k2')],
+      steps: [],
+      egressIds: { up1: 'egr_dead' },
+      selectable: () => false, // 台账视角：唯一出口已 retired
+    });
+
+    const result = await call(h);
+
+    assert.equal(result.error.httpStatus, 503);
+    assert.equal(result.error.body.error.code, 'NO_AVAILABLE_EGRESS');
+    assert.equal(result.error.body.error.type, 'server_error');
+    assert.equal(result.error.retryAfterSec, undefined, '码值级不变量 v10①：503 NO_AVAILABLE_EGRESS 永不带 Retry-After');
+    assert.equal(h.calls.length, 0, '不回落宿主直连 —— 决策 9(5)：回落 = 无人看得见的静默故障');
+    assert.equal(result.attempts, 0, '0 次真实尝试（终态形状与决策 4b 同款）');
+  });
+
+  it('死绑定候选被跳过、活出口照常服务 —— 死绑定不污染瞬态分型也不拖垮活出口', async () => {
+    const pool = createKeyPool({ now });
+    pool.applySnapshot({
+      revision: 1,
+      upstreams: [
+        { upstreamId: 'up1', enabled: true, models: null },
+        { upstreamId: 'up2', enabled: true, models: null },
+      ],
+      keys: [keyConfig('k1', 'up1'), keyConfig('k2', 'up2')],
+    });
+    const h = makeHarness({
+      keys: [keyConfig('k1', 'up1'), keyConfig('k2', 'up2')],
+      pool,
+      steps: [OK],
+      egressIds: { up1: 'egr_dead', up2: 'egr_alive' },
+      selectable: (id) => id === 'egr_alive',
+    });
+
+    const result = await run(h);
+
+    assert.equal(result.kind, 'json', '活出口那把照常出站');
+    assert.equal((result as Extract<ForwardResult, { kind: 'json' }>).keyId, 'k2', '死绑定候选被跳过，未占尝试');
+    assert.equal(h.calls.length, 1);
+  });
+
+  it('死绑定与出口冷却混现 ⇒ 429 + Retry-After（池未永久空，冷却带确定性恢复时刻）', async () => {
+    const gate = createEgressGate({ now, mode: 'active' });
+    gate.observeLimited(limited('egr_cool', 'acc-1', 'x1'));
+    gate.observeLimited(limited('egr_cool', 'acc-2', 'x2'));
+    gate.observeLimited(limited('egr_cool', 'acc-3', 'x3'));
+    assert.equal(gate.cooldownUntil('egr_cool'), clock + 60_000, '前提：egr_cool 已被上游确认置冷');
+    const pool = createKeyPool({ now });
+    pool.applySnapshot({
+      revision: 1,
+      upstreams: [
+        { upstreamId: 'up1', enabled: true, models: null },
+        { upstreamId: 'up2', enabled: true, models: null },
+      ],
+      keys: [keyConfig('k1', 'up1'), keyConfig('k2', 'up2')],
+    });
+    const h = makeHarness({
+      keys: [keyConfig('k1', 'up1'), keyConfig('k2', 'up2')],
+      pool,
+      steps: [],
+      egressIds: { up1: 'egr_dead', up2: 'egr_cool' },
+      gate,
+      selectable: (id) => id === 'egr_cool', // egr_dead retired；egr_cool 活但在冷却
+    });
+
+    const result = await call(h);
+
+    assert.equal(result.error.httpStatus, 429, '不是 503：还有「等一会儿就能用」的候选');
+    assert.equal(result.error.body.error.code, 'RATE_LIMITED');
+    assert.equal(result.error.retryAfterSec, 60, '冷却剩余原样透给客户端（决策 9(5) v9）');
+    assert.equal(h.calls.length, 0, '0 次真实尝试');
+  });
+
+  it('缺省不注入 = 恒活：不传 egressSelectable 时行为与接线前逐字节相同（零漂移钉）', async () => {
+    const h = makeHarness({ keys: [keyConfig('k1')], steps: [OK], egressIds: { up1: 'egr_new' } });
+    const result = await run(h);
+    assert.equal(result.kind, 'json', '未注入判据 ⇒ 不筛选，照常出站');
+  });
+
+  it('判据炸了必须响：egressSelectable 抛异常不被吞（静默放行 = 决策 9(5) 点名的静默回落）', async () => {
+    const h = makeHarness({
+      keys: [keyConfig('k1')],
+      steps: [OK],
+      egressIds: { up1: 'egr_x' },
+      selectable: () => {
+        throw new Error('ledger boom');
+      },
+    });
+    await assert.rejects(() => run(h), /ledger boom/);
+  });
+
+  it('防回退钉：判据缝必须被装配层接线 —— server.ts 注入 egressSelectable 且请求期现查行数+status', () => {
+    const source = readFileSync(fileURLToPath(new URL('../server.ts', import.meta.url)), 'utf8');
+    assert.match(source, /createGatewayRuntime\(\{[^}]*egressSelectable[^}]*\}\)/, '生产装配必须把判据注入数据面（方案 A 的「判据缝」）');
+    assert.match(source, /const egressSelectable = \(egressId/, '判据是装配层命名闭包');
+    assert.match(source, /listEgressProxies\(db\)/, '判据 = egress_proxies 行，请求期现查（不缓存：retire/reactivate 立即生效）');
+    assert.match(source, /if \(rows\.length === 0\) return true;/, '0 行 = 池未启用 = 恒活（fail-open 直连，不判 503）');
+    assert.match(source, /row\.status === 'active'/, '活绑定判据 = 单轴 status（决策 9(1)：retired 退出候选）');
+    // 缝不进闸端口冻结面：「本轮不新增端口方法」（决策 9(5) 末条）照旧管着 EgressGate
+    const gateSource = readFileSync(fileURLToPath(new URL('../egress/port.ts', import.meta.url)), 'utf8');
+    assert.ok(!gateSource.includes('egressSelectable'), '判据缝是独立装配缝，不进 EgressGate 冻结面');
+  });
+
+  it('不可达分支声明钉：「启用后一个出口都未登记」在「启用 = 行数 > 0」下不可达', () => {
+    // 契约 §10 503 触发条件第二支与第一支在本判据下不可分离：0 行 ⇒ 池未启用 ⇒ 恒活直连
+    //（装配层显式分支 + 引擎缺省恒活双保险）。此钉声明该口径：换判据先改契约再改这里。
+    const engineSource = readFileSync(fileURLToPath(new URL('./engine.ts', import.meta.url)), 'utf8');
+    assert.ok(
+      engineSource.includes('egressSelectable = options.egressSelectable ?? (() => true)'),
+      '引擎缺省恒活 —— 未注入 = 未启用判据，行为逐字节零漂移',
+    );
+    const serverSource = readFileSync(fileURLToPath(new URL('../server.ts', import.meta.url)), 'utf8');
+    assert.match(serverSource, /if \(rows\.length === 0\) return true;/, '0 行 fail-open 是装配层显式分支，不是漏判');
   });
 });

@@ -50,6 +50,12 @@ export interface GatewayStackOptions {
    * 不传 = 引擎用缺省闸（恒放行、恒判 key 级，决策 7），行为与改动前逐字节相同。
    */
   egress?: EgressGate;
+  /**
+   * 出口池判据缝（ADR-0021 决策 9(5)，装配层方案 A）：装配层逐 id 回答「这个出口在不在活集」。
+   * 不传 = 引擎侧缺省恒活，行为与未接池逐字节相同。逐字透传 `EngineOptions.egressSelectable`，
+   * 本层**不**给缺省实现 —— 兜底写在这里会把「忘了接」伪装成「故意不接」。
+   */
+  egressSelectable?: (egressId: string) => boolean;
 }
 
 export interface GatewayStack {
@@ -80,6 +86,7 @@ export function createGatewayStack(options: GatewayStackOptions): GatewayStack {
   if (options.crossUpstreamRetry !== undefined) built.crossUpstreamRetry = options.crossUpstreamRetry;
   if (options.upstreamTimeoutMs !== undefined) built.upstreamTimeoutMs = options.upstreamTimeoutMs;
   if (options.egress !== undefined) built.egress = options.egress;
+  if (options.egressSelectable !== undefined) built.egressSelectable = options.egressSelectable;
 
   const engine = createGatewayEngine(built);
 

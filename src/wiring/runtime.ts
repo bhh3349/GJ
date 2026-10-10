@@ -65,6 +65,12 @@ export interface GatewayRuntimeOptions {
    * 也进这里（数据面）—— 决策 4c 的"一个进程一份"。
    */
   egress: EgressGate;
+  /**
+   * 出口池判据缝（ADR-0021 决策 9(5) / 装配层方案 A）。可选：不传 = 恒活 = 引擎行为零漂移。
+   * 生产装配由 `src/server.ts` 注入（判据 = `egress_proxies` 行数 + 单轴 `status`，请求期现查）；
+   * 本层逐字转发、不给缺省实现（理由同 `egress` 必填那条：兜底 = 把静默态伪装成故意态）。
+   */
+  egressSelectable?: (egressId: string) => boolean;
 }
 
 export interface GatewayRuntime {
@@ -147,6 +153,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions): GatewayRun
       cooldownLadderMs: config.cooldownLadderSeconds.map((s) => s * 1000),
     },
     ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
+    ...(options.egressSelectable === undefined ? {} : { egressSelectable: options.egressSelectable }),
     // 逐字转发注入的那个实例，**不**在这里 `?? permissiveEgressGate`：兜底写在这一层，
     // 就等于"忘了注入"与"故意不接闸"在运行期同形（都恒放行），而那正是要防的静默态。
     egress: options.egress,

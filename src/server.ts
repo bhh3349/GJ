@@ -71,7 +71,21 @@ async function main(): Promise<void> {
 
   // 网关 runtime 自带内存快照 + 明文缓存；`stop()` 负责最后一次用量落库、最后一次
   // key 运行态镜像（ADR-0010）与清明文 —— 都在 db.close() 之前，否则 flush 会写到已关的连接上
-  const gateway = createGatewayRuntime({ db, config, logger: true, egress });
+  // 503 出口选择器判据缝（ADR-0021 决策 9(5)，装配层方案 A）：**请求期现查** `egress_proxies`，
+  // 不缓存 —— retire/reactivate 立即生效（零失步窗口）；表是个位数行，一条同步 SELECT 微秒级。
+  // 「启用 = 行数 > 0」：0 行 = 池未启用 ⇒ 恒真（fail-open 宿主直连、不判 503；与决策 9(5)
+  // 「`egress_id IS NULL` 是配置事实照常走宿主出口」同一条纪律）。有行时逐 id 查单轴 `status`：
+  // `active` = 活绑定；`retired` / 查无此行 = 死绑定 ⇒ 全部候选都死时引擎回
+  // 503 NO_AVAILABLE_EGRESS（不带 Retry-After、不回落直连，分型见 engine.ts 收尾段）。
+  // 刻意提成命名常量、保持下方调用对象扁平：egress.spec 的生产装配锁用
+  // `createGatewayRuntime\(\{[^}]*\begress\b[^}]*\}\)` 钉「数据面拿到同一个 egress 实例」，
+  // 对象里嵌函数体会让该正则失配 —— 装配锁不为此放宽，改的是装配写法。
+  const egressSelectable = (egressId: string): boolean => {
+    const rows = listEgressProxies(db);
+    if (rows.length === 0) return true;
+    return rows.some((row) => row.id === egressId && row.status === 'active');
+  };
+  const gateway = createGatewayRuntime({ db, config, logger: true, egress, egressSelectable });
 
   // 晚绑（上面先给了个空实现）：`onShadow` 的消费者是日志，而闸必须**先于** app 存在
   // （它要注入进 runtime，runtime 才建 app）。标定吃的就是这条输出（决策 10(6)「shadow 输出

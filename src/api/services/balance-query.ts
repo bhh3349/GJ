@@ -29,6 +29,7 @@ import {
   findPresetByBaseUrl,
   presetEndpoint,
   type BalancePresetSpec,
+  type PresetRunResult,
 } from '../../balance/preset.js';
 import type { Db } from '../../db/database.js';
 import { getUpstreamRow } from '../../db/repo/upstreams.js';
@@ -241,6 +242,10 @@ export interface QueryExecution {
   message: string | null;
   /** 0 = 没拿到响应（不可达 / 超时） */
   httpStatus: number;
+  /** 本地出口拒绝带回的 `Retry-After`（整数秒 ≥1）。单查询**必带**（`null` = 无建议）；
+   * 双请求 preset 只由最后一个发出去的请求透传（preset.ts 钉死）；
+   * 上游真 429 恒 `null`（值只来自本地拒绝，ADR-0017 清单 #16 / 契约 v1.8.1）。 */
+  retryAfterSeconds: number | null;
   durationMs: number;
   /** 上游原文。仅当 `captureRaw` 时非 undefined，且**必须先过 balance/raw.ts 才能外露** */
   raw: unknown;
@@ -277,6 +282,7 @@ export async function executePlan(
     errorCode: outcome.errorCode,
     message: outcome.message,
     httpStatus: outcome.httpStatus,
+    retryAfterSeconds: outcome.retryAfterSeconds ?? null,
     durationMs: Math.round(performance.now() - started),
     raw: captureRaw ? outcome.raw : undefined,
   };
@@ -288,14 +294,9 @@ async function runPreset(
   secret: string,
   fetchImpl: typeof fetch,
   captureRaw: boolean,
-): Promise<{
-  ok: boolean;
-  parsed: ParsedBalance | null;
-  errorCode: 'UPSTREAM_UNREACHABLE' | 'PARSE_FAILED' | null;
-  message: string | null;
-  httpStatus: number;
-  raw: unknown;
-}> {
+): Promise<
+  Pick<PresetRunResult, 'ok' | 'parsed' | 'errorCode' | 'message' | 'httpStatus' | 'retryAfterSeconds' | 'raw'>
+> {
   const res = await plan.preset.run({
     baseUrl: plan.baseUrl,
     secret,

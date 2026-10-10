@@ -167,6 +167,8 @@ interface RawTestOutcome {
   parsed: { balanceCents: number | null; currency: string | null; remainingTokens: number | null; expiresAt: string | null } | null;
   errorCode: 'UPSTREAM_UNREACHABLE' | 'PARSE_FAILED' | null;
   raw: unknown;
+  /** 契约 §2 v1.8.1：单查询透传（`QueryExecution.retryAfterSeconds`，本地拒绝带值，其余 null） */
+  retryAfterSeconds: number | null;
   /** 本次**该类别关心的那个数**取到了没有；决定 ok 与引导码 */
   hasValue: boolean;
 }
@@ -178,6 +180,8 @@ function buildResult(outcome: RawTestOutcome): BalanceTestResult {
     httpStatus: outcome.httpStatus,
     hasValue: outcome.hasValue,
   });
+  // 契约 §2 v1.8.1：自测也带"等多久"。`RawTestOutcome` 不透传 `retryAfterSeconds`：上游真 429
+  // 恒 null（值面只收本地拒绝，与刷新同纪律）；本地拒绝单发 ⇒ 无多拒绝取最大问题，恒用单值。
   return {
     ok: outcome.ok && outcome.hasValue,
     keyId: outcome.ref.keyId,
@@ -198,6 +202,7 @@ function buildResult(outcome: RawTestOutcome): BalanceTestResult {
     errorCode: outcome.errorCode,
     hintCode,
     hint: hintCode === null ? null : hintText(hintCode),
+    retryAfterSeconds: outcome.retryAfterSeconds ?? null,
   };
 }
 
@@ -281,6 +286,7 @@ export async function runUpstreamBalanceTest(
     parsed: exec.parsed,
     errorCode: exec.errorCode,
     raw: exec.raw,
+    retryAfterSeconds: exec.retryAfterSeconds,
     // 草稿没有类别概念，所以"取到数"= 余额或余量任一取到。
     // 单看 balance 会让 token-plan 上游的自测永远 ok:false —— 那不是诊断，那是误导。
     hasValue: exec.parsed !== null && (exec.parsed.balanceCents !== null || exec.parsed.remainingTokens !== null),
@@ -320,6 +326,7 @@ export async function runKeyBalanceTest(
     parsed: exec.parsed,
     errorCode: exec.errorCode,
     raw: exec.raw,
+    retryAfterSeconds: exec.retryAfterSeconds,
     hasValue:
       exec.parsed !== null &&
       (ref.category === 'balance'

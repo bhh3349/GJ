@@ -644,6 +644,8 @@ function fakeUpstreamFetch(body: unknown, status = 200): typeof fetch {
   return (async () => ({
     ok: status >= 200 && status < 300,
     status,
+    // v1.8.1：isLocalEgressReject 会读 headers.get —— 桩无头（null），上游真 429 不带 Retry-After
+    headers: { get: (): null => null },
     text: async (): Promise<string> => (typeof body === 'string' ? body : JSON.stringify(body)),
   })) as unknown as typeof fetch;
 }
@@ -773,6 +775,26 @@ describe('余额自测（契约 §2 · M6-A）：同步、诊断语义、绝不�
     expect(body.hintCode).toBe('BALANCE_EGRESS_RATE_LIMITED');
     // 文案不得越证据：不许写成"出口被限流"这类确定性归因
     expect(body.hint).not.toContain('出口被限流');
+    await closeHarness(h);
+  });
+
+  it('§2 v1.8.1 —— 自测 429（上游真 429）时 retryAfterSeconds 恒 null；上游响应头不进值面', async () => {
+    // 防回退钉：值只来自本地拒绝（isLocalEgressReject）。桩无头 ⇒ 上游真 429 ⇒ null。
+    const h = await setup({ fetchImpl: fakeUpstreamFetch({ error: 'rate limited' }, 429) });
+    const upstreamId = await createUpstream(h);
+    await createKey(h, upstreamId, { key: probeSecret() });
+
+    const res = await h.app.inject({
+      method: 'POST',
+      url: `/api/upstreams/${upstreamId}/balance-template/test`,
+      headers: auth(h),
+      payload: { ...draft(), keyId: null },
+    });
+
+    expect(res.statusCode, res.body).toBe(200);
+    const body = res.json() as { hintCode: string | null; retryAfterSeconds: number | null };
+    expect(body.hintCode).toBe('BALANCE_EGRESS_RATE_LIMITED');
+    expect(body.retryAfterSeconds).toBeNull();
     await closeHarness(h);
   });
 

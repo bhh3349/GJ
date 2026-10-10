@@ -60,11 +60,17 @@ export interface RefreshSummary {
    */
   hintCode: HintCode | null;
   hint: string | null;
+  /**
+   * 本轮本地出口拒绝带回的最大 `Retry-After`（整数秒 ≥1；`null` = 无建议）。
+   * 多个本地拒绝取**最大**（对调用方唯一有用的那个等待量；ADR-0017 清单 #16 / 契约 v1.8.1）。
+   * 上游真 429 不产生该值 —— 值只来自本地拒绝（`fetch-gate` 合成响应头），不按来源分型。
+   */
+  retryAfterSeconds: number | null;
 }
 
 /**
  * 该上游本轮各型计数。**只为收尾钩子**（写快照 / 退避归零 / 漂移判定）而存在：
- * 对外返回的 `RefreshSummary` 形状一个字都不动（契约 §3 冻结）。
+ * 对外返回的 `RefreshSummary` 形状按契约 §3 增补可选 `retryAfterSeconds`（v1.8.1，非破坏新增）。
  */
 export interface UpstreamRefreshResult {
   upstreamId: string;
@@ -306,6 +312,9 @@ function summarize(attempts: readonly Attempt[]): RefreshSummary {
   // 只服务于 hint：不参与任何计数口径（契约明确"三型计数逐字不变"）。
   let authRejected = 0;
   // 第 5 个旁路计数（ADR-0017 补遗 3「实现落点」1）：与 `authRejected` 同处现算、同样不进三型口径。
+  // `retryAfterSeconds` 同族旁路面：只由**本地**拒绝带值（`QueryOutcome.retryAfterSeconds`），
+  // 多个本地拒绝取最大（§3 v1.8.1：对调用方唯一有用的等待量）。
+  let retryAfterSeconds: number | null = null;
   // 与补遗 2 那个进 `UpstreamRefreshResult` 的 `rateLimited` **同源同值、各自独立** ——
   // 一个不出 REST 面（收尾钩子用），一个要出（hint 用），不得并成一个对外字段。
   let rateLimited = 0;
@@ -320,6 +329,8 @@ function summarize(attempts: readonly Attempt[]): RefreshSummary {
       if (o.httpStatus === 401 || o.httpStatus === 403) authRejected += 1;
       // 429 一行通吃：判据是状态码本身，不看标记头（上游真 429 与本地合成的 429 同归这一档）。
       if (o.httpStatus === 429) rateLimited += 1;
+      const secs = o.retryAfterSeconds;
+      if (secs !== null && (retryAfterSeconds === null || secs > retryAfterSeconds)) retryAfterSeconds = secs;
       continue;
     }
     ok += 1;
@@ -338,5 +349,7 @@ function summarize(attempts: readonly Attempt[]): RefreshSummary {
     skipped,
     hintCode,
     hint: hintCode === null ? null : hintText(hintCode),
+    // 非空 ⇒ 429 引导硬要求""等多久要说得出来""（契约 §2 v1.8.1）
+    retryAfterSeconds,
   };
 }

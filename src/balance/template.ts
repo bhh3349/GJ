@@ -15,6 +15,7 @@
 
 import type { BalanceQueryTemplate, BalanceUnit } from '../db/balance-query.js';
 import { unitToCentsFactor } from '../db/balance-query.js';
+import { readLocalRetryAfterSeconds } from '../egress/fetch-gate.js';
 
 export class BalanceQueryError extends Error {
   readonly code: 'UPSTREAM_UNREACHABLE' | 'PARSE_FAILED';
@@ -141,6 +142,13 @@ export interface QueryOutcome {
    * 拿到它的人必须先过 `balance/raw.ts` 的 sanitizeUpstreamBody 才能外露。
    */
   raw?: unknown;
+  /**
+   * 本地出口拒绝带回的 `Retry-After`（整数秒 ≥1，ceil；ADR-0017 清单 #16 / 契约 v1.8.1）。
+   * 生产唯一来源 = `isLocalEgressReject`（fetch-gate 合成的 429，响应头自带 retry-after）；
+   * 上游真 429 **不填** —— 出口级与 key 级证据面同形、不按来源分型（§16.7 v1.6.2）。
+   * 缺省（absent）= 无建议，前端不显示。
+   */
+  retryAfterSeconds?: number;
 }
 
 /** 执行选项。默认全关：批量刷新不需要响应体，也不该为此付内存。 */
@@ -215,6 +223,7 @@ export async function queryBalance(
         message: `上游返回 ${res.status}（${safeEndpointLabel(template.url)}）`,
         httpStatus: res.status,
         raw: captureRaw ? (jsonOk ? body : text) : undefined,
+        retryAfterSeconds: readLocalRetryAfterSeconds(res),
       };
     }
     if (!jsonOk) {

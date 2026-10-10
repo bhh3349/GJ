@@ -353,7 +353,7 @@ async function call(url: string, opts: RequestInit = {}, admin = false): Promise
   const headers: Record<string, string> = { ...(opts.headers as Record<string, string> ?? {}) };
   if (admin) {
     if (ADMIN_SESSION === '') throw new Error('缺 PROBE_ADMIN_SESSION');
-    headers.cookie = `session=${ADMIN_SESSION}`;
+    headers.cookie = `sid=${ADMIN_SESSION}`;
   }
   const res = await fetch(url, { ...opts, headers, signal: AbortSignal.timeout(TIMEOUT_MS) });
   if (res.status === 429) state.budgetUsed += 1;
@@ -420,7 +420,7 @@ function resolveWsCtor(): WsCtor {
 async function readPoolPerspective(): Promise<PoolNode[]> {
   const WS = resolveWsCtor();
   const socket = new WS(`${ADMIN.replace(/^http/, 'ws')}/api/stats/live`, {
-    headers: ADMIN_SESSION === '' ? {} : { cookie: `session=${ADMIN_SESSION}` },
+    headers: ADMIN_SESSION === '' ? {} : { cookie: `sid=${ADMIN_SESSION}` },
   });
   try {
     return await new Promise<PoolNode[]>((resolve, reject) => {

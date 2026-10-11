@@ -208,7 +208,7 @@ export function EgressPoolCard() {
           image={Empty.PRESENTED_IMAGE_SIMPLE}
           description={
             <Text type="secondary" style={{ fontSize: 12 }}>
-              未配置出口 —— 通道已接线且回报池为空，不是离线故障。
+              未配置出口
             </Text>
           }
         />

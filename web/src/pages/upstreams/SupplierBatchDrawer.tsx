@@ -266,10 +266,6 @@ export function SupplierBatchDrawer({
               </Space>
             </Tooltip>
           )}
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            本浮层会等到终态才给结论（契约 §14.7：一次点击必须落到一个明确结论）。
-            一行明细要等任务跑完才由服务端给 —— 在这里画进度条可以，编逐行结果不行。
-          </Text>
         </div>
       ) : null}
 
@@ -302,11 +298,6 @@ export function SupplierBatchDrawer({
             <Text type="secondary" style={{ fontSize: 12 }}>
               {`跳过 ${formatCount(result.skipped)}`}
             </Text>
-            <Tooltip title="不变量：成功 + 失败 + 跳过 = 总计。跳过 = 没做过的行（整行解析失败等），失败 = 做了但不成的行 —— 两者不是一回事。">
-              <Text type="secondary" style={{ fontSize: 12, cursor: 'help' }}>
-                成功 + 失败 + 跳过 = 总计
-              </Text>
-            </Tooltip>
             {task?.finishedAt ? (
               <Text type="secondary" style={{ fontSize: 12 }}>
                 {`完成于 ${formatIso(task.finishedAt)}`}
@@ -324,13 +315,7 @@ export function SupplierBatchDrawer({
               type="info"
               showIcon
               style={{ background: tokens.tint.info, border: 'none' }}
-              message="这一批里有一部分被限流拒绝了 —— 这是任务结论，不是「哪把 key 坏了」"
-              description={
-                <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-                  被拒的行<Text strong style={{ fontSize: 12 }}>不计入任何 key 的健康度</Text>（契约 §16.7：谁没错，不给谁记过）。
-                  按钮也不会因此被禁用 —— 退避只约束自动同步，手动刷新照常可发。稍后重试即可。
-                </Text>
-              }
+              message="这一批有一部分被限流拒绝，稍后重试即可"
             />
           ) : null}
 
@@ -366,11 +351,9 @@ export function SupplierBatchDrawer({
               }}
             />
             {result.skipped > 0 ? (
-              <Tooltip title="跳过的行不会出现在 items 里 —— 它们是「没做过」的行（整行解析失败、命中排除名单），没有逐行结论可给。">
-                <Text type="secondary" style={{ fontSize: 12, cursor: 'help' }}>
-                  跳过的行没有逐行明细
-                </Text>
-              </Tooltip>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                跳过 {formatCount(result.skipped)} 行无逐行明细
+              </Text>
             ) : null}
           </Space>
 

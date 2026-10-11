@@ -51,10 +51,9 @@ const CREDENTIAL_TEXT: Record<SupplierCredentialSource, string> = {
 };
 
 /** 四行里的第一个构建块：一行 = 标签 + 若干「标签: 值」。 */
-function DetailRow({ index, label, hint, children }: {
+function DetailRow({ index, label, children }: {
   index: number;
   label: string;
-  hint?: string;
   children: ReactNode;
 }) {
   return (
@@ -69,13 +68,6 @@ function DetailRow({ index, label, hint, children }: {
       <div style={{ width: 122, flexShrink: 0 }}>
         <Space size={4} align="center">
           <Text style={{ fontSize: 13, fontWeight: 600 }}>{label}</Text>
-          {hint ? (
-            <Tooltip title={hint}>
-              <Text type="secondary" style={{ fontSize: 12, cursor: 'help' }}>
-                ?
-              </Text>
-            </Tooltip>
-          ) : null}
         </Space>
       </div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.xs, minWidth: 0, flex: 1 }}>
@@ -172,16 +164,6 @@ export function SupplierAccountDetailDrawer({
                   {keyCount === null
                     ? '删除后这些 key 会解除归属，但不会消失。'
                     : `删除后名下 ${formatCount(keyCount)} 把 key 会解除归属，但不会消失。`}
-                </Text>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  <Text strong style={{ fontSize: 12 }}>
-                    这次删除一把 key 都不删，只解绑
-                  </Text>
-                  —— 与删上游（按依赖序物理删整棵子树）正好相反。真删 key 会让网关下一轮快照
-                  少一批可用 key，也就是"删个账号把流量打穿"。
-                </Text>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  代价是：解绑后这些 key 不再有归属账号，余额也不会再随本账号刷新而更新。
                 </Text>
               </div>
             ),
@@ -353,8 +335,7 @@ export function SupplierAccountDetailDrawer({
           <DetailRow
             index={0}
             label="身份"
-            hint="identifier 是掩码；uid 与 username 不掩码，因为它们不是登录凭据 —— 登录凭据是 identifier + password，而 password 永不出口。"
-          >
+                      >
             <Field label="内部 ID" value={account.id} mono />
             <Field label="账号（掩码）" value={account.identifier} mono />
             <Field label="用户名" value={account.username} mono />
@@ -369,27 +350,19 @@ export function SupplierAccountDetailDrawer({
           <DetailRow
             index={1}
             label="凭据与会话"
-            hint="credentialSource 与 hasSession 正交：「能不能自动重登」只由前者回答，不得用后者反推。会话值本身永不出后端。"
-          >
+                      >
             <Field label="凭据来源" value={CREDENTIAL_TEXT[account.credentialSource]} />
             <Field label="会话状态" value={account.hasSession ? '有会话（值不出后端）' : '无会话'} />
             <Field
               label="会话到期"
               value={account.sessionExpiresAt ? formatIso(account.sessionExpiresAt) : '未提供'}
             />
-            {account.credentialSource === 'session' ? (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                会话型账号<Text strong style={{ fontSize: 12 }}>没有</Text>存档密码：会话一过期就得人工重新导凭据，
-                页面上那条「重新登录」因此是禁用的。
-              </Text>
-            ) : null}
           </DetailRow>
 
           <DetailRow
             index={2}
             label="余额"
-            hint="balanceUpdatedAt 是最近一次「真的查到」的时刻；查失败不动它 —— 所以它显示得旧，本身就是一条事实。"
-          >
+                      >
             <div style={{ display: 'flex', alignItems: 'center', gap: tokens.space.sm }}>
               <BalanceText value={account.balanceCents} strong showMeta updatedAt={account.balanceUpdatedAt} />
             </div>
@@ -406,8 +379,7 @@ export function SupplierAccountDetailDrawer({
           <DetailRow
             index={3}
             label="池内 key 与套餐"
-            hint="三个 key 计数不是同一件事：maskedKeyCount 是「只有掩码、进不了池」的那部分，不得与 keyCount 相加成「key 总数」。套餐不建成 key（§15.8 第 6 问），所以套餐数不进任何 key 计数。"
-          >
+                      >
             <div style={{ display: 'flex', gap: tokens.space.lg, flexWrap: 'wrap' }}>
               <Text style={{ fontSize: 12 }}>
                 池内 key {formatCount(account.keyCount)} 把
@@ -437,11 +409,6 @@ export function SupplierAccountDetailDrawer({
                 {`套餐 ${formatCount(account.subscriptions.length)} 个`}
               </Text>
             </div>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              套餐余额是账号级的量（`amount_total - amount_used`），既不进 `totalBalance`、
-              也不进网关准入判断 —— 本上游池内<Text strong style={{ fontSize: 12 }}>没有</Text>
-              {` `}`token-plan` 行（§15.8 第 8 问）。
-            </Text>
             <Table<SupplierSubscription>
               rowKey="subNo"
               size="small"
@@ -452,13 +419,6 @@ export function SupplierAccountDetailDrawer({
             />
           </DetailRow>
 
-          {account.statusMessage ? (
-            <div style={{ marginTop: tokens.space.md }}>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                最近一次状态说明：{account.statusMessage}
-              </Text>
-            </div>
-          ) : null}
         </>
       ) : (
         <Paragraph type="secondary" style={{ fontSize: 12 }}>

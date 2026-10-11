@@ -61,9 +61,6 @@ export function KeyBalanceSelfTest({ open, keyId, maskedKey, onClose }: KeyBalan
       destroyOnClose
       width={760}
     >
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        用该 key 所属上游当前生效的查询方式（用户模板或内置 preset）打一次，**不会写库**。
-      </Text>
       <div style={{ marginTop: tokens.space.md }}>
         {loading ? (
           <div style={{ textAlign: 'center', padding: tokens.space.xl }}>

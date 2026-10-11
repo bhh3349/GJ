@@ -32,7 +32,6 @@ export function LoadingState({ tip = '加载中…', minHeight = 240 }: LoadingS
 
 export interface EmptyStateProps {
   title?: string;
-  description?: ReactNode;
   action?: ReactNode;
   minHeight?: number;
 }
@@ -40,7 +39,6 @@ export interface EmptyStateProps {
 /** 空态：区分「确实没有数据」与「还没接上数据源」，文案由调用方给，不写假数据。 */
 export function EmptyState({
   title = '暂无数据',
-  description,
   action,
   minHeight = 240,
 }: EmptyStateProps) {
@@ -58,11 +56,6 @@ export function EmptyState({
         description={
           <div style={{ maxWidth: 420 }}>
             <div style={{ color: tokens.color.textPrimary, fontWeight: 500 }}>{title}</div>
-            {description ? (
-              <div style={{ color: tokens.color.textTertiary, marginTop: tokens.space.xs }}>
-                {description}
-              </div>
-            ) : null}
           </div>
         }
       >

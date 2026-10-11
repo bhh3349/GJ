@@ -85,12 +85,10 @@ const CREDENTIAL_SHORT: Record<SupplierCredentialSource, string> = {
   session: '会话型',
 };
 
-/** 一个「打上游」的批量动作。三个字段各自只用在一处：确认标题 / 确认代价 / 真正的提交函数。 */
+/** 一个「打上游」的批量动作：确认标题 / 真正的提交函数。 */
 interface BatchActionSpec {
   key: string;
   label: string;
-  /** 二次确认里那句「会付出什么」。**必须写代价**（§14.7），否则那不是二次确认。 */
-  cost: string;
   submit: (body: SupplierBatchRequest) => Promise<TaskAccepted>;
 }
 
@@ -98,21 +96,18 @@ const BATCH_ACTIONS: readonly BatchActionSpec[] = [
   {
     key: 'refresh',
     label: '批量刷新余额',
-    cost: '会真的打上游：每个被选中的账号 2 次请求（§15.5，刷新 + 套餐），所以这个按钮是"一批"而不是"一次"。出口预算与网关数据面共用同一条，账号多时可能挤到客户端流量。会话过期的号也会被刷 —— 它们正是最该刷的那批。',
     submit: (body) => supplierAccountsApi.refresh(body),
   },
   {
     key: 'sync',
     label: '批量同步 key',
-    cost: '会真的打上游（只读上游、只写台账）。同步回来的是 key 掩码与套餐：未被我们认领的掩码只记数、不入池。同样占出口预算。',
     submit: (body) => supplierAccountsApi.syncKeys(body),
   },
 ];
 
 /**
  * 二次确认正文已抽到 `@/components/ManualRefreshConfirm`（§14.7 的唯一实现）——
- * 本页只负责给出「打谁」与「代价」，那句"量级由服务端给"的纪律文案不在页面里复述。
- * 末句挂本页专属的终态去处：逐行结论在明细浮层。
+ * 本页只负责给出「打谁」；逐行结论的终态去处挂在末句。
  */
 
 /** 展开行第二级：套餐摘要表（§15.8 第 6 问的口径与详情里那张同源）。 */
@@ -247,8 +242,7 @@ export default function SupplierAccountsPage() {
     confirmManualRefresh(modal, {
       title: spec.label,
       scope: scopeOf(),
-      cost: spec.cost,
-      outcome: '逐行结论见明细浮层。',
+      outcome: '执行后等终态，逐行结论见明细浮层。',
       onOk: async () => {
         const accepted = await run(spec.key, () => spec.submit(body), '已提交任务');
         if (accepted === null) return;
@@ -465,12 +459,7 @@ export default function SupplierAccountsPage() {
   return (
     <>
       <PageHeader
-        title="账号池"
-        description={
-          upstream.data
-            ? `${upstream.data.name} · 供应商账号面`
-            : '供应商账号面（账号 → 池内 key / 套餐）'
-        }
+        title={upstream.data ? `账号池 · ${upstream.data.name}` : '账号池'}
         extra={
           <Space>
             <Button
@@ -556,19 +545,8 @@ export default function SupplierAccountsPage() {
                       }}
                     />
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      共 {formatCount(accounts.data?.total ?? 0)} 个账号
+                      {selected.length > 0 ? `已勾选 ${formatCount(selected.length)} 个` : `共 ${formatCount(accounts.data?.total ?? 0)} 个`}
                     </Text>
-                    {selected.length > 0 ? (
-                      <Tooltip title="批量动作的打谁范围。清空勾选即回到「该上游全部账号」——那与省略 ids 同义（§15.2）。">
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          {`已勾选 ${formatCount(selected.length)} 个`}
-                        </Text>
-                      </Tooltip>
-                    ) : (
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        未勾选 → 批量动作作用于全部账号
-                      </Text>
-                    )}
                   </div>
 
                   <Space wrap size={tokens.space.sm}>
@@ -677,9 +655,7 @@ export default function SupplierAccountsPage() {
                               直接说清缺口并指路 —— 这是本格唯一诚实的渲染。
                             */}
                             <Text type="secondary" style={{ fontSize: 12 }}>
-                              这一级的 key 明细<Text strong style={{ fontSize: 12 }}>暂时列不出来</Text>
-                              ：`GET /api/keys` 没有按账号过滤的参数，key 对象里也没有账号归属字段。
-                              要看具体是哪几把，请到
+                              key 明细按掩码对账请到
                               <Button
                                 type="link"
                                 size="small"
@@ -690,14 +666,11 @@ export default function SupplierAccountsPage() {
                               >
                                 Key 管理
                               </Button>
-                              按上游筛。上面的计数是服务端给的，不受此影响。
+                              按上游筛。
                             </Text>
                             <div>
                               <Text style={{ fontSize: 12, fontWeight: 600 }}>
                                 {`套餐 ${formatCount(row.subscriptions.length)} 个`}
-                              </Text>
-                              <Text type="secondary" style={{ fontSize: 12 }}>
-                                {'（挂账号、不建成 key；余额不进任何合计）'}
                               </Text>
                             </div>
                             <Table<SupplierSubscription>

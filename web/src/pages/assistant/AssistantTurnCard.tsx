@@ -42,7 +42,7 @@ function CitationList({ citations }: { citations: readonly AssistantCitation[] }
       }}
     >
       <Text type="secondary" style={{ fontSize: 11, letterSpacing: '0.04em' }}>
-        数据引用 · {citations.length} 条（仅展示，不跳转）
+        数据引用 · {citations.length} 条
       </Text>
 
       <div
@@ -240,11 +240,6 @@ export function AssistantTurnCard({
             <Text type="secondary" style={{ fontSize: 12 }}>
               {turn.slowFirstByte ? '仍在等待上游…' : '正在思考…'}
             </Text>
-            {turn.slowFirstByte ? (
-              <Text type="secondary" style={{ fontSize: 11 }}>
-                首字已超过 15s，不判失败；可继续等或取消
-              </Text>
-            ) : null}
             {active ? (
               <Button size="small" icon={<CloseOutlined />} onClick={onCancel}>
                 取消
@@ -259,9 +254,6 @@ export function AssistantTurnCard({
             <Button size="small" icon={<CloseOutlined />} onClick={onCancel}>
               取消
             </Button>
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              取消会 abort 上游，已收到的文本保留
-            </Text>
           </div>
         ) : null}
 

@@ -240,29 +240,12 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
     >
       <Space size={tokens.space.sm} align="center" wrap style={{ marginBottom: tokens.space.md }}>
         <Text style={{ fontSize: 13, fontWeight: 600 }}>套餐台账（按账号分组）</Text>
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          只读 · 不发上游请求
-        </Text>
         {ledger.data ? (
           <Text type="secondary" style={{ fontSize: 12 }}>
-            {`${formatCount(accountCount)} 个账号 · ${formatCount(grouped.length)} 条套餐 · 服务端按 end_at 升序，这里按账号归拢并保持组内该序`}
+            {`${formatCount(accountCount)} 个账号 · ${formatCount(grouped.length)} 条套餐`}
           </Text>
         ) : null}
       </Space>
-
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: tokens.space.md, background: tokens.tint.neutral, border: 'none' }}
-        message={
-          <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-            套餐<Text strong style={{ fontSize: 12 }}>不建成 key</Text>（§15.8 第 6 问）：它的剩余额度是账号级的量，
-            既不进 `totalBalance`、不进 §14 快照，也不参与网关准入判断。所以这一格
-            <Text strong style={{ fontSize: 12 }}>没有</Text>「新建套餐」按钮 ——
-            套餐是上游的事实，我们只能同步它；账号面上真正能新建的只有<Text strong style={{ fontSize: 12 }}>池内 key</Text>。
-          </Text>
-        }
-      />
 
       {truncated ? (
         <Alert
@@ -303,10 +286,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
                 description={
-                  <Text type="secondary">
-                    这个上游还没有套餐台账。套餐由「刷新余额」/「同步 key」时随上游响应一并记入 ——
-                    它不会凭空出现，也不在管理面手工创建。
-                  </Text>
+                  <Text type="secondary">还没有套餐台账</Text>
                 }
               />
             ),

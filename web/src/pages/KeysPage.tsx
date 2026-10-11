@@ -1,5 +1,5 @@
 /**
- * Key 管理 —— 列表、分类标签、余额显示、启用/禁用。
+ * Key 管理 —— 列表、分类标签、余额显示、启用/禁用/删除（多选批量）。
  *
  * 契约纪律：
  * - 列表只出现 `maskedKey`（后 4 位），页面**没有任何**展示明文的路径。
@@ -10,7 +10,7 @@
  *   同一条（§16.7 Tier 1.5）⇒ §14.7 二次确认，走 `confirmManualRefresh`，本页不自造请求数。
  *   单把 key 的刷新**刻意不弹**：一次请求，"批"的代价量级不成立，且同一个动作问两遍会让人盲点「确定」。
  */
-import { PlusOutlined, ReloadOutlined } from '@ant-design/icons';
+import { DeleteOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import {
   App,
   Button,
@@ -153,7 +153,6 @@ export default function KeysPage() {
   const removeKey = (row: UpstreamKey) => {
     modal.confirm({
       title: `删除 key ${row.maskedKey}？`,
-      content: '删除后该 key 立即停止服务，调用历史仍可查（日志保留 30 天）。',
       okText: '删除',
       okButtonProps: { danger: true },
       cancelText: '取消',
@@ -184,7 +183,6 @@ export default function KeysPage() {
     confirmManualRefresh(modal, {
       title: '查全部上游的余额？',
       scope: '打谁：全部上游名下所有配了余额查询方式的 key（没配的跳过）—— 这是跨上游的全量动作',
-      cost: '会真的打上游，而且这是最大的一“批”：每把被查到的 key 一次请求（§14.7），而出口预算与网关数据面共用同一条 ⇒ 这一下最可能挤到客户端流量。',
       onOk: async () => {
         const result = await run(
           'refreshAll',
@@ -206,6 +204,46 @@ export default function KeysPage() {
     if (result === null) return;
     setSelectedIds([]);
     list.reload();
+  };
+
+  /**
+   * 批量删除（2026-10-11 Bo）：契约只有单笔 DELETE /api/keys/:id（→204），前端按选择顺序
+   * 逐把扇出；单把失败即时 message.error 并继续，结尾汇总 {ok, failed} —— 不造批量端点。
+   */
+  const batchRemove = (): void => {
+    const ids = [...selectedIds];
+    if (ids.length === 0) return;
+    const masked = new Map(rows.map((row) => [row.id, row.maskedKey] as const));
+    const preview = ids
+      .slice(0, 5)
+      .map((id) => masked.get(id) ?? id)
+      .join('、');
+    modal.confirm({
+      title: `删除 ${ids.length} 个 key？`,
+      content: preview + (ids.length > 5 ? ' 等' : ''),
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        let ok = 0;
+        const failed: string[] = [];
+        for (const id of ids) {
+          try {
+            await keysApi.remove(id);
+            ok += 1;
+          } catch {
+            failed.push(masked.get(id) ?? id);
+          }
+        }
+        setSelectedIds([]);
+        list.reload();
+        if (failed.length === 0) {
+          message.success(`已删除 ${ok} 个 key`);
+        } else {
+          message.warning(`已删除 ${ok} 个，失败 ${failed.length} 个：${failed.join('、')}`);
+        }
+      },
+    });
   };
 
   const columns: ColumnsType<UpstreamKey> = [
@@ -385,7 +423,7 @@ export default function KeysPage() {
   if (loading) {
     return (
       <>
-        <PageHeader title="Key 管理" description="分类标签、余额显示、启用与禁用" />
+        <PageHeader title="Key 管理" />
         <LoadingState tip="正在加载 key 列表…" minHeight={420} />
       </>
     );
@@ -394,7 +432,7 @@ export default function KeysPage() {
   if (list.error && !list.data) {
     return (
       <>
-        <PageHeader title="Key 管理" description="分类标签、余额显示、启用与禁用" />
+        <PageHeader title="Key 管理" />
         <ErrorState error={list.error} onRetry={list.reload} variant="page" title="Key 列表加载失败" />
       </>
     );
@@ -404,7 +442,6 @@ export default function KeysPage() {
     <>
       <PageHeader
         title="Key 管理"
-        description="分类标签、余额显示、启用与禁用"
         extra={
           <Space>
             <Button
@@ -547,6 +584,9 @@ export default function KeysPage() {
             >
               批量禁用
             </Button>
+            <Button size="small" danger icon={<DeleteOutlined />} onClick={batchRemove}>
+              批量删除
+            </Button>
           </Space>
         ) : null}
       </div>
@@ -601,11 +641,7 @@ export default function KeysPage() {
           emptyText: (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description={
-                (upstreams.data?.items.length ?? 0) === 0
-                  ? '还没有上游。先到「上游管理」添加 Base URL，再回来加 key。'
-                  : '当前筛选条件下没有 key。'
-              }
+              description="暂无 key"
             />
           ),
         }}

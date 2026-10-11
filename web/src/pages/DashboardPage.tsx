@@ -91,7 +91,7 @@ export default function DashboardPage() {
   if (loading) {
     return (
       <>
-        <PageHeader title="仪表盘" description="QPS、成功率、余额总览与趋势、漂移提示、key 健康状态" />
+        <PageHeader title="仪表盘" />
         <LoadingState tip="正在加载总览…" minHeight={420} />
       </>
     );
@@ -100,7 +100,7 @@ export default function DashboardPage() {
   if (error && !data) {
     return (
       <>
-        <PageHeader title="仪表盘" description="QPS、成功率、余额总览与趋势、漂移提示、key 健康状态" />
+        <PageHeader title="仪表盘" />
         <ErrorState error={error} onRetry={reload} variant="page" title="总览加载失败" />
       </>
     );
@@ -131,7 +131,7 @@ export default function DashboardPage() {
     <>
       <PageHeader
         title="仪表盘"
-        description="QPS、成功率、余额总览与趋势、漂移提示、key 健康状态"
+       
         extra={
           <div style={{ display: 'flex', alignItems: 'center', gap: tokens.space.md }}>
             <Tooltip title="时间窗口由后端下发，前端不用本地时间自算 QPS。">
@@ -238,9 +238,6 @@ export default function DashboardPage() {
             <HealthLine label="冷却中" count={counts.cooling} color={tokens.color.warning} />
             <HealthLine label="已禁用" count={counts.disabled} color={tokens.color.textTertiary} />
           </div>
-          <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: tokens.space.md }}>
-            健康态是网关运行态，管理端只读；启停请到 Key 管理页。
-          </Text>
         </div>
 
         <div
@@ -262,7 +259,7 @@ export default function DashboardPage() {
               emptyText: (
                 <Empty
                   image={Empty.PRESENTED_IMAGE_SIMPLE}
-                  description="还没有 key。到「上游管理」建上游后，在「Key 管理」添加。"
+                  description="暂无 key"
                 />
               ),
             }}

@@ -7,7 +7,7 @@
  *   而是直接调 API、把 `BalanceTestResult` 存进本地 state 交给 `BalanceTestResultView` 渲染。
  * - 响应 `raw` 帮用户定位「该填哪条取值路径」。
  */
-import { Divider, Form, Input, InputNumber, Modal, Segmented, Select, Space, Typography } from 'antd';
+import { Divider, Form, Input, InputNumber, Modal, Segmented, Select, Space } from 'antd';
 import { useEffect, useState } from 'react';
 
 import { keysApi, upstreamsApi } from '@/api/endpoints';
@@ -22,7 +22,6 @@ import {
 import { BalanceTestResultView } from '@/components/BalanceTestResultView';
 import { tokens } from '@/theme/tokens';
 
-const { Text } = Typography;
 
 interface DraftFormValues {
   keyId?: string;
@@ -161,9 +160,6 @@ export function BalanceSelfTest({ open, upstreamId, initial, onClose }: BalanceS
       destroyOnClose
       width={760}
     >
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        用下面的草稿打一次真实查询，**不会写库**。改字段路径后点「测试」，用原始响应定位该填哪条路径。
-      </Text>
 
       <Form<DraftFormValues> form={form} layout="vertical" style={{ marginTop: tokens.space.md }}>
         <Form.Item name="keyId" label="测试用 Key" style={{ width: 320 }}>
@@ -189,7 +185,7 @@ export function BalanceSelfTest({ open, upstreamId, initial, onClose }: BalanceS
           </Form.Item>
         </Space>
 
-        <Form.Item name="headersJson" label="请求头（JSON）" extra='占位符 {key} 只在执行时替换'>
+        <Form.Item name="headersJson" label="请求头（JSON）">
           <Input.TextArea rows={3} style={{ fontFamily: tokens.font.mono }} />
         </Form.Item>
 

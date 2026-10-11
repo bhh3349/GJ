@@ -143,11 +143,6 @@ export function AppLayout() {
             <Text strong style={{ fontSize: 14 }}>
               {current?.label ?? 'Gateway Console'}
             </Text>
-            {current ? (
-              <Text type="secondary" style={{ marginLeft: tokens.space.sm, fontSize: 12 }}>
-                {current.description}
-              </Text>
-            ) : null}
           </div>
           <div
             style={{

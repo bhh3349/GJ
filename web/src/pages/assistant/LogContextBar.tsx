@@ -91,7 +91,6 @@ export interface LogContextBarProps {
 }
 
 export function LogContextBar({ value, onChange, disabled = false }: LogContextBarProps) {
-  const active = toLogContext(value) !== null;
 
   return (
     <div
@@ -168,10 +167,6 @@ export function LogContextBar({ value, onChange, disabled = false }: LogContextB
             })
           }
         />
-
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          {active ? '本轮会把命中的错误事件作为「数据」注入' : '留空 = 纯闲聊，不注入日志'}
-        </Text>
       </Space>
     </div>
   );

@@ -199,7 +199,6 @@ export function ModelDetailDrawer({
               name="priceUnknown"
               label="价格"
               valuePropName="checked"
-              extra="打开 = price 写为 null（上游未提供）。null 与 0 是两个值，账单口径不会当成免费。"
             >
               <Switch checkedChildren="未知" unCheckedChildren="填写" />
             </Form.Item>
@@ -210,7 +209,6 @@ export function ModelDetailDrawer({
                 showIcon
                 style={{ marginBottom: tokens.space.md }}
                 message="价格将保存为未知（null）"
-                description="成本统计不会把未知价格当 0 累加；需要精确成本时请填入真实单价。"
               />
             ) : (
               <Space size={tokens.space.md} style={{ display: 'flex' }} align="start">
@@ -221,7 +219,7 @@ export function ModelDetailDrawer({
                   rules={[{ required: true, message: '填写输入价，或把价格标为未知' }]}
                   extra={
                     inputPer1k === null || inputPer1k === undefined
-                      ? '单位：分'
+                      ? undefined
                       : `≈ ${formatCents(inputPer1k)} / 1k tokens`
                   }
                 >
@@ -232,7 +230,6 @@ export function ModelDetailDrawer({
                   label="输出价（分 / 1k）"
                   style={{ flex: 1 }}
                   rules={[{ required: true, message: '填写输出价，或把价格标为未知' }]}
-                  extra="单位：分"
                 >
                   <InputNumber min={0} step={1} style={{ width: '100%' }} />
                 </Form.Item>
@@ -257,14 +254,11 @@ export function ModelDetailDrawer({
             <div style={{ marginTop: tokens.space.md }}>
               <Space size={tokens.space.sm}>
                 <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>可用 key</Text>
-                <Text type="secondary" style={{ fontSize: 11 }}>
-                  由后端按「启用 + 非冷却 + 余额 &gt; 0」计算，与 /v1/models 同源
-                </Text>
               </Space>
               <div style={{ marginTop: tokens.space.sm }}>
                 {model.availableKeyIds.length === 0 ? (
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    暂无可服务的 key（全部冷却、禁用或余额不足）——此时该模型不会出现在 /v1/models
+                    暂无可服务的 key
                   </Text>
                 ) : (
                   <Space size={[6, 6]} wrap>

@@ -182,7 +182,6 @@ export default function StatsPage() {
     <>
       <PageHeader
         title="统计"
-        description="按 key / 上游 / 用户组 / 时间的用量聚合"
         extra={
           <Space>
             <Tooltip
@@ -367,12 +366,6 @@ export default function StatsPage() {
         />
       </div>
 
-      {usingCustomRange ? null : (
-        <Text type="secondary" style={{ display: 'block', fontSize: 12, marginBottom: tokens.space.sm }}>
-          区间为相对窗口，最近一次查询：{formatIso(query.from)} → {formatIso(query.to)}
-        </Text>
-      )}
-
       {shapeWarning ? (
         <div style={{ marginBottom: tokens.space.md }}>
           <Alert type="warning" showIcon message="序列与时间轴长度不一致" description={shapeWarning} />
@@ -436,8 +429,7 @@ export default function StatsPage() {
             type="warning"
             showIcon
             style={{ marginBottom: tokens.space.md }}
-            message={`含估算用量：${formatCount(usage.data.isEstimatedTokenCount)} 条调用的 token 是按字符估算的（is_estimated=1）`}
-            description="这些用量已计入配额与图表，但不是上游真实报数；对账时请单独剔除。"
+            message={`含估算用量 ${formatCount(usage.data.isEstimatedTokenCount)} 条（按字符估算，非上游真实报数）`}
           />
         ) : null}
 
@@ -448,7 +440,6 @@ export default function StatsPage() {
         ) : series.length === 0 ? (
           <EmptyState
             title="该区间没有用量数据"
-            description="换个时间区间或放宽筛选条件；也确认这段时间里确实有调用发生。"
             minHeight={340}
             action={
               <Button

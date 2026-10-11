@@ -30,7 +30,9 @@ import { getTask } from '../../db/repo/tasks.js';
 import { createUpstream } from '../../db/repo/upstreams.js';
 import {
   createSupplierAccount,
+  linkSupplierAccountKey,
   listSupplierSubscriptions,
+  replaceSupplierSubscriptions,
 } from '../../db/repo/supplier-accounts.js';
 import { encodePasswordBlob, encodeSessionBlob } from '../../supplier/credentials.js';
 import { buildApp } from '../app.js';
@@ -111,6 +113,11 @@ let plaintextSeq = 0;
 function freshPlaintext(): string {
   // `sk-` 前缀运行时拼：`check:secrets` 会抓硬编码的 `sk-…` 字面量。
   return 'sk-probe-' + 'X'.repeat(20) + String(++plaintextSeq).padStart(4, '0');
+}
+
+/** 带指定尾 4 位的合成 key 明文：`sk-` 前缀**运行时拼**（`check:secrets` 会抓硬编码的 `sk-…` 字面量）。 */
+function probeKey(tag: string): string {
+  return 'sk-' + 'probe-key-' + tag;
 }
 
 function fakeUpstream(): FakeUpstream {
@@ -880,5 +887,174 @@ describe('审计（§15.7：四个批量端点各一条，`detail` 只放计数�
     expect(dump).not.toContain(PHONE_A);
     expect(dump).not.toContain(PHONE_B);
     expect(dump).not.toContain(SECRET_A);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// rotate-key（契约 §15.13，v1.9.0 / ADR-0022）
+// ---------------------------------------------------------------------------
+
+describe('POST /rotate-key', () => {
+  it('重置成功 → 新 key 以 token-plan 入池、按掩码精确相等禁用旧 key，且**明文不落盘不回显**', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-live' });
+    // 种一行套餐：省略 subNo 时 `latestSubscriptionSubNo` 才有得取（默认走**最新到期**）。
+    replaceSupplierSubscriptions(h.db, accountId, [
+      { subNo: 'SB1261003742775', endAt: '2026-11-01T01:07:56.000Z', hasKey: true },
+    ]);
+    // 旧 key：掩码后 4 位 = OLDT（**与重置后的新尾不同** —— 实测上游重置换尾：iHLd → 5w2l）。
+    // 认领锚点必须是**重置前**取到的旧掩码，拿新掩码去找永远落空。
+    const oldKey = createKey(h.db, {
+      upstreamId: id,
+      key: freshPlaintext().slice(0, -4) + 'OLDT',
+      category: 'token-plan',
+      label: '套餐-旧',
+    }, MASTER_KEY);
+    // 台账关联：`listLinkedPooledKeyMasks` 走 supplier_account_keys JOIN，不关联就看不见这把旧 key。
+    linkSupplierAccountKey(h.db, accountId, oldKey.id, oldKey.maskedKey, '套餐key-旧');
+    // 重置**前**的旧掩码查询（§15.13 规则 3 取证腿）：返回旧尾 OLDT。
+    h.upstream.on('/api/subscription/self/token', () => ok({ key: probeKey('old-masked-xxxxxxxxxxxxOLDT'), masked: true }));
+    h.upstream.on('/api/subscription/self/token/rotate', (url, init) => {
+      expect((init?.headers as Record<string, string>)['cookie']).toContain('session=sess-live');
+      return ok({ key: probeKey('rotate-new-000000NEWT'), masked: true });
+    });
+    h.upstream.on('/api/subscription/self', () => ok({
+      all_subscriptions: [{
+        subscription: {
+          sub_no: 'SB1261003742775', plan_slug: 'lite', plan_title: '轻享版',
+          amount_total: 14950000, amount_used: 3212302,
+          basic_token_total: 8000000, basic_token_used: 2666169,
+          paid_money: 29.9, status: 'active', source: 'registration',
+          start_time: 1790960876, end_time: 1793552876, auto_renew: null,
+        },
+        has_key: true,
+      }],
+    }));
+
+    const { result } = await runBatch(h, '/api/supplier-accounts/rotate-key', { upstreamId: id });
+
+    expect(result.total).toBe(1);
+    expect(result.ok).toBe(1);
+    const item = result.items[0];
+    expect(item).toMatchObject({ action: 'rotate', ok: true });
+    expect(item?.keyId).not.toBeNull();
+    expect(item?.keyMasked).toBe('****NEWT');
+
+    // 请求体：POST + sub_no（省略 subNo 时默认取该账号最新到期的套餐）。
+    const rotateCalls = h.upstream.calls.filter((c) => c.path === '/api/subscription/self/token/rotate');
+    expect(rotateCalls).toHaveLength(1);
+    const body = JSON.parse(rotateCalls[0]?.body ?? '{}') as Record<string, unknown>;
+    expect(body['sub_no']).toBe('SB1261003742775');
+
+    // 新 key 落库：token-plan、启用、余量 NULL（不猜一个 0）。
+    const newKey = h.db.prepare('SELECT * FROM upstream_keys WHERE id = ?').get(item?.keyId) as Record<string, unknown>;
+    expect(newKey['category']).toBe('token-plan');
+    expect(newKey['enabled']).toBe(1);
+    expect(newKey['deleted_at']).toBeNull();
+    expect(newKey['token_plan_remaining']).toBeNull();
+    // 新 key 的密文里搜不到明文（aes-256-gcm）。
+    expect((newKey['secret'] as Buffer).includes(Buffer.from(probeKey('rotate-new-000000NEWT')))).toBe(false);
+
+    // 旧 key 被软删（enabled=0 + deleted_at），行保留；台账行**不删**（审计对账面）。
+    const oldRow = h.db.prepare('SELECT * FROM upstream_keys WHERE id = ?').get(oldKey.id) as Record<string, unknown>;
+    expect(oldRow['enabled']).toBe(0);
+    expect(oldRow['deleted_at']).not.toBeNull();
+    const ledger = h.db.prepare('SELECT COUNT(*) AS n FROM supplier_account_keys WHERE pooled_key_id = ?').get(oldKey.id) as { n: number };
+    expect(ledger.n).toBe(1);
+
+    // 套餐行的 has_key / key_masked 以本次响应为准。
+    const sub = h.db.prepare('SELECT has_key, key_masked FROM supplier_account_subscriptions WHERE sub_no = ?').get('SB1261003742775') as Record<string, unknown>;
+    expect(sub['has_key']).toBe(1);
+    expect(sub['key_masked']).toBe('****NEWT');
+
+    // **明文不落盘不回显**：整库文本、任务 result、响应体里都搜不到那串明文。
+    const dump = (h.db.prepare("SELECT group_concat(secret) AS s FROM upstream_keys").get() as { s: string | null })['s'] ?? '';
+    expect(dump.includes(probeKey('rotate-new-000000NEWT'))).toBe(false);
+    expect(JSON.stringify(result)).not.toContain(probeKey('rotate-new-000000NEWT'));
+    // 出站请求体只带 sub_no，不带任何明文。
+    expect(rotateCalls[0]?.body).not.toContain('sk-rotate');
+  });
+
+  it('掩码撞号 / 认领不到 → **不禁用任何旧 key**，新 key 照常入池，message 说明人工核对', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-live' });
+    replaceSupplierSubscriptions(h.db, accountId, [
+      { subNo: 'SB1261003742775', endAt: '2026-11-01T01:07:56.000Z', hasKey: true },
+    ]);
+    // 两把旧 key 同尾 XAAA —— 掩码精确相等命中两行 → 不认领。
+    const oldOne = createKey(h.db, { upstreamId: id, key: probeKey('old-one-xxxxxxxxXAAA'), category: 'token-plan', label: '旧1' }, MASTER_KEY);
+    const oldTwo = createKey(h.db, { upstreamId: id, key: probeKey('old-two-yyyyyyyyXAAA'), category: 'token-plan', label: '旧2' }, MASTER_KEY);
+    linkSupplierAccountKey(h.db, accountId, oldOne.id, oldOne.maskedKey, '旧1');
+    linkSupplierAccountKey(h.db, accountId, oldTwo.id, oldTwo.maskedKey, '旧2');
+    h.upstream.on('/api/subscription/self/token/rotate', () => ok({ key: probeKey('new-00000000XAAA'), masked: true }));
+
+    const { result } = await runBatch(h, '/api/supplier-accounts/rotate-key', { upstreamId: id });
+
+    expect(result.ok).toBe(1);
+    expect(result.items[0]?.message).toContain('未自动禁用');
+    // 两把旧 key 原样保留（未误禁）。
+    const alive = h.db.prepare('SELECT COUNT(*) AS n FROM upstream_keys WHERE deleted_at IS NULL AND category = ?').get('token-plan') as { n: number };
+    // 新 key + 两把旧 key = 3。
+    expect(alive.n).toBe(3);
+    // 新 key 在其中。
+    expect(result.items[0]?.keyId).not.toBeNull();
+  });
+
+  it('无可用会话 → 一次上游请求都不发，逐行 SESSION_EXPIRED', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    seedPasswordAccount(h.db, id, { session: null });
+
+    const { result } = await runBatch(h, '/api/supplier-accounts/rotate-key', { upstreamId: id });
+
+    expect(result.failed).toBe(1);
+    expect(result.items[0]).toMatchObject({ ok: false, code: 'SESSION_EXPIRED' });
+    expect(h.upstream.calls).toHaveLength(0);
+  });
+
+  it('名下无套餐记录 → 逐行 SUBSCRIPTION_NOT_FOUND，且不发上游重置', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    seedPasswordAccount(h.db, id, { session: 'sess-live' });
+
+    const { result } = await runBatch(h, '/api/supplier-accounts/rotate-key', { upstreamId: id });
+
+    expect(result.failed).toBe(1);
+    expect(result.items[0]).toMatchObject({ ok: false, code: 'SUBSCRIPTION_NOT_FOUND' });
+    expect(h.upstream.calls).toHaveLength(0);
+  });
+
+  it('排除名单命中 → 零上游请求，计 skipped', async () => {
+    const h = await setup({ excluded: new Set([PHONE_A]) });
+    const { id } = tierflowUpstream(h.db);
+    seedPasswordAccount(h.db, id, { session: 'sess-live' });
+
+    const { result } = await runBatch(h, '/api/supplier-accounts/rotate-key', { upstreamId: id });
+
+    expect(result.skipped).toBe(1);
+    expect(h.upstream.calls).toHaveLength(0);
+  });
+
+  it('显式 subNo：每行用它，不再按最新到期取默认', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    seedPasswordAccount(h.db, id, { session: 'sess-live' });
+    h.upstream.on('/api/subscription/self/token/rotate', () => ok({ key: probeKey('new-00000000BBBB'), masked: true }));
+
+    const { result } = await runBatch(h, '/api/supplier-accounts/rotate-key', {
+      upstreamId: id,
+      subNo: 'SB9999000099999',
+    });
+
+    expect(result.ok).toBe(1);
+    const body = JSON.parse(
+      h.upstream.calls.filter((c) => c.path === '/api/subscription/self/token/rotate')[0]?.body ?? '{}',
+    ) as Record<string, unknown>;
+    expect(body['sub_no']).toBe('SB9999000099999');
+    // 顺带落一行套餐（has_key=1），即使刷新从没见过这个 sub_no —— 台账不缺行。
+    const sub = h.db.prepare('SELECT has_key FROM supplier_account_subscriptions WHERE sub_no = ?').get('SB9999000099999') as Record<string, unknown>;
+    expect(sub['has_key']).toBe(1);
   });
 });

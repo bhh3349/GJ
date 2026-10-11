@@ -859,6 +859,87 @@ export function replaceSupplierSubscriptions(
   })();
 }
 
+/**
+ * 该账号**最新到期**的套餐号（`end_at` 最大；`NULL` 排最后）。
+ *
+ * 用途只有一个：§15.12 重置套餐 key 时 `subNo` 省略的默认取值。取"最晚到期"而不是"最新更新"，
+ * 与 §15.2 `GET /subscriptions` 的排序取向一致 —— 一个账号叠多个套餐时，正在生效的那个才是
+ * 用户说"重置这个套餐的 key"时指的那个。
+ *
+ * 名下没有套餐记录 → `null`（调用方据此报 `SUBSCRIPTION_NOT_FOUND`，**不猜一个 subNo**）。
+ */
+export function latestSubscriptionSubNo(db: Db, accountId: string): string | null {
+  const row = db
+    .prepare(
+      `SELECT sub_no FROM supplier_account_subscriptions
+        WHERE account_id = ?
+        ORDER BY (end_at IS NULL), end_at DESC, sub_no DESC
+        LIMIT 1`,
+    )
+    .get(accountId) as { sub_no: string } | undefined;
+  return row === undefined ? null : row.sub_no;
+}
+
+/**
+ * 单行**插入或更新**一个套餐（唯一键 `(account_id, sub_no)`）。
+ *
+ * 为什么不复用 `replaceSupplierSubscriptions`：那个函数是**整批替换**（先 `DELETE` 再插入），
+ * 前提是"调用方手里有这个账号此刻的全部套餐"。§15.12 重置 key 拿到的却可能是**部分**套餐快照
+ * （顺带对账那一次请求失败时 `mapped` 为空）—— 拿一份部分快照去整批替换，会把其余套餐行**删掉**：
+ * `subscriptionCount` 变小、到期排序里少行，且**没有任何报错可追**。
+ * 于是这里只动一行，且只把**本次确知为真**的两格（`has_key` / `key_masked`）写实。
+ */
+export function upsertSupplierSubscription(
+  db: Db,
+  accountId: string,
+  sub: SupplierSubscriptionWrite,
+): void {
+  const at = nowIso();
+  db.prepare(
+    `INSERT INTO supplier_account_subscriptions (
+       id, account_id, sub_no, plan_title, plan_slug, amount_total_cents, amount_used_cents,
+       paid_cents, basic_token_total, basic_token_used, status, source, start_at, end_at,
+       auto_renew, has_key, key_masked, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT (account_id, sub_no) DO UPDATE SET
+       plan_title         = excluded.plan_title,
+       plan_slug          = excluded.plan_slug,
+       amount_total_cents = excluded.amount_total_cents,
+       amount_used_cents  = excluded.amount_used_cents,
+       paid_cents         = excluded.paid_cents,
+       basic_token_total  = excluded.basic_token_total,
+       basic_token_used   = excluded.basic_token_used,
+       status             = excluded.status,
+       source             = excluded.source,
+       start_at           = excluded.start_at,
+       end_at             = excluded.end_at,
+       auto_renew         = excluded.auto_renew,
+       has_key            = excluded.has_key,
+       key_masked         = excluded.key_masked,
+       updated_at         = excluded.updated_at`,
+  ).run(
+    newId('supplierSubscription'),
+    accountId,
+    sub.subNo,
+    sub.planTitle ?? null,
+    sub.planSlug ?? null,
+    sub.amountTotalCents ?? null,
+    sub.amountUsedCents ?? null,
+    sub.paidCents ?? null,
+    sub.basicTokenTotal ?? null,
+    sub.basicTokenUsed ?? null,
+    sub.status ?? null,
+    sub.source ?? null,
+    sub.startAt ?? null,
+    sub.endAt ?? null,
+    // 三态：`null` = 上游没给这个字段，**不是 false**（§15.1）。落库保持 NULL。
+    sub.autoRenew === undefined || sub.autoRenew === null ? null : sub.autoRenew ? 1 : 0,
+    sub.hasKey === true ? 1 : 0,
+    sub.keyMasked ?? null,
+    at,
+  );
+}
+
 /** 台账行（写侧形态）。`pooledKeyId` 非空 = 已入池，空 = 只拿到掩码。 */
 export interface SupplierAccountKeyWrite {
   maskedKey: string;

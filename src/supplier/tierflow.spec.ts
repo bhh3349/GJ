@@ -527,3 +527,58 @@ describe('管理面根（§16.1.1：baseUrl 是数据面口径，管理面六端
     expect(calls[0]?.url).toBe('https://tierflow.cn/api/user/login');
   });
 });
+
+describe('套餐专属 key 轮换（§15.13 / 手册 §5.3）', () => {
+  it('打 /api/subscription/self/token/rotate，POST 体带 sub_no，带走 Cookie 与 TF-User', async () => {
+    const { impl, calls } = fakeFetch(() =>
+      json({ success: true, data: { key: 'sk-k58Rwxyz1234vFnt', masked: true } }),
+    );
+    const res = await client(impl).rotateSubscriptionToken(CRED, 'SB1261003742775');
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(calls[0]?.url).toBe('https://tierflow.cn/api/subscription/self/token/rotate');
+    expect(calls[0]?.init.method).toBe('POST');
+    const body = JSON.parse(String(calls[0]?.init.body)) as Record<string, unknown>;
+    expect(body['sub_no']).toBe('SB1261003742775');
+    const headers = calls[0]?.init.headers as Record<string, string>;
+    expect(headers['cookie']).toBe('session=sess-abc');
+    expect(headers['TF-User']).toBe('42');
+    expect(res.data.plaintext).toBe('sk-k58Rwxyz1234vFnt');
+    expect(res.data.maskedKey).toBe('****vFnt');
+    expect(res.data.subNo).toBe('SB1261003742775');
+  });
+
+  it('明文给在顶层 token 时也认（形状容错三种形状，钉死一种）', async () => {
+    const { impl } = fakeFetch(() => json({ success: true, data: { token: 'sk-abcdefgh1234WXYZ' } }));
+    const res = await client(impl).rotateSubscriptionToken(CRED, 'SB1');
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.data.plaintext).toBe('sk-abcdefgh1234WXYZ');
+    expect(res.data.maskedKey).toBe('****WXYZ');
+  });
+
+  it('ok 但响应里没有 key → rejected（绝不给上层一个"成功却没有明文"）', async () => {
+    const { impl } = fakeFetch(() => json({ success: true, data: { ok: true } }));
+    const res = await client(impl).rotateSubscriptionToken(CRED, 'SB1');
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.failure).toBe('rejected');
+    expect(res.message).toContain('key');
+  });
+
+  it('上游把本次会话回显在报错里时不外露（擦除对象含 session）', async () => {
+    const { impl } = fakeFetch(() => json({ success: false, message: 'invalid session sess-abc' }, 200));
+    const res = await client(impl).rotateSubscriptionToken(CRED, 'SB1');
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.message).not.toContain('sess-abc');
+  });
+
+  it('401 归 session_expired —— 走全线同一条被动重登触发条件', async () => {
+    const { impl } = fakeFetch(() => json({ message: 'expired' }, 401));
+    const res = await client(impl).rotateSubscriptionToken(CRED, 'SB1');
+    expect(res.ok).toBe(false);
+    if (res.ok) return;
+    expect(res.failure).toBe('session_expired');
+  });
+});

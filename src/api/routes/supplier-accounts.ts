@@ -43,6 +43,7 @@ import {
   startSupplierKeys,
   startSupplierKeysSync,
   startSupplierRefresh,
+  startSupplierRotateKey,
   testSupplierAccount,
 } from '../services/supplier-accounts.js';
 import {
@@ -94,6 +95,11 @@ interface KeysBody extends BatchBody {
   quotaCents?: number | null;
   models?: string[] | null;
   label?: string | null;
+}
+
+/** §15.13 轮换套餐 key 的请求体。`subNo` 省略 = 各目标账号**最新到期**的套餐。 */
+interface RotateBody extends BatchBody {
+  subNo?: string;
 }
 
 /** 批量端点的审计 `detail`：**只放计数**（§15.7）。 */
@@ -361,6 +367,42 @@ export function registerSupplierAccountRoutes(app: FastifyInstance, ctx: ApiCont
       const upstreamId = req.body.upstreamId ?? '';
       const task = startSupplierKeysSync(supplier, req.body, {
         onFinish: (result) => auditBatch(ctx, who, 'supplier.keys.sync', upstreamId, result),
+      });
+      return reply.code(202).send({ taskId: task.id });
+    },
+  );
+
+  /**
+   * 轮换 / 重置**套餐专属 key**（契约 §15.13，v1.9.0 / ADR-0022）。
+   *
+   * 与 `keys` 的方向差异：上游的套餐 key **不能新建 / 删除，只能重置**（手册 §5.3），
+   * 而重置响应**直接下发新 key 明文** —— 服务端当场 `aes-256-gcm` 入池（category=`token-plan`）、
+   * 按掩码精确相等认领并禁用被替换的旧 key。响应与 result **只回 `keyId` + `keyMasked`**，
+   * 明文不经浏览器（§15.2「明文不经浏览器」同一条纪律）。
+   *
+   * `subNo` 省略 = 各目标账号**最新到期**的套餐 —— 单套餐账号（当前全部是）一次点击即完成；
+   * `ids` 省略 = 该上游全部账号（与 refresh 同口径，会话过期的号也在内）。
+   */
+  app.post<{ Body: RotateBody }>(
+    '/api/supplier-accounts/rotate-key',
+    {
+      schema: {
+        body: {
+          type: 'object',
+          required: ['upstreamId'],
+          properties: {
+            upstreamId: { type: 'string', minLength: 1, maxLength: 64 },
+            ids: { type: 'array', items: { type: 'string', minLength: 1 }, maxItems: 500 },
+            subNo: { type: 'string', minLength: 1, maxLength: 64 },
+          },
+        },
+      },
+    },
+    (req, reply) => {
+      const who = captureAuditActor(req, config);
+      const upstreamId = req.body.upstreamId ?? '';
+      const task = startSupplierRotateKey(supplier, req.body, {
+        onFinish: (result) => auditBatch(ctx, who, 'supplier.rotate-key', upstreamId, result),
       });
       return reply.code(202).send({ taskId: task.id });
     },

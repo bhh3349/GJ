@@ -274,6 +274,11 @@ export const TIERFLOW_PATHS = {
   subscriptions: '/api/subscription/self',
   /** 套餐专属 key 的掩码（`?sub_no=`） */
   subscriptionTokens: '/api/subscription/self/token',
+  /**
+   * 套餐专属 key **轮换 / 重置**（契约 §15.13，手册 §5.3）。
+   * 响应**直接下发新 Key 明文**、旧 Key 立即失效；再查 `subscriptionTokens` 只拿到掩码。
+   */
+  subscriptionTokenRotate: '/api/subscription/self/token/rotate',
   tokenSearch: '/api/token/search',
   tokenCreate: '/api/token/',
   /** 删除**无尾斜杠**：带斜杠 307（文档 §8.4，§15.5 表内钉过）。 */
@@ -357,6 +362,19 @@ export interface UpstreamTokenRow {
   raw: unknown;
 }
 
+/**
+ * §15.13 `POST /api/subscription/self/token/rotate` 的解包结果（契约 §15.13）。
+ *
+ * `plaintext` 与 `maskedKey` 都来自**同一个响应**（上游既回明文也回掩码）；明文只在此刻的
+ * 栈内存在，调用方须当场 `aes-256-gcm` 落库，**不进任务 result / 响应 / 日志**（§15.13 纪律）。
+ */
+export interface RotateSubscriptionOutcome {
+  subNo: string;
+  maskedKey: string | null;
+  plaintext: string | null;
+  raw: unknown;
+}
+
 export interface TierFlowClient {
   readonly baseUrl: string;
   /**
@@ -383,6 +401,14 @@ export interface TierFlowClient {
   ): Promise<TierFlowResult<{ tokenNo: string | null; maskedKey: string | null; plaintext: string | null; raw: unknown }>>;
   /** 删上游 key。**无尾斜杠**。 */
   deleteToken(credential: { session: string; tfUser: string | null }, tokenId: string): Promise<TierFlowResult<unknown>>;
+  /**
+   * 轮换 / 重置**套餐专属 key**（§15.13 / 手册 §5.3）。响应**直接下发新 Key 明文**、旧 Key 立即失效；
+   * 明文只在此刻的栈内，调用方须当场加密落库。
+   */
+  rotateSubscriptionToken(
+    credential: { session: string; tfUser: string | null },
+    subNo: string,
+  ): Promise<TierFlowResult<RotateSubscriptionOutcome>>;
 }
 
 export function createTierFlowClient(options: TierFlowOptions): TierFlowClient {
@@ -607,6 +633,43 @@ export function createTierFlowClient(options: TierFlowOptions): TierFlowClient {
         path: `${TIERFLOW_PATHS.tokenDelete}/${encodeURIComponent(tokenId)}`,
         credential,
       });
+    },
+
+    /**
+     * 轮换套餐专属 key（§15.13 / 手册 §5.3）。**一次请求**（不是建 key 那类"创建 + 回查"两步）：
+     * 响应同时带回明文与掩码。解包容错三种形状（顶层 `key` / 顶层 `token` / 嵌套 `token.key` 或
+     * `subscription.key`）—— 但**断言至少拿到一个非空串**，否则报 `rejected`（形状不符），
+     * 绝不返回"成功但没有明文"：那会让上层以为重置成了、其实库里的旧 key 还在。
+     */
+    async rotateSubscriptionToken(credential, subNo) {
+      const res = await request({
+        method: 'POST',
+        path: TIERFLOW_PATHS.subscriptionTokenRotate,
+        body: { sub_no: subNo },
+        credential,
+      });
+      if (!res.ok) return res;
+
+      const plaintext = extractRotateKey(res.data);
+      if (plaintext === null) {
+        return {
+          ok: false,
+          failure: 'rejected',
+          httpStatus: res.httpStatus,
+          message: '重置响应里没有 key —— 形状与驱动器预期不符（手册 §5.3 标已实测会下发明文）',
+          raw: res.data,
+        };
+      }
+      return {
+        ok: true,
+        httpStatus: res.httpStatus,
+        data: {
+          subNo,
+          maskedKey: maskFromUpstream(plaintext),
+          plaintext,
+          raw: res.data,
+        },
+      };
     },
   };
 
@@ -855,6 +918,18 @@ function readQuotaPerUnit(data: Record<string, unknown> | null): number {
   // **没有 `config` 层**（文档 §1.4 写的 `config.quota_per_unit` 是过时写法）。两条都收，实测那条优先。
   const raw = data?.['quota_per_unit'] ?? config?.['quota_per_unit'];
   return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_QUOTA_PER_UNIT;
+}
+
+/**
+ * §15.13 重置响应的明文 key。上游可能把明文给在顶层 `key`、顶层 `token`（字符串），
+ * 或嵌在 `token.key` / `subscription.key`。**拿不到就 `null`**（不猜、不合成）。
+ */
+function extractRotateKey(data: unknown): string | null {
+  const record = asRecord(data);
+  const direct = readString(record, 'key') ?? readString(record?.['token'], 'key') ?? readString(record, 'token');
+  if (direct !== null) return direct;
+  const nested = asRecord(record?.['token']) ?? asRecord(record?.['subscription']);
+  return readString(nested, 'key');
 }
 
 function extractTokenRows(data: unknown): readonly UpstreamTokenRow[] {

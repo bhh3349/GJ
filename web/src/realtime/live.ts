@@ -8,7 +8,7 @@
  * - 关闭码：`4401` 会话失效 → 跳登录；`1012` 服务重启 → 退避重连；`1000` 登出 → 不重连。
  * - 断线期间**不把旧帧当实时值**：`useLive()` 暴露 `status` 与 `lastFrameAt`，由页面据此降级呈现。
  */
-import { SESSION_EXPIRED_EVENT } from '@/api/http';
+import { SESSION_EXPIRED_EVENT, assertAdminPath } from '@/api/http';
 import {
   WS_CLOSE,
   type LiveBalanceMessage,
@@ -88,7 +88,8 @@ function emit(patch: Partial<LiveSnapshot>): void {
 
 function resolveUrl(): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${protocol}//${window.location.host}/api/stats/live`;
+  // 出站路径过 http.ts 的同一道护栏：管理面 WS 只允许 /api/*，/v1 拼法就地拦。
+  return `${protocol}//${window.location.host}${assertAdminPath('/api/stats/live')}`;
 }
 
 function clearReadyTimer(): void {

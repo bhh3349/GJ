@@ -9,6 +9,7 @@
  * - 错误码 UNAUTHORIZED(401) / SESSION_EXPIRED(401) 需跳登录
  */
 
+/** 管理面前缀钉死为同源相对路径：不读 env、不吃配置、不许改成绝对 URL。绝对 URL 会跨源丢 HttpOnly Cookie（ADR-0002），且外部站点的 OpenAI 形错误信封（如上游 tierflow 的 Invalid URL (POST /v1/...)）与本仓难区分，排障会被带偏。 */
 const API_BASE = '/api';
 
 /** 会话失效时派发，由路由层统一跳登录。 */
@@ -61,8 +62,17 @@ export interface RequestOptions {
   signal?: AbortSignal;
 }
 
+/** 管理面只允许 /api/*；/v1 前缀属于网关面 / 上游数据面。拼错的请求就地抛错，不放出去换一个对不上的外部错误信封。REST 与下载（buildUrl）、SSE（assistant.ts）、WS（live.ts）三个出站通道都过这道闸。 */
+export function assertAdminPath(path: string): string {
+  if (/^\/?v1(\/|$)/i.test(path)) {
+    throw new Error(`管理面请求禁止 /v1 前缀：${JSON.stringify(path)}（/v1/* 属网关面，管理面只走 /api/*）`);
+  }
+  return path;
+}
+
 function buildUrl(path: string, query?: Record<string, QueryValue>): string {
-  const url = `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`;
+  const guarded = assertAdminPath(path);
+  const url = `${API_BASE}${guarded.startsWith('/') ? guarded : `/${guarded}`}`;
   if (!query) return url;
 
   const params = new URLSearchParams();

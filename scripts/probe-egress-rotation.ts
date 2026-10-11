@@ -18,7 +18,7 @@
  *   PROBE_GATEWAY_KEY   一枚可用网关 sk-（P0 起全部需要）
  *   PROBE_ADMIN_SESSION 管理面会话（P2/P3 读台账、P4 读 live 面需要）
  *   PROBE_MODEL         真实可用模型 id
- *   PROBE_EXCLUDED      逗号分隔的禁入手机号清单（**必须由环境给，脚本内不写死任何号码**）
+ *   PROBE_EXCLUDED      逗号分隔的排除号清单（可选；Bo 2026-10-11 已撤销禁入护栏，脚本内零号码字面）
  *   PROBE_UPSTREAM_KEY  S4 同款建 TTL 探针 key 所需的上游账号标识（与密码分离，密码见下）
  *   PROBE_UPSTREAM_PASS 上游账号密码（仅当需要现场建 TTL key 时给）
  *   PROBE_TTL_KEY       若执行者已在会话直连侧建好 TTL 探针 key，直接给这一枚，脚本不再自己建
@@ -336,7 +336,7 @@ function offlineSelfCheck(): number {
   ] as [string, string][]) {
     console.log(`  ${name} 需要：${need}`);
   }
-  console.log(`  禁入号清单：${EXCLUDED.length === 0 ? '⚠ PROBE_EXCLUDED 未注入 → 在线模式将 fail-closed 拒绝起跑' : `已注入 ${EXCLUDED.length} 枚（脚本内零号码字面）`}`);
+  console.log(`  选号护栏：${EXCLUDED.length === 0 ? '未注入（护栏已撤销，在线可起跑）' : `已注入 ${EXCLUDED.length} 枚`}`);
   console.log(`  出口预算：${BUDGET} 次/片，片间等 ${COOLDOWN_MS}ms 冷却；P0–P4 一次全跑在实测预算下结构上做不到，分片是唯一拿干净结论的方式`);
   return pass ? 0 : 1;
 }
@@ -501,17 +501,14 @@ async function runOnline(): Promise<number> {
   console.log('出口轮换探针（在线）');
   console.log(`网关面 ${GATEWAY}  管理面 ${ADMIN}`);
   console.log(`key ${maskOf(KEY)}  model ${MODEL === '' ? '(未提供)' : safe(MODEL, 40)}  预算 ${BUDGET} 次/片`);
-  console.log(`禁入号清单：${EXCLUDED.length} 枚（环境注入，脚本内零号码字面）`);
+  console.log(`选号护栏：${EXCLUDED.length === 0 ? 'PROBE_EXCLUDED 未注入 —— Bo 2026-10-11 撤销禁入清单，任何手机号可参与测试（不再 fail-closed）' : `${EXCLUDED.length} 枚注入`}`);
 
-  if (EXCLUDED.length === 0) {
-    console.log('❌ PROBE_EXCLUDED 未注入 —— 无法保证选号避开禁入号，fail-closed 拒绝起跑（不试跑、不猜号）。');
-    return 2;
-  }
+  // 选号护栏已撤销（Bo 2026-10-11：「我服了 我不禁用了好吗？你们都可以测试」）——
+  // 任何手机号都可参与测试；EXCLUDED 为空合法，不再 fail-closed。若环境仍注入清单，
+  // 选号命中时仅提示，不中止（fail-closed 拒跑条件随护栏一并解除）。
   if (UPSTREAM_ID !== '' && EXCLUDED.includes(UPSTREAM_ID)) {
-    console.log('❌ 本次选号命中禁入号，中止（掩码后仍拒绝继续，避免任何出网）。');
-    return 2;
+    console.log(`⚠ 选号 ${maskPhone(UPSTREAM_ID)} 在环境注入的 EXCLUDED 清单内（护栏已撤销，仅提示）`);
   }
-  console.log(`选号 ${maskPhone(UPSTREAM_ID)} 断言不在禁入清单 ✅`);
 
   let incomplete = false;
   let lastErr = '';

@@ -12,7 +12,7 @@
  *   applySnapshot / beginAttempt / endAttempt / view / stats
  */
 
-import { nextCooldownMs } from './cooldown.js';
+import { MAX_COOLDOWN_MS, nextCooldownMs } from './cooldown.js';
 import type {
   FailureReason,
   KeyCandidate,
@@ -136,6 +136,12 @@ export function createKeyPool(options: PoolOptions = {}): KeyPoolInternal {
   const autoDisableAfter = options.autoDisableAfterConsecutiveFails ?? DEFAULT_AUTO_DISABLE_AFTER;
   const defaultMaxConcurrency = options.defaultMaxConcurrency ?? DEFAULT_MAX_CONCURRENCY;
   const usageSink = options.usageSink;
+  /**
+   * 失败时效窗：lastFailureAt 超过该窗口在排序比较中归「从未失败」。
+   * 否则陈旧失败（如昨晚 401 风暴留下的相异时间戳）会永久钉死键 3，LRU 永远轮不到（探针 P1 实证）。
+   * 窗口取冷却封顶（maxCooldownMs ?? MAX_COOLDOWN_MS）：一次失败最多冷却这么久，超窗即视为已康复。
+   */
+  const failureFreshnessMs = maxCooldownMs ?? MAX_COOLDOWN_MS;
 
   let snapshot: PoolSnapshot = { revision: 0, upstreams: [], keys: [] };
   const runtime = new Map<string, KeyRuntimeState & RuntimeExtras>();
@@ -179,9 +185,9 @@ export function createKeyPool(options: PoolOptions = {}): KeyPoolInternal {
         const ra = remainingQuotaOf(configOf(a), runtimeOf(a));
         const rb = remainingQuotaOf(configOf(b), runtimeOf(b));
         if (rb !== ra) return rb - ra; // 2. 剩余额度降序（仅 token-plan；balance 类恒 0，见 ADR-0011）
-        const la = runtimeOf(a).lastFailureAt ?? -1;
-        const lb = runtimeOf(b).lastFailureAt ?? -1;
-        if (la !== lb) return la - lb; // 3. 上次失败时间升序（从未失败优先）
+        const la = freshFailureAt(a);
+        const lb = freshFailureAt(b);
+        if (la !== lb) return la - lb; // 3. 上次失败时间升序（从未失败优先；超窗归从未失败）
         const ua = runtimeOf(a).lastUsedSeq;
         const ub = runtimeOf(b).lastUsedSeq;
         if (ua !== ub) return ua - ub; // 4. LRU：最久未用优先（从未使用 = 0 = 最早）
@@ -199,6 +205,12 @@ export function createKeyPool(options: PoolOptions = {}): KeyPoolInternal {
         const rt = runtime.get(c.keyId);
         if (rt === undefined) throw new Error(`runtime not found: ${c.keyId}`);
         return rt;
+      }
+      /** tie#3 时效化：lastFailureAt 只在冷却窗内参与比较，过期归「从未失败」 */
+      function freshFailureAt(c: KeyCandidate): number {
+        const rt = runtimeOf(c);
+        if (rt.lastFailureAt === null) return -1;
+        return t - rt.lastFailureAt <= failureFreshnessMs ? rt.lastFailureAt : -1;
       }
     },
 

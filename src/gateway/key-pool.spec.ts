@@ -79,11 +79,11 @@ describe('getAvailableKeys 排序', () => {
     );
 
     pool.reportFailure('k3', 'NETWORK');
-    clock += 60 * MINUTE; // 冷却已过，lastFailureAt 仍保留
+    clock += NETWORK_BASE_MS + 1; // 冷却已过、仍在时效窗内：lastFailureAt 保留故障优先序
     assert.deepEqual(
       (await pool.getAvailableKeys('gpt-4o')).map((c) => c.keyId),
       ['k2', 'k4', 'k3', 'k1'],
-      '键 3（上次失败时间）仍生效：k3 带着失败记录沉到同档的 k2/k4 之后',
+      '键 3（上次失败时间）时效窗内生效：k3 带着新鲜失败沉到同档的 k2/k4 之后',
     );
 
     // ADR-0011 的核心回归：键 4 LRU —— 用掉谁，谁就沉到同档队尾。
@@ -103,6 +103,33 @@ describe('getAvailableKeys 排序', () => {
       ['k2', 'k4', 'k3', 'k1'],
       'k4 用过之后轮到 k2（stamp T < T+1）—— 头把在 k2/k4 之间确定性轮转',
     );
+  });
+
+  it('陈旧失败超窗后归从未失败，LRU 接管轮换（探针 P1 恒钉修复回归）', async () => {
+    clock = 1_700_000_000_000;
+    const pool = createKeyPool({ now });
+    pool.applySnapshot(snapshot([balanceKey('a'), balanceKey('b'), balanceKey('c')]));
+
+    // 模拟昨晚 401 风暴：三把同权重同余额 key 冻结着相异失败时间戳。
+    // 旧实现里键 3 按这些相异时间戳恒序 → 键 4 LRU 永远轮不到，头把恒钉一把。
+    pool.reportFailure('a', 'AUTH_INVALID');
+    clock += 1;
+    pool.reportFailure('b', 'AUTH_INVALID');
+    clock += 1;
+    pool.reportFailure('c', 'AUTH_INVALID');
+
+    // 越过最晚那笔失败的时效窗（30min）：三把的 lastFailureAt 全部过期，归「从未失败」。
+    clock += MAX_COOLDOWN_MS + 1;
+
+    const heads = new Set<string>();
+    for (let i = 0; i < 6; i += 1) {
+      const head = (await pool.getAvailableKeys('gpt-4o'))[0]?.keyId;
+      assert.ok(head !== undefined, '每次都必须有可用 head');
+      heads.add(head);
+      pool.beginAttempt(head);
+      pool.endAttempt(head);
+    }
+    assert.ok(heads.size > 1, `LRU 应轮换到多把头 key（distinct=${heads.size}），而不是恒钉一把`);
   });
 
   it('token-plan 仍按套餐余量降序（键 2 语义只对 token-plan 保留）', async () => {

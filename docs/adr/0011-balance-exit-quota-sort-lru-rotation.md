@@ -67,7 +67,7 @@ function remainingQuotaOf(key: KeyConfig, rt: RuntimeExtras): number {
 ```
 1. weight 降序
 2. remainingQuotaOf 降序          // 只对 token-plan 有意义；balance 类恒 0 → 键 2 全平
-3. lastFailureAt 升序（从未失败 = -1 = 最早）
+3. lastFailureAt 升序（从未失败 = -1 = 最早；时效窗：`60bba89` 起 30 分钟内无失败即视同 -1）
 4. lastUsedSeq 升序               // LRU：最久未用优先；从未使用 = 0 = 最早
 5. 快照序兜底                     // 序号全异的场景到不了这里，纯防御位
 ```
@@ -118,7 +118,7 @@ engine.spec 用 `stubPool`（列候选 + `beginAttempt` 一律拒绝）搭出这
 
 ## 影响
 
-- **`src/gateway/key-pool.ts`**：`RuntimeExtras` 增 `lastUsedSeq`；比较器键 2/4/5 如 §2；`beginAttempt` 打点。
+- **`src/gateway/key-pool.ts`**：`RuntimeExtras` 增 `lastUsedSeq`；比较器键 2/4/5 如 §2（键 3 时效窗限定见 §2，实现锚点 `keys.ts:526` 已随 `60bba89` 移至 `:559`）；`beginAttempt` 打点。
   `view()` / `applySnapshot` / `reportFailure` / `reportSuccess` 形状与语义零变化。
 - **`src/gateway/engine.ts` + `errors.ts` + `routes.ts`**：新增 §4 分型与 `poolSaturatedError` /
   `poolMisconfiguredError` / `retryAfterSec` 透传。`GatewayError` ctor 尾部可选参，既有构造点不动。

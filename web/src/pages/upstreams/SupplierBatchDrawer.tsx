@@ -31,13 +31,14 @@ import { formatCount, formatIso } from '@/utils/format';
 
 const { Text } = Typography;
 
-/** `action` 五值 → 人话。五值**每个都有生产者**（§15.3），所以这里没有兜底项要写"其它"。 */
+/** `action` 六值 → 人话。六值**每个都有生产者**（§15.3 / §15.13），所以这里没有兜底项要写"其它"。 */
 const ACTION_TEXT: Record<SupplierBatchAction, string> = {
   login: '首登',
   relogin: '重登',
   refresh: '刷新余额',
   create: '建 key',
   sync: '同步 key',
+  rotate: '重置套餐 key',
 };
 
 /**
@@ -81,20 +82,33 @@ export function SupplierBatchDrawer({
     {
       title: '结果',
       dataIndex: 'ok',
-      width: 76,
+      width: 150,
       render: (ok: boolean, row) => (
-        <Tooltip title={row.ok ? '这一行做成了' : '这一行做了但没成 —— 原因看「码」与「说明」两列'}>
-          <Tag
-            bordered={false}
-            style={{
-              marginInlineEnd: 0,
-              background: ok ? tokens.tint.success : tokens.tint.error,
-              color: ok ? tokens.color.success : tokens.color.error,
-            }}
-          >
-            {ok ? '成功' : '失败'}
-          </Tag>
-        </Tooltip>
+        <Space size={4}>
+          <Tooltip title={row.ok ? '这一行做成了' : '这一行做了但没成 —— 原因看「码」与「说明」两列'}>
+            <Tag
+              bordered={false}
+              style={{
+                marginInlineEnd: 0,
+                background: ok ? tokens.tint.success : tokens.tint.error,
+                color: ok ? tokens.color.success : tokens.color.error,
+              }}
+            >
+              {ok ? '成功' : '失败'}
+            </Tag>
+          </Tooltip>
+          {/* §15.13：成功 + `message` 非空 = 新 key 已入池，但旧 key 未按掩码认领、未自动禁用。 */}
+          {ok && row.message !== null ? (
+            <Tooltip title={row.message}>
+              <Tag
+                bordered={false}
+                style={{ marginInlineEnd: 0, background: tokens.tint.warning, color: tokens.color.warning }}
+              >
+                需人工核对
+              </Tag>
+            </Tooltip>
+          ) : null}
+        </Space>
       ),
     },
     {

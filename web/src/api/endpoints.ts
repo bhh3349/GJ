@@ -39,6 +39,7 @@ import type {
   SupplierBatchRequest,
   SupplierImportRequest,
   SupplierKeysRequest,
+  SupplierRotateKeyRequest,
   SupplierSubscriptionRow,
   SupplierTestResult,
   Task,
@@ -204,6 +205,14 @@ export const supplierAccountsApi = {
   /** 同步已有 key（掩码）+ 套餐。只读上游、只写台账；未命中的掩码**只记数**。 */
   syncKeys: (body: SupplierBatchRequest) =>
     api.post<TaskAccepted>('/supplier-accounts/keys/sync', body),
+  /**
+   * 重置 / 轮换套餐专属 key（§15.13，v1.9.0）。异步任务：`202 {taskId}`，
+   * 终态经 `GET /api/tasks/:id` 取 `SupplierBatchResult`（逐行 `action` 第 6 值 `rotate`）。
+   * `ids` 省略 = 该上游全部账号；`subNo` 省略 = 各账号最新到期的套餐。
+   * 逐行只回 `keyId` + `keyMasked`（**新** key 掩码）—— 明文不经浏览器（服务端当场加密入池）。
+   */
+  rotateKey: (body: SupplierRotateKeyRequest) =>
+    api.post<TaskAccepted>('/supplier-accounts/rotate-key', body),
   /** 单账号重登。**同步**端点，回 200；无存档密码时当场 422（不是"点了没重登成"）。 */
   relogin: (id: string) => api.post<SupplierAccount>(`/supplier-accounts/${id}/login`),
   /** 连接自测。**永不写库**，业务性失败一律 `200 + ok:false`（诊断结论走响应体）。 */

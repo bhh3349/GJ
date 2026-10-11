@@ -472,7 +472,7 @@ export interface ModelPatchRequest {
 // ── §5.1 异步任务 ─────────────────────────────────────────────────────────
 
 /**
- * 任务类型。后四个来自 §15.2 的四个批量端点（服务端 `startTask` 的取值，
+ * 任务类型。后五个来自 §15.2 的五个批量端点（服务端 `startTask` 的取值，
  * 见 `src/api/services/supplier-accounts.ts`）。前端**不用它做分支判断**
  * —— 逐行结果一律读 `result.items`（§15.3），类型串只用来在浮层标题上指个来源。
  */
@@ -482,7 +482,8 @@ export type TaskType =
   | 'supplier_import'
   | 'supplier_refresh'
   | 'supplier_keys'
-  | 'supplier_keys_sync';
+  | 'supplier_keys_sync'
+  | 'supplier_rotate_key';
 
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed';
 
@@ -1077,6 +1078,12 @@ export interface SupplierBatchRequest {
   ids?: string[];
 }
 
+/** §15.13 `POST /api/supplier-accounts/rotate-key`：重置套餐专属 key（v1.9.0，ADR-0022）。
+ *  `subNo` 省略 = 各目标账号**最新到期**的套餐（`end_at` 最大，`NULL` 排最后）。 */
+export interface SupplierRotateKeyRequest extends SupplierBatchRequest {
+  subNo?: string;
+}
+
 /** §15.2 `POST /api/supplier-accounts/keys`：批量新建 key 并入池（**本节的目的是这个**）。 */
 export interface SupplierKeysRequest extends SupplierBatchRequest {
   /** 1..10，越界**在本次 HTTP 里就 400**（不变成一个立刻失败的异步任务）。 */
@@ -1089,8 +1096,8 @@ export interface SupplierKeysRequest extends SupplierBatchRequest {
   label?: string | null;
 }
 
-/** §15.3 `action` 五值，每个都必须有生产者（不留"枚举里有、没人发"的空值）。 */
-export type SupplierBatchAction = 'login' | 'relogin' | 'refresh' | 'create' | 'sync';
+/** §15.3 `action` 六值，每个都必须有生产者（不留"枚举里有、没人发"的空值）；`rotate` 见 §15.13。 */
+export type SupplierBatchAction = 'login' | 'relogin' | 'refresh' | 'create' | 'sync' | 'rotate';
 
 /** 逐行结果的一行。**不含任何凭据** —— `keyMasked` 是掩码，`keyId`/`tokenNo` 是内部标识。 */
 export interface SupplierBatchItem {

@@ -12,9 +12,9 @@
  *    所以它在那一格里按 `accountId` 分组后才可读（§15.8 第 6 问）。
  * 3. **出口池** —— 无 REST 读面（`egress_id` 不进任何 DTO）；数据源是 §7 池级帧 `egress_pool`，三态纪律写在 `EgressPoolCard` 顶部。
  *
- * ## 批量动作：四个入口，两条纪律
+ * ## 批量动作：五个入口，两条纪律
  *
- * 四个入口里三个**真的打上游**（刷新余额 / 同步 key / 建 key 入池），而出口预算**与数据面共用**
+ * 五个入口里四个**真的打上游**（刷新余额 / 同步 key / 建 key 入池 / 重置套餐 key），而出口预算**与数据面共用**
  * （§14.7 / §16.7 Tier 1.5）⇒ **这个按钮能挤掉客户端流量**，不是"多点一下没关系"的动作。
  *
  * - **打上游的两个走二次确认**（`modal.confirm`），文案必须写出代价 —— 不写代价的
@@ -24,6 +24,8 @@
  *   （§15.3 的 `result`）；前端乘出来的是编造，不是承诺（§14.7 / §14.5）。所以确认框里的
  *   「打谁」只说**选择事实**（勾了几个 / 全部），不写总量。
  * - **按钮不因退避置灰**：退避只约束**自动**同步，手动照常可发（§14.1 / §14.7）。
+ * - **重置套餐 key**（§15.13）：同样是「打上游」的确认动作；上游侧旧套餐 key **立即失效**，
+   确认文案必须写明这条代价。批量入口与详情抽屉的单账号入口共用同一结果浮层。
  * - **批量删除**（2026-10-11 Bo）：账号删除没有批量端点，前端按选择顺序逐把单删
  *   （`force=true`，名下 key 只解绑不删），结尾汇总 {ok, failed} —— 不造批量端点。
  * - **同上游单飞**：上一轮没结束时本轮由服务端跳过（§14.1）⇒ 连点不等于多刷一遍，
@@ -87,11 +89,13 @@ const CREDENTIAL_SHORT: Record<SupplierCredentialSource, string> = {
   session: '会话型',
 };
 
-/** 一个「打上游」的批量动作：确认标题 / 真正的提交函数。 */
+/** 一个「打上游」的批量动作：确认标题 / 真正的提交函数 / 确认框末句（有代价语义的动作给）。 */
 interface BatchActionSpec {
   key: string;
   label: string;
   submit: (body: SupplierBatchRequest) => Promise<TaskAccepted>;
+  /** §14.7 的 `outcome` 槽位：等待说明的尾部。重置的代价（旧 key 立即失效）写在这里。 */
+  outcome?: string | undefined;
 }
 
 const BATCH_ACTIONS: readonly BatchActionSpec[] = [
@@ -104,6 +108,12 @@ const BATCH_ACTIONS: readonly BatchActionSpec[] = [
     key: 'sync',
     label: '批量同步 key',
     submit: (body) => supplierAccountsApi.syncKeys(body),
+  },
+  {
+    key: 'rotate',
+    label: '批量重置套餐 key',
+    submit: (body) => supplierAccountsApi.rotateKey(body),
+    outcome: '执行后等终态，逐行结论见明细浮层；旧套餐 key 会立即失效。',
   },
 ];
 
@@ -244,7 +254,7 @@ export default function SupplierAccountsPage() {
     confirmManualRefresh(modal, {
       title: spec.label,
       scope: scopeOf(),
-      outcome: '执行后等终态，逐行结论见明细浮层。',
+      outcome: spec.outcome ?? '执行后等终态，逐行结论见明细浮层。',
       onOk: async () => {
         const accepted = await run(spec.key, () => spec.submit(body), '已提交任务');
         if (accepted === null) return;
@@ -823,6 +833,11 @@ export default function SupplierAccountsPage() {
         }}
         onChanged={() => {
           accounts.reload();
+        }}
+        onRotateTask={(taskId) => {
+          setBatchTitle('重置套餐 key');
+          setBatchOpen(true);
+          task.start(taskId);
         }}
       />
     </>

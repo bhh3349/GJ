@@ -22,6 +22,8 @@
  * - **删账号一把 key 都不删，只解绑**（§15.2）：账号删了名下 key 仍可用。真删 key 会让网关下一轮快照
  *   少一批可用 key —— 也就是"删个账号把流量打穿"。所以 409 的二次确认必须说清这一点，
  *   它是与"删上游（ADR-0016 物理删子树）"**语义相反**的一个删除。
+ * - **重置套餐 key**（§15.13）是任务型端点（`202 {taskId}`）：本抽屉只提交并打开父层结果浮层，
+ *   不在抽屉里自建轮询；`ids` 只带本账号，`subNo` 省略 = 该账号最新到期的套餐。
  */
 import { App, Button, Drawer, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
@@ -38,6 +40,7 @@ import {
   type SupplierSubscription,
 } from '@/api/types';
 import { BalanceText } from '@/components/BalanceText';
+import { confirmManualRefresh } from '@/components/ManualRefreshConfirm';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { tokens } from '@/theme/tokens';
 import { formatCents, formatCount, formatIso, formatRelative } from '@/utils/format';
@@ -99,6 +102,8 @@ export interface SupplierAccountDetailDrawerProps {
   onClose: () => void;
   /** 账号被删或状态变了 → 父组件重取列表。 */
   onChanged: () => void;
+  /** 重置套餐 key 已提交（`202 {taskId}`）→ 父组件打开批量结果浮层并轮询。 */
+  onRotateTask: (taskId: string) => void;
 }
 
 export function SupplierAccountDetailDrawer({
@@ -106,6 +111,7 @@ export function SupplierAccountDetailDrawer({
   fallback,
   onClose,
   onChanged,
+  onRotateTask,
 }: SupplierAccountDetailDrawerProps) {
   const { message, modal } = App.useApp();
   const { run, isPending } = useAction();
@@ -140,6 +146,27 @@ export function SupplierAccountDetailDrawer({
     );
     if (result === null || result.ok) return;
     message.warning(`自测结论：本次未通过（${result.errorCode ?? '见响应'}）`);
+  };
+
+  /**
+   * 重置套餐 key（§15.13）。任务型端点：`202 {taskId}` 后挂父层结果浮层轮询。
+   * `ids` 只带本账号；`subNo` 省略 = 该账号最新到期的套餐（叠多套餐时才需要指定）。
+   * 代价：上游侧旧套餐 key 立即失效 —— 确认文案必须说清。
+   */
+  const rotateKey = (): void => {
+    if (!account) return;
+    confirmManualRefresh(modal, {
+      title: '重置套餐 key',
+      scope: `打谁：仅本账号（${account.identifier}）`,
+      outcome: '执行后等终态，逐行结论见明细浮层；旧套餐 key 会立即失效。',
+      onOk: async () => {
+        const accepted = await run('rotate', () =>
+          supplierAccountsApi.rotateKey({ upstreamId: account.upstreamId, ids: [account.id] }),
+        );
+        if (accepted === null) return;
+        onRotateTask(accepted.taskId);
+      },
+    });
   };
 
   /** 删账号。与删上游（ADR-0016）**语义相反**：这里一把 key 都不删，只解绑。 */
@@ -311,6 +338,15 @@ export function SupplierAccountDetailDrawer({
             }}
           >
             连接自测
+          </Button>
+          <Button
+            size="small"
+            loading={isPending('rotate')}
+            onClick={() => {
+              rotateKey();
+            }}
+          >
+            重置套餐 key
           </Button>
           <Tooltip title="删账号不删 key：名下的 key 会解除归属并继续可用。">
             <Button size="small" danger loading={removing} onClick={() => remove(false)}>

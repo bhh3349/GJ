@@ -670,13 +670,14 @@ export function createTierFlowClient(options: TierFlowOptions): TierFlowClient {
 
     const data = asRecord(envelope.data);
     const user = asRecord(data?.['user']);
-    const session = readString(data, 'session') ?? readString(user, 'session');
+    const session =
+      readString(data, 'session') ?? readString(user, 'session') ?? sessionFromSetCookie(res.headers);
     if (session === null) {
       return {
         ok: false,
         failure: 'rejected',
         httpStatus: res.status,
-        message: '登录响应里没有 session —— 形状与驱动器预期不符（待实测）',
+        message: '登录响应里没有 session（body 与 Set-Cookie 都没有）—— 形状与驱动器预期不符',
       };
     }
 
@@ -685,7 +686,14 @@ export function createTierFlowClient(options: TierFlowOptions): TierFlowClient {
       httpStatus: res.status,
       data: {
         session,
-        tfUser: readString(data, 'TF-User') ?? readString(res.headers, 'TF-User') ?? readString(user, 'TF-User'),
+        // 实测（§16.1.1，2026-10-12）：登录成功的 session 只从 `Set-Cookie: session=…` 回；
+        // `TF-User` 的值就是 uid（§15.9「换一枚新 session（+ TF-User）」的实测口径）。
+        // body 没给 TF-User 时回退 uid，否则带会话的后续请求必 401。
+        tfUser:
+          readString(data, 'TF-User') ??
+          readString(user, 'TF-User') ??
+          readString(data, 'uid') ??
+          readString(user, 'uid'),
         uid: readString(data, 'uid') ?? readString(data, 'id') ?? readString(user, 'uid'),
         username: readString(data, 'username') ?? readString(user, 'username'),
       },
@@ -798,6 +806,22 @@ function scrubbedMessage(parsed: unknown, text: string, secrets: readonly (strin
  * 截断的额度与 `message` 相同（200 字符）—— 那是"够不够定位"与"会不会把一份 HTML 错误页
  * 整个搬进 result"之间的取舍。**未净化**，见 `TierFlowErr.raw`。
  */
+/**
+ * 从 Set-Cookie 里取 `session` 的值（实测口径，见 rawLogin 内注释）。
+ * `getSetCookie()` 的每个元素是一条完整 cookie（`name=value; attrs`），取名为 session 的第一条。
+ * 环境没有 `getSetCookie`（老运行时）时返回 null —— 与"上游没回"同路，不猜。
+ */
+function sessionFromSetCookie(headers: Headers): string | null {
+  const get = (headers as { getSetCookie?: () => string[] }).getSetCookie;
+  if (typeof get !== 'function') return null;
+  for (const cookie of get.call(headers)) {
+    const m = /(?:^|;\s*)session=([^;]*)/.exec(cookie);
+    const value = m === null ? undefined : m[1];
+    if (value !== undefined && value !== '') return value;
+  }
+  return null;
+}
+
 function rawFor(parsed: unknown, text: string): unknown {
   if (parsed !== null) return parsed;
   return text === '' ? null : text.slice(0, 200);

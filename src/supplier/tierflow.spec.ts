@@ -154,6 +154,24 @@ describe('登录', () => {
     expect(body).not.toHaveProperty('username');
   });
 
+  it('session 只从 Set-Cookie 回时照样取到（实测口径：登录成功的 body 里没有 session 字段）', async () => {
+    const { impl } = fakeFetch(() =>
+      new Response(JSON.stringify({ success: true, message: '', data: { uid: '9', username: 'u9' } }), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          'set-cookie': 'session=sess-from-cookie; Path=/; HttpOnly',
+        },
+      }),
+    );
+    const res = await client(impl).login('16200004225', 'pw-1');
+    expect(res.ok).toBe(true);
+    if (!res.ok) return;
+    expect(res.data.session).toBe('sess-from-cookie');
+    // body 没给 TF-User 时回退 uid：缺它带会话的后续请求必 401（§15.9）。
+    expect(res.data.tfUser).toBe('9');
+  });
+
   it('401 是登录失败，不是"会话失效" —— 失败路径不留半边会话', async () => {
     const { impl } = fakeFetch(() => json({ success: false, message: '密码错误' }, 401));
     const res = await client(impl).login('16200004225', 'pw-1');

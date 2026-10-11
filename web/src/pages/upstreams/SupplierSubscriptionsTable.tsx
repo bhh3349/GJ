@@ -29,6 +29,17 @@ import { formatCents, formatCount, formatIso, formatRelative } from '@/utils/for
 
 const { Text } = Typography;
 
+/**
+ * 上游 `basic_token_*` 的单位是 **quota**（与钱包同口径：1 元 = 500000 quota）。
+ * 契约 §15.1 只把 `amount_total` / `amount_used` 折成了 `…Cents`，`basic_token_*` 按原值透传
+ * （字段名无 `Cents` 后缀即证据）—— 所以这一列的量纲要在这里折：quota → 分，再交给
+ * `formatCents`。换算比集中在**这一处**，将来后端补 `basicTokenTotalCents` 时整块删掉即可。
+ */
+const QUOTA_PER_UNIT = 500_000;
+function quotaToCents(quota: number | null): number | null {
+  return quota === null ? null : Math.round((quota / QUOTA_PER_UNIT) * 100);
+}
+
 export interface SupplierSubscriptionsTableProps {
   upstreamId: string;
   /** 账号 id → 掩码（来自账号列表，用于把 `accountIdentifier` 与当前列表对上；取不到就退回台账自带的掩码）。 */
@@ -141,24 +152,22 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
     },
     {
       title: (
-        <Tooltip title="套餐的 token 余量（basic_token_total - basic_token_used）。与金额列是两套量纲，不做换算。">
-          <span>token 余量</span>
+        <Tooltip title="套餐赠送的基础额度剩余（basic_token_total - basic_token_used）。这两个字段上游给的是 quota、与钱包同口径（1 元 = 500000 quota），此处按同一换算比折元渲染；任一端缺失即「未知」。这不是账号 key 的余额。">
+          <span>基础额度</span>
         </Tooltip>
       ),
       key: 'tokens',
-      width: 130,
+      width: 158,
       align: 'right',
       render: (_: unknown, row) => {
-        const total = row.basicTokenTotal;
-        const used = row.basicTokenUsed;
+        const total = quotaToCents(row.basicTokenTotal);
+        const used = quotaToCents(row.basicTokenUsed);
         const remaining = total === null || used === null ? null : total - used;
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2, alignItems: 'flex-end' }}>
-            <Text style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums' }}>
-              {remaining === null ? <Text type="secondary" italic style={{ fontSize: 12 }}>未知</Text> : formatCount(remaining)}
-            </Text>
+            <BalanceText value={remaining} />
             <Text type="secondary" style={{ fontSize: 11 }}>
-              {`/ ${formatCount(total)}`}
+              {`总额 ${formatCents(total)} · 已用 ${formatCents(used)}`}
             </Text>
           </div>
         );

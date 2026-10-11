@@ -217,20 +217,25 @@ export function maskFromUpstream(upstreamMask: string): string | null {
 // ⚠️ 待实测：三处形状（唯一容错点，实测回来只改这里）
 // ---------------------------------------------------------------------------
 
-/** 待实测（§16.1.1）：登录请求体。文档 §8 只写了端点与"换一枚新 session"。 */
+/**
+ * 登录请求体 —— 实测钉死（§16.1.1 已转事实）：字段是 `identifier`
+ * （契约 §15.9：登录凭据 = `identifier`(手机号) + `password`，文档 §8 亦同）。
+ * 发 `username` 时上游回「Phone number/email or password is empty」
+ * （HTTP 200 + success:false；2026-10-12 线上实测，29 把存档密码的账号全部命中这条）。
+ */
 export function pendingLoginBody(identifier: string, password: string): Record<string, unknown> {
-  return { username: identifier, password };
+  return { identifier, password };
 }
 
 /**
  * 待实测（§16.1.1）：凭据怎么带。
  *
- * 契约钉死的只有**值叫什么**（`session` / `TF-User`，§15.9），没钉**怎么传**。
- * 这里按"同名请求头"实现 —— 若实测是 cookie 形态，**只改这一个函数**，
- * 其余代码不必知道凭据是怎么走的（这正是把缝放在这里的原因）。
+ * 契约钉死的只有**值叫什么**（`session` / `TF-User`，§15.9）。实测形状（§16.1.1 已转事实）：
+ * `session` 走 **Cookie**（`Cookie: session=<值>`），`TF-User` 走同名请求头——缺 TF-User 上游回 401。
+ * 裸 `session` 请求头一并保留（存量调用零漂移），其余代码不必知道凭据是怎么走的（这正是把缝放在这里的原因）。
  */
 export function pendingAuthHeaders(cred: { session: string; tfUser: string | null }): Record<string, string> {
-  const headers: Record<string, string> = { session: cred.session };
+  const headers: Record<string, string> = { session: cred.session, cookie: `session=${cred.session}` };
   if (cred.tfUser !== null && cred.tfUser !== '') headers['TF-User'] = cred.tfUser;
   return headers;
 }

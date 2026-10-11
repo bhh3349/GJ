@@ -143,6 +143,17 @@ describe('登录', () => {
     expect(calls[0]?.url).not.toContain('cn//');
   });
 
+  it('登录请求体字段是 identifier（契约 §15.9）—— 发 username 上游回「empty」（2026-10-12 实测钉死）', async () => {
+    const { impl, calls } = fakeFetch(() =>
+      json({ success: true, data: { session: 'sess-new', uid: '9' } }, 200),
+    );
+    await client(impl).login('16200004225', 'pw-1');
+    const body = JSON.parse(String(calls[0]?.init.body)) as Record<string, unknown>;
+    expect(body['identifier']).toBe('16200004225');
+    expect(body['password']).toBe('pw-1');
+    expect(body).not.toHaveProperty('username');
+  });
+
   it('401 是登录失败，不是"会话失效" —— 失败路径不留半边会话', async () => {
     const { impl } = fakeFetch(() => json({ success: false, message: '密码错误' }, 401));
     const res = await client(impl).login('16200004225', 'pw-1');
@@ -169,6 +180,14 @@ describe('登录', () => {
 });
 
 describe('请求分类', () => {
+  it('带会话的请求同时有 Cookie: session= 与 TF-User 头（实测口径：缺 TF-User 上游 401）', async () => {
+    const { impl, calls } = fakeFetch(() => json({ success: true, data: { quota: 500000 } }));
+    await client(impl).self(CRED);
+    const headers = calls[0]?.init.headers as Record<string, string>;
+    expect(headers['cookie']).toBe('session=sess-abc');
+    expect(headers['TF-User']).toBe('42');
+  });
+
   it('401 归 session_expired —— §15.9 被动重登的唯一触发条件', async () => {
     const { impl } = fakeFetch(() => json({ message: 'expired' }, 401));
     const res = await client(impl).self(CRED);

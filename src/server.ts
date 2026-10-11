@@ -167,7 +167,7 @@ async function main(): Promise<void> {
   if (config.assistantModel === null) {
     app.log.warn('未配置 ASSISTANT_MODEL：内置助手未接线，/api/assistant/chat 将回 503 NO_AVAILABLE_KEY');
   } else {
-    app.log.info({ model: config.assistantModel }, '内置助手已接线');
+    app.log.info({ model: config.assistantModel }, '内置助手已接线（缺省模型；请求体 model 可逐轮覆盖）');
   }
 
 

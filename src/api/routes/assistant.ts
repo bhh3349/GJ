@@ -17,6 +17,9 @@ import type { AssistantMessage, AssistantModelInvoker } from '../assistant-port.
 import type { GatewayErrorEventDto, HealthMetricsDto } from '../dto.js';
 import { computeHealthMetrics } from '../../db/observability.js';
 import { listGatewayErrorEvents } from '../../db/repo/gateway-events.js';
+// 「站内已启用模型集合」的唯一判据（§5，与 `/v1/models` 同一句 SQL）。
+// 刻意复用而不是另写一份：选择框里出现一个选不出结果的模型名，正是两份口径漂移的症状。
+import { listEnabledModelNames } from '../../db/repo/models.js';
 import { ApiError } from '../errors.js';
 import type { ApiContext } from '../app.js';
 import {
@@ -67,6 +70,8 @@ interface LogContextBody {
 
 interface ChatBody {
   messages: ChatMessageBody[];
+  /** 本轮助手使用的站内模型名（契约 §13.1 / v1.10.0）。缺省 / 空串 = 装配侧 `ASSISTANT_MODEL`。 */
+  model?: string;
   logContext?: LogContextBody;
 }
 
@@ -96,6 +101,11 @@ const chatBodySchema = {
         },
       },
     },
+    // 只有类型与防超长，**不写 minLength**：契约 §13.1 明写「缺省 / 空串 = 装配侧缺省」，
+    // 给它加 minLength:1 会把一个合法的空串变成 schema 层的 400。
+    // 合法性的唯一判据是「站内已启用模型集合」（要查库），写进 schema 只会把错误信息
+    // 换成一句没人认识的 JSON-Schema 文案，所以下面用 resolveRequestedModel 判。
+    model: { type: 'string', maxLength: 200 },
     logContext: {
       type: 'object',
       properties: {
@@ -201,6 +211,23 @@ function collectInjection(db: ApiContext['db'], ctx: ApiContext, raw: LogContext
   };
 }
 
+/**
+ * 解析本轮模型名（契约 §13.1 / v1.10.0）。
+ *
+ * 两条纪律：
+ *   1. **缺省 = `undefined`**（不是空串、不是装配侧那个名字）：端口第三参缺省即"用装配侧 `ASSISTANT_MODEL`"，
+ *      把装配侧的值在这里填上会多一条与 §13.1 不同源的路径；
+ *   2. **不合法就抛 400，绝不回落**：回落会静默换模型，是只能靠猜的失效模式（ADR-0023）。
+ */
+function resolveRequestedModel(db: ApiContext['db'], raw: string | undefined): string | undefined {
+  const name = (raw ?? '').trim();
+  if (name === '') return undefined;
+  if (!listEnabledModelNames(db).includes(name)) {
+    throw ApiError.invalidParam('model', `模型 ${name} 未启用或不存在`);
+  }
+  return name;
+}
+
 export function registerAssistantRoutes(app: FastifyInstance, ctx: ApiContext): void {
   const { db, assistant } = ctx;
 
@@ -214,6 +241,9 @@ export function registerAssistantRoutes(app: FastifyInstance, ctx: ApiContext): 
     },
     async (req, reply) => {
       // ── 开流之前的全部工作：任何一步抛错都还能回普通 JSON 400/500 ──
+      // 模型校验必须在开流**之前**：开流之后就没有 400 可用，只能回终止帧（那会把"请求写错了"
+      // 伪装成"模型答不出来"，正是 §13.1 反复划开的两类）。
+      const model = resolveRequestedModel(db, req.body.model);
       const caps = applyMessageCaps(req.body.messages);
       const injection = collectInjection(db, ctx, req.body.logContext, new Date());
       const dataBlock = renderDataBlock({
@@ -229,6 +259,7 @@ export function registerAssistantRoutes(app: FastifyInstance, ctx: ApiContext): 
         reply,
         invoker: assistant,
         messages,
+        model,
         citations: injection.citations,
         truncated: caps.truncated || injection.truncated,
       });
@@ -240,6 +271,8 @@ interface StreamChatOptions {
   reply: FastifyReply;
   invoker: AssistantModelInvoker;
   messages: AssistantMessage[];
+  /** 本轮模型名（§13.1 / v1.10.0）；`undefined` = 用装配侧 `ASSISTANT_MODEL` */
+  model: string | undefined;
   citations: Citation[];
   truncated: boolean;
 }
@@ -253,7 +286,7 @@ interface StreamChatOptions {
  * 而前端对断流的处置是"保留已收文本 + 可重试"，比一个明确的终止帧差。
  */
 async function streamChat(opts: StreamChatOptions): Promise<void> {
-  const { reply, invoker, messages, citations, truncated } = opts;
+  const { reply, invoker, messages, model, citations, truncated } = opts;
 
   reply.hijack();
   reply.raw.writeHead(200, {
@@ -296,7 +329,7 @@ async function streamChat(opts: StreamChatOptions): Promise<void> {
   };
 
   try {
-    for await (const event of invoker.stream(messages, controller.signal)) {
+    for await (const event of invoker.stream(messages, controller.signal, model)) {
       // 客户端已经走了：后面的帧没人收，继续读只是替一个不存在的读者烧 token
       if (controller.signal.aborted) break;
 

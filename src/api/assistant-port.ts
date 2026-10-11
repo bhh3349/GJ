@@ -47,7 +47,13 @@ export type AssistantStreamEvent =
  * **不计入业务流量口径**（不写 usage_logs），另计进程内独立计数经 §12.2 `assistant` 只读暴露。
  */
 export interface AssistantModelInvoker {
-  stream(messages: AssistantMessage[], signal: AbortSignal): AsyncIterable<AssistantStreamEvent>;
+  /**
+   * @param model **本轮**要用的站内模型名（契约 §13.1 / v1.10.0）。**可选**：缺省 / `undefined` =
+   *   用装配侧 `ASSISTANT_MODEL`（这条缺省路径与 v1.9.0 逐字节相同，是"零行为变更"的落点）。
+   *   合法性已由路由层按「站内已启用模型集合」校验过，实现侧**不再校验、也不做二次回落** ——
+   *   回落会把路由层那条 400 变成"静默换了个模型"，用户只能靠猜。
+   */
+  stream(messages: AssistantMessage[], signal: AbortSignal, model?: string): AsyncIterable<AssistantStreamEvent>;
 }
 
 /**

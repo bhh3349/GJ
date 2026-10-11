@@ -18,6 +18,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { AppConfig } from '../../config.js';
 import { openDatabase, type Db } from '../../db/database.js';
 import { appendGatewayErrorEvent, type GatewayErrorEventInput } from '../../db/repo/gateway-events.js';
+import { upsertModelFromSync } from '../../db/repo/models.js';
+import { createUpstream } from '../../db/repo/upstreams.js';
 import { buildApp } from '../app.js';
 import type { AssistantMessage, AssistantModelInvoker, AssistantStreamEvent } from '../assistant-port.js';
 import { bootstrapAdmin } from '../auth.js';
@@ -124,7 +126,7 @@ async function setup(opts: SetupOptions = {}): Promise<Harness> {
 /** 桩 invoker：把"被送进模型的消息"和"信号"记下来，再按脚本吐帧。 */
 interface Stub {
   invoker: AssistantModelInvoker;
-  calls: { messages: AssistantMessage[]; signal: AbortSignal }[];
+  calls: { messages: AssistantMessage[]; signal: AbortSignal; model: string | undefined }[];
 }
 
 function stubInvoker(script: readonly AssistantStreamEvent[] | ((messages: AssistantMessage[]) => AsyncGenerator<AssistantStreamEvent>)): Stub {
@@ -132,8 +134,8 @@ function stubInvoker(script: readonly AssistantStreamEvent[] | ((messages: Assis
   const invoker: AssistantModelInvoker = {
     // 真实实现要求"O(1) 建立、不得抛"（端口契约）；桩不需要模拟这两点，
     // 但**必须**是惰性的 —— 否则"路由在开流前就把消息算好了"这件事就验不到了。
-    stream(messages, signal) {
-      calls.push({ messages, signal });
+    stream(messages, signal, model) {
+      calls.push({ messages, signal, model });
       if (typeof script !== 'function') {
         const fixed = script;
         // eslint 风格上这是"把一个数组包成生成器"，但它就是被测方的对端，越直白越好
@@ -389,6 +391,71 @@ describe('POST /api/assistant/chat —— 上限分两类（§13.1 / §13.3）',
     // 注入块里回显的是**收窄后**的窗口，起点恰好 24h 之前
     expect(system).toContain(`错误事件查询窗口: ${new Date(to.getTime() - 24 * 3600_000).toISOString()} → ${to.toISOString()}`);
     expect(parseFrames(res.body).at(-1)?.data['truncated']).toBe(true);
+  });
+});
+
+describe('POST /api/assistant/chat —— 按请求选模型（§13.1 / v1.10.0 / ADR-0023）', () => {
+  /** 建一个上游 + 一个模型档案；`upstreamEnabled=false` 用来验"上游停用"这一半判据。 */
+  function seed(h: Harness, name: string, upstreamEnabled = true): void {
+    const up = createUpstream(h.db, { name: `up-${name}`, baseUrl: `https://${name}.example.com/v1` });
+    if (!upstreamEnabled) h.db.prepare('UPDATE upstreams SET enabled = 0 WHERE id = ?').run(up.id);
+    upsertModelFromSync(h.db, {
+      upstreamId: up.id,
+      name,
+      displayName: null,
+      type: 'chat',
+      capabilities: [],
+      contextLength: null,
+      price: null,
+    });
+  }
+
+  it('显式传合法模型名 → 原样送进 invoker 第三参', async () => {
+    const stub = stubInvoker(DELTA_SCRIPT);
+    const h = await setup({ assistant: stub.invoker });
+    seed(h, 'tierflow_pro');
+
+    const res = await chat(h, { messages: [{ role: 'user', content: 'hi' }], model: 'tierflow_pro' });
+
+    expect(res.statusCode).toBe(200);
+    expect(stub.calls).toHaveLength(1);
+    expect(stub.calls[0]?.model).toBe('tierflow_pro');
+  });
+
+  it('缺省 / 空串 → 第三参 undefined（走装配侧 ASSISTANT_MODEL，零行为变更）', async () => {
+    const stub = stubInvoker(DELTA_SCRIPT);
+    const h = await setup({ assistant: stub.invoker });
+
+    await chat(h, { messages: [{ role: 'user', content: 'hi' }] });
+    await chat(h, { messages: [{ role: 'user', content: 'hi' }], model: '   ' });
+
+    expect(stub.calls.map((c) => c.model)).toEqual([undefined, undefined]);
+  });
+
+  it('未启用 / 不存在的模型名 → 400 INVALID_PARAM（details.field=model），**不静默回落**', async () => {
+    const stub = stubInvoker(DELTA_SCRIPT);
+    const h = await setup({ assistant: stub.invoker });
+    seed(h, 'known');
+    seed(h, 'retired', false);
+
+    const unknown = await chat(h, { messages: [{ role: 'user', content: 'hi' }], model: 'no-such-model' });
+    expect(unknown.statusCode).toBe(400);
+    expect(unknown.json()).toMatchObject({ code: 'INVALID_PARAM', details: { field: 'model' } });
+
+    // 上游被停用的模型同样不算"站内可选"（与 §5 / /v1/models 逐字同判据）
+    const disabled = await chat(h, { messages: [{ role: 'user', content: 'hi' }], model: 'retired' });
+    expect(disabled.statusCode).toBe(400);
+    expect(disabled.json()).toMatchObject({ code: 'INVALID_PARAM', details: { field: 'model' } });
+
+    // 400 是在开流之前判的：invoker 一次都没被调用，绝不会拿到一个被回落成缺省的模型
+    expect(stub.calls).toHaveLength(0);
+  });
+
+  it('非 string 的 model → schema 层 400 INVALID_PARAM（不是 500）', async () => {
+    const h = await setup({ assistant: stubInvoker(DELTA_SCRIPT).invoker });
+    const res = await chat(h, { messages: [{ role: 'user', content: 'hi' }], model: 123 });
+    expect(res.statusCode).toBe(400);
+    expect(res.json()).toMatchObject({ code: 'INVALID_PARAM' });
   });
 });
 

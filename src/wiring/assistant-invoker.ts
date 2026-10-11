@@ -28,6 +28,11 @@
  *
  * 计量口径（§13.4）：计入 key 健康、不计入业务流量口径；本文件另外把 token / 次数记进
  * 调用方传入的 `AssistantMetrics`（§12.2 的 `assistant` 只读字段就是它）。
+ *
+ * **模型名 v1.10.0 起是"逐请求"的**（契约 §13.1 / ADR-0023）：`options.model` 是**缺省值**
+ * （`.env` 的 `ASSISTANT_MODEL`），`stream(messages, signal, model?)` 的第三参是本轮覆盖。
+ * 合法性由路由层按「站内已启用模型集合」校验过，本文件**不再校验、也不回落** ——
+ * 回落会把路由层那条 400 变成"静默换了个模型"，是只能靠猜的失效模式。
  */
 
 import type {
@@ -77,7 +82,7 @@ export interface AssistantInvokerOptions {
   pool: KeyPoolInternal;
   secrets: SecretResolver;
   models: ModelCatalog;
-  /** 助手自身用的客户端模型名（须已在模型档案里建档并绑到上游 key） */
+  /** **缺省**站内模型名（`.env` 的 `ASSISTANT_MODEL`；须已在模型档案里建档并绑到上游 key）。逐请求可被覆盖 */
   model: string;
   /** 计数出口，直接挂到 `/api/observability/health` 的 `assistant` 字段 */
   metrics: AssistantMetrics;
@@ -130,10 +135,10 @@ export function createAssistantInvoker(options: AssistantInvokerOptions): Assist
   return {
     // async generator：函数体到第一次 `next()` 才跑，所以"O(1) 建立、不得抛"是结构性的，
     // 不是靠 try/catch 兜出来的（端口契约 §13.4 第 3 条）。
-    async *stream(messages, signal): AsyncIterable<AssistantStreamEvent> {
+    async *stream(messages, signal, model): AsyncIterable<AssistantStreamEvent> {
       options.metrics.requests += 1;
       try {
-        for await (const event of run(messages, signal)) {
+        for await (const event of run(messages, signal, model ?? options.model)) {
           if (event.kind === 'error') options.metrics.errors += 1;
           yield event;
         }
@@ -151,12 +156,12 @@ export function createAssistantInvoker(options: AssistantInvokerOptions): Assist
     },
   };
 
-  async function* run(messages: AssistantMessage[], signal: AbortSignal): AsyncGenerator<AssistantStreamEvent> {
+  async function* run(messages: AssistantMessage[], signal: AbortSignal, model: string): AsyncGenerator<AssistantStreamEvent> {
     const result = await engine.chatCompletions({
       group: ASSISTANT_GROUP,
-      model: options.model,
+      model,
       body: {
-        model: options.model,
+        model,
         messages: messages.map((m) => ({ role: m.role, content: m.content })),
         stream: true,
         // 让上游在最后一个 chunk 带上 usage（引擎的 tracker 会采信）；

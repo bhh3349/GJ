@@ -1,5 +1,11 @@
 /**
- * 上游管理 —— Base URL 的增删改、余额查询模板、余额合计。
+ * 上游管理（全部供应商）—— Base URL 的增删改、余额查询模板、余额合计。
+ *
+ * 这一页是**列表**：侧栏「上游管理」展开后第一条是「添加供应商」（独立路由
+ * `/upstreams/new`），其后每个供应商一条，指向它的专属页 `/upstreams/:id`。
+ * 本页保留"一屏看全部上游 + 就地操作"的能力（Bo 的老动线不动），
+ * 行名点进去就是同一个供应商的专属页 —— 两处**共用** `UpstreamModal` 与
+ * `deleteUpstream()`，不各长一套行为。
  *
  * 契约纪律：
  * - 余额是「防造假」主战场：`totalBalance=null` 表示该上游所有 balance 类 key 都未知，
@@ -41,7 +47,6 @@ import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { statsApi, upstreamsApi } from '@/api/endpoints';
-import { describeError, isApiError } from '@/api/http';
 import { useAction, useResource } from '@/api/hooks';
 import { useTaskPolling } from '@/api/useTaskPolling';
 import {
@@ -57,51 +62,12 @@ import { BalanceText } from '@/components/BalanceText';
 import { confirmManualRefresh } from '@/components/ManualRefreshConfirm';
 import { PageHeader } from '@/components/PageHeader';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
+import { deleteUpstream } from '@/pages/upstreams/deleteUpstream';
 import { UpstreamModal } from '@/pages/upstreams/UpstreamModal';
 import { tokens } from '@/theme/tokens';
 import { formatCount, formatIso, formatPercent, formatRelative } from '@/utils/format';
 
 const { Text } = Typography;
-
-interface SubtreeCounts {
-  /** 未软删的 key 数（与 §2 `Upstream.keyCount` 同源）。后端没给时退回列表行自身的计数。 */
-  keyCount: number;
-  /** 模型档案数。后端未返回（早于 v1.2.2）时是 `null`，**不补 0**。 */
-  modelCount: number | null;
-}
-
-/**
- * 解析 `409 UPSTREAM_HAS_KEYS` 的 `details: {keyCount, modelCount}`（契约 v1.2.2）。
- *
- * 两个计数都得读：`keyCount` 可能是 0 而 `modelCount > 0`（上游只同步了模型、没建 key 是常态），
- * 只看 key 数会让管理员读成「没什么可删的」，而实际连模型档案会一起删。
- */
-function detailCounts(details: unknown, row: Upstream): SubtreeCounts {
-  const pick = (key: 'keyCount' | 'modelCount'): number | null => {
-    if (details === null || typeof details !== 'object' || !(key in details)) return null;
-    const value = (details as Record<string, unknown>)[key];
-    return typeof value === 'number' && Number.isFinite(value) ? value : null;
-  };
-  return { keyCount: pick('keyCount') ?? row.keyCount, modelCount: pick('modelCount') };
-}
-
-/** 二次确认正文：只说删掉什么（数量）；代价解释性小字已按 Bo 指示摘除。 */
-function DeleteUpstreamBody({ name, counts }: { name: string; counts: SubtreeCounts }) {
-  const parts: string[] = [];
-  if (counts.keyCount > 0) parts.push(`Key ${counts.keyCount} 个`);
-  if (counts.modelCount !== null && counts.modelCount > 0) {
-    parts.push(`模型档案 ${counts.modelCount} 个`);
-  }
-
-  return (
-    <div>
-      <Text>
-        将物理删除「{name}」整棵子树
-        {parts.length > 0 ? `：${parts.join(' · ')}` : ''}。
-      </Text>
-    </div>
-  );
-}
 
 export default function UpstreamsPage() {
   const { message, modal } = App.useApp();
@@ -198,49 +164,47 @@ export default function UpstreamsPage() {
   };
 
   /**
-   * 删除。故意不走 `useAction`：force 分支需要读到 `UPSTREAM_HAS_KEYS` 的原始错误，
-   * 而 `useAction.run` 会把错误吞成 `null`。失败提示仍按契约 code 给出。
+   * 删除。实现与供应商专属页共用 `deleteUpstream()`（含 409 分支）——
+   * 两处各写一份必然走偏。它内部不走 `useAction`：force 分支要读原始错误。
    */
-  const remove = (row: Upstream, force: boolean) => {
+  const remove = (row: Upstream) => {
     setRemovingId(row.id);
-    upstreamsApi
-      .remove(row.id, force)
-      .then(() => {
-        message.success(force ? `已强制删除「${row.name}」` : `已删除「${row.name}」`);
+    const settle = (): void => {
+      setRemovingId((current) => (current === row.id ? null : current));
+    };
+    deleteUpstream({
+      modal,
+      upstream: row,
+      onDeleted: () => {
+        settle();
+        message.success(`已删除「${row.name}」`);
         list.reload();
-      })
-      .catch((error: unknown) => {
-        if (!force && isApiError(error) && error.code === 'UPSTREAM_HAS_KEYS') {
-          const counts = detailCounts(error.details, row);
-          modal.confirm({
-            title: `「${row.name}」下还有从属资源，确定一并删除？`,
-            width: 480,
-            content: <DeleteUpstreamBody name={row.name} counts={counts} />,
-            okText: '连同从属资源删除',
-            okButtonProps: { danger: true },
-            cancelText: '取消',
-            onOk: () => {
-              remove(row, true);
-            },
-          });
-          return;
-        }
-        const { code, message: text } = describeError(error);
-        message.error(`${text} [${code}]`);
-      })
-      .finally(() => {
-        setRemovingId((current) => (current === row.id ? null : current));
-      });
+      },
+      onFailure: (text) => {
+        settle();
+        message.error(text);
+      },
+    });
   };
 
   const columns: ColumnsType<Upstream> = [
     {
+      // 名字点进去 = 这个供应商的专属页（与侧栏子菜单同一路由）。
       title: '名称',
       dataIndex: 'name',
       width: 160,
       render: (value: string, row) => (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <Text>{value}</Text>
+          <Button
+            type="link"
+            size="small"
+            style={{ padding: 0, height: 'auto', textAlign: 'left' }}
+            onClick={() => {
+              navigate(`/upstreams/${row.id}`);
+            }}
+          >
+            {value}
+          </Button>
           <Text type="secondary" style={{ fontFamily: tokens.font.mono, fontSize: 11 }}>
             {row.id}
           </Text>
@@ -468,7 +432,7 @@ export default function UpstreamsPage() {
             style={{ padding: 0 }}
             loading={removingId === row.id}
             onClick={() => {
-              remove(row, false);
+              remove(row);
             }}
           >
             删除
@@ -542,7 +506,7 @@ export default function UpstreamsPage() {
               刷新
             </Button>
             <Button type="primary" size="small" icon={<PlusOutlined />} onClick={openCreate}>
-              新增上游
+              添加供应商
             </Button>
           </Space>
         }

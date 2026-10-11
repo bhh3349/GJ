@@ -28,6 +28,8 @@ export const navItems: readonly NavItem[] = [
     description: 'QPS、成功率、余额总览、key 健康状态',
   },
   {
+    // 「上游管理」是个可展开的分组：子项 = 添加供应商（固定第一）+ 每个上游一条。
+    // 子项由 `layouts/useSupplierNav` 按真实列表生成，这里只给分组头。
     path: '/upstreams',
     label: '上游管理',
     icon: <CloudServerOutlined />,

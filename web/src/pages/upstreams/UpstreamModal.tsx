@@ -40,6 +40,7 @@ import type {
   SupplierKind,
   Upstream,
 } from '@/api/types';
+import { invalidateSupplierNav } from '@/router/supplierNav';
 import { tokens } from '@/theme/tokens';
 import { BalanceSelfTest } from './BalanceSelfTest';
 
@@ -127,7 +128,8 @@ export interface UpstreamModalProps {
   open: boolean;
   editing: Upstream | null;
   onClose: () => void;
-  onSaved: () => void;
+  /** 保存成功后回传**服务端投影**（列表页只刷新；添加页拿它的 id 进专属页）。 */
+  onSaved: (saved: Upstream) => void;
 }
 
 export function UpstreamModal({ open, editing, onClose, onSaved }: UpstreamModalProps) {
@@ -238,7 +240,9 @@ export function UpstreamModal({ open, editing, onClose, onSaved }: UpstreamModal
         );
 
     if (result === null) return;
-    onSaved();
+    // 名称是侧栏子菜单的文案，新增/改名都要让侧栏重取（见 @/router/supplierNav）。
+    invalidateSupplierNav();
+    onSaved(result);
     onClose();
   };
 

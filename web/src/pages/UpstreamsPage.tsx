@@ -349,7 +349,7 @@ export default function UpstreamsPage() {
     },
     {
       title: (
-        <Tooltip title="自动同步运行态（契约 §14.3，只读）。间隔 / 抖动 / 退避是服务端配置的回显，前端不自算；开关与间隔由部署侧 BALANCE_SYNC_MINUTES 决定，管理面没有写入口。">
+        <Tooltip title="自动同步为只读展示；开关与间隔由服务端配置决定，管理面没有写入口。">
           <span>自动同步</span>
         </Tooltip>
       ),
@@ -432,7 +432,7 @@ export default function UpstreamsPage() {
             画一个点进去全是"不是供应商账号型"的按钮，等于把一次拒绝做成一个功能。
           */}
           {row.supplier === 'tierflow' ? (
-            <Tooltip title="供应商账号池：账号 → 池内 key / 套餐（契约 §15）">
+            <Tooltip title="供应商账号池：账号、key、套餐统一管理">
               <Button
                 size="small"
                 type="link"
@@ -513,7 +513,7 @@ export default function UpstreamsPage() {
       />
       <Text type="secondary" style={{ fontSize: 12 }}>共 {formatCount(list.data?.total ?? 0)} 个</Text>
       {syncStatus.data ? (
-        <Tooltip title="自动同步的生效参数由服务端回显（契约 §14.3），前端不得自算间隔 / 抖动 / 退避。要改间隔请改部署侧 BALANCE_SYNC_MINUTES —— 管理面没有写入口。">
+        <Tooltip title="自动同步参数由服务端配置；要改间隔请改部署侧 BALANCE_SYNC_MINUTES，管理面没有写入口。">
           <Text type="secondary" style={{ fontSize: 12 }}>
             {syncStatus.data.auto.enabled
               ? `自动同步：每 ${syncStatus.data.auto.intervalMinutes} 分钟 ±${formatPercent(

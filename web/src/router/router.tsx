@@ -13,7 +13,7 @@ export const router = createBrowserRouter([
   },
   {
     path: '/',
-    // 契约 §0.5：/api/* 全量鉴权、无白名单例外 → 受保护区域统一先过会话校验。
+    // 受保护区域统一先过会话校验。
     element: (
       <AuthGate>
         <AppLayout />
@@ -24,7 +24,7 @@ export const router = createBrowserRouter([
       { index: true, element: <Navigate to="/dashboard" replace /> },
       { path: 'dashboard', element: lazyPage(() => import('@/pages/DashboardPage')) },
       { path: 'upstreams', element: lazyPage(() => import('@/pages/UpstreamsPage')) },
-      // 契约 §15.6：`supplier = "tierflow"` 的上游才有账号面。独立分包 —— 通用上游的用户
+      // 供应商上游的账号池页独立分包 —— 通用上游的用户
       // 一辈子不会点进来，不让它进上游列表的首屏包（`findNavItem` 按前缀命中，导航仍高亮「上游管理」）。
       {
         path: 'upstreams/:id/accounts',
@@ -35,7 +35,7 @@ export const router = createBrowserRouter([
       { path: 'models', element: lazyPage(() => import('@/pages/ModelsPage')) },
       { path: 'stats', element: lazyPage(() => import('@/pages/StatsPage')) },
       { path: 'logs', element: lazyPage(() => import('@/pages/LogsPage')) },
-      // 契约 §13：助手页独立分包，不进 Dashboard 首屏、不加载 ECharts。
+      // 助手页独立分包，不进 Dashboard 首屏、不加载 ECharts。
       { path: 'assistant', element: lazyPage(() => import('@/pages/assistant/AssistantPage')) },
       { path: '*', element: <NotFoundPage /> },
     ],

@@ -24,6 +24,8 @@
  *   （§15.3 的 `result`）；前端乘出来的是编造，不是承诺（§14.7 / §14.5）。所以确认框里的
  *   「打谁」只说**选择事实**（勾了几个 / 全部），不写总量。
  * - **按钮不因退避置灰**：退避只约束**自动**同步，手动照常可发（§14.1 / §14.7）。
+ * - **批量删除**（2026-10-11 Bo）：账号删除没有批量端点，前端按选择顺序逐把单删
+ *   （`force=true`，名下 key 只解绑不删），结尾汇总 {ok, failed} —— 不造批量端点。
  * - **同上游单飞**：上一轮没结束时本轮由服务端跳过（§14.1）⇒ 连点不等于多刷一遍，
  *   所以这里**不做队列** —— 前端排队就是把一条已经定死的服务端行为再实现一遍。
  *
@@ -33,7 +35,7 @@
  * `succeeded` / `failed` 才读（§15.12 锚 2）—— 本页**不碰** `result`，
  * 免得"认结果形状"出现第二份实现。
  */
-import { ArrowLeftOutlined, DownloadOutlined, KeyOutlined, PlusOutlined, SyncOutlined } from '@ant-design/icons';
+import { ArrowLeftOutlined, DeleteOutlined, DownloadOutlined, KeyOutlined, PlusOutlined, SyncOutlined } from '@ant-design/icons';
 import {
   Alert,
   App,
@@ -254,6 +256,47 @@ export default function SupplierAccountsPage() {
   };
 
   /**
+   * 批量删除（2026-10-11 Bo）：账号删除没有批量端点，前端按选择顺序逐把
+   * `DELETE /api/supplier-accounts/:id?force=true`（名下 key 解除归属并保留）。
+   * 单把失败即时汇总进结尾提示并继续，结尾汇总 {ok, failed} —— 不造批量端点。
+   */
+  const batchRemove = (): void => {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    const masked = new Map((accounts.data?.items ?? []).map((row) => [row.id, row.identifier] as const));
+    const preview = ids
+      .slice(0, 5)
+      .map((id) => masked.get(id) ?? id)
+      .join('、');
+    modal.confirm({
+      title: `删除 ${ids.length} 个账号？`,
+      content: preview + (ids.length > 5 ? ' 等' : '') + '；名下的 key 会解除归属并保留。',
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: async () => {
+        let ok = 0;
+        const failed: string[] = [];
+        for (const id of ids) {
+          try {
+            await supplierAccountsApi.remove(id, true);
+            ok += 1;
+          } catch {
+            failed.push(masked.get(id) ?? id);
+          }
+        }
+        setSelected([]);
+        accounts.reload();
+        if (failed.length === 0) {
+          message.success(`已删除 ${ok} 个账号`);
+        } else {
+          message.warning(`已删除 ${ok} 个，失败 ${failed.length} 个：${failed.join('、')}`);
+        }
+      },
+    });
+  };
+
+  /**
    * 对账 CSV。包一层对象是因为 `downloadFile` 成功时也可能回 `null`（服务端没给文件名），
    * 而 `run` 用 `null` 表示失败 —— 两者同形就没法判断到底是哪种（缺省不是证据）。
    */
@@ -325,7 +368,7 @@ export default function SupplierAccountsPage() {
     },
     {
       title: (
-        <Tooltip title="账号级余额（与 key 级余额是两个口径，不相加）。null = 未知 ≠ 0；下面的时刻是最近一次「真的查到」——查失败不动它，所以显示得旧本身是一条事实。">
+        <Tooltip title="账号级余额，与 key 级余额是两个口径，不相加。时刻为最近一次查到的时间。">
           <span>账号余额</span>
         </Tooltip>
       ),
@@ -339,8 +382,8 @@ export default function SupplierAccountsPage() {
     },
     {
       title: (
-        <Tooltip title="归属本账号、已入池的 key 数。徽标是其中 unlimited=1 的子集（不相加）；仅掩码未入池的那部分单列，也不能与它相加成「key 总数」。">
-          <span>池内 key</span>
+        <Tooltip title="归属本账号的 key 数。徽标是其中无限额度的子集，不相加。">
+          <span>账号 key</span>
         </Tooltip>
       ),
       key: 'keys',
@@ -369,7 +412,7 @@ export default function SupplierAccountsPage() {
             </Tooltip>
           ) : null}
           {row.maskedKeyCount > 0 ? (
-            <Tooltip title="只拿到掩码、进不了池的 key 数（对账用）。它们不参与网关路由，也不与左边的池内 key 相加。">
+            <Tooltip title="只有掩码、未进入 key 池的数量（对账用），不参与网关路由，也不与左边的账号 key 数相加。">
               <Text type="secondary" style={{ fontSize: 11 }}>
                 {`仅掩码 ${formatCount(row.maskedKeyCount)}`}
               </Text>
@@ -380,7 +423,7 @@ export default function SupplierAccountsPage() {
     },
     {
       title: (
-        <Tooltip title="套餐数。套餐不建成 key（§15.8 第 6 问），所以它不进左边的 key 计数、不进余额合计、也不参与网关准入判断。">
+        <Tooltip title="套餐数。套餐不是 key，不进 key 计数与余额合计。">
           <span>套餐</span>
         </Tooltip>
       ),
@@ -395,7 +438,7 @@ export default function SupplierAccountsPage() {
     },
     {
       title: (
-        <Tooltip title="credentialSource 回答「会话过期后能不能自动重登」，与 hasSession 正交：有会话但没有存档密码的号，会话一过期就只能人工重导凭据。不得用 hasSession 反推。">
+        <Tooltip title="凭据来源决定会话过期后能否自动重登；有会话但没有存档密码的号，过期后只能人工重导凭据。">
           <span>凭据</span>
         </Tooltip>
       ),
@@ -490,12 +533,10 @@ export default function SupplierAccountsPage() {
           type="info"
           showIcon
           style={{ background: tokens.tint.neutral, border: 'none' }}
-          message="这个上游不是供应商账号型（supplier 不是 tierflow）"
+          message="这个上游不是供应商账号型"
           description={
             <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-              判据只有<Text strong style={{ fontSize: 12 }}>一个字段</Text>：`upstream.supplier`。
-              这里不去解析 Base URL 猜供应商 —— 猜错会渲染出一套点了全 422 的分区（§15.6）。
-              要开通账号面，请到上游管理编辑该上游、把「供应商」选成对应值。
+              要开通账号池，请到上游管理编辑该上游、把「供应商」选成对应值。
             </Text>
           }
         />
@@ -559,7 +600,7 @@ export default function SupplierAccountsPage() {
                     >
                       导入账号
                     </Button>
-                    <Tooltip title="入口名是「新建 key」不是「新建套餐」：账号面上唯一能新建的东西就是池内 key（§15.2 / §15.8 第 6 问）。套餐是上游的事实，只能同步。">
+                    <Tooltip title="新建的 key 会进入账号名下的 key 池；套餐是上游的事实，只能同步，不能新建。">
                       <Button
                         size="small"
                         type="primary"
@@ -568,7 +609,7 @@ export default function SupplierAccountsPage() {
                           setKeysOpen(true);
                         }}
                       >
-                        新建 key（并入池）
+                        新建 key
                       </Button>
                     </Tooltip>
                     {BATCH_ACTIONS.map((spec) => (
@@ -596,6 +637,11 @@ export default function SupplierAccountsPage() {
                         导出对账 CSV
                       </Button>
                     </Tooltip>
+                    {selected.length > 0 ? (
+                      <Button size="small" danger icon={<DeleteOutlined />} onClick={batchRemove}>
+                        批量删除
+                      </Button>
+                    ) : null}
                   </Space>
 
                   {accounts.error && accounts.data ? (
@@ -640,12 +686,12 @@ export default function SupplierAccountsPage() {
                             }}
                           >
                             <Text style={{ fontSize: 12 }}>
-                              池内 key {formatCount(row.keyCount)} 把
+                              账号 key {formatCount(row.keyCount)} 把
                               {row.unlimitedKeyCount > 0
                                 ? `（其中无限额度 ${formatCount(row.unlimitedKeyCount)}）`
                                 : ''}
                               {row.maskedKeyCount > 0
-                                ? ` · 仅掩码未入池 ${formatCount(row.maskedKeyCount)}`
+                                ? ` · 仅掩码 ${formatCount(row.maskedKeyCount)}`
                                 : ''}
                             </Text>
                             {/*
@@ -754,7 +800,7 @@ export default function SupplierAccountsPage() {
           setKeysOpen(false);
         }}
         onSubmitted={(taskId) => {
-          setBatchTitle('新建 key 并入池');
+          setBatchTitle('新建 key');
           setBatchOpen(true);
           task.start(taskId);
         }}

@@ -353,7 +353,7 @@ export default function KeysPage() {
       dataIndex: 'enabled',
       width: 80,
       render: (_: unknown, row) => (
-        <Tooltip title={row.deletedAt ? '该 key 已软删（C4 级联），不再参与路由' : '管理端只写 enabled；health 由网关决定'}>
+        <Tooltip title={row.deletedAt ? '该 key 已删除，不再参与路由' : '管理端只写启用状态；健康态由网关决定'}>
           <Switch
             size="small"
             checked={row.enabled}

@@ -156,7 +156,7 @@ export function SupplierAccountDetailDrawer({
         if (!force && isApiError(error) && error.code === 'ACCOUNT_HAS_KEYS') {
           const keyCount = readNumber(error.details, 'keyCount') ?? account?.keyCount ?? null;
           modal.confirm({
-            title: '这个账号名下还有已入池的 key，确定删除？',
+            title: '这个账号名下还有 key，确定删除？',
             width: 500,
             content: (
               <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
@@ -285,7 +285,7 @@ export function SupplierAccountDetailDrawer({
       footer={
         <Space size={tokens.space.sm} wrap style={{ width: '100%', justifyContent: 'flex-end' }}>
           {account?.credentialSource === 'session' ? (
-            <Tooltip title="该账号是会话型凭据，没有存档密码 ⇒ 重登必然当场 422。这不是失败，是这条通路本来就不通（§15.9 双路径：密码型是第一事实源、会话型是冷备）。">
+            <Tooltip title="该账号是会话型凭据，没有存档密码，无法自动重登。">
               <span style={{ display: 'inline-block' }}>
                 <Button size="small" disabled>
                   重新登录
@@ -312,7 +312,7 @@ export function SupplierAccountDetailDrawer({
           >
             连接自测
           </Button>
-          <Tooltip title="删账号不删 key：名下的池内 key 会解除归属并继续可用（§15.2）。">
+          <Tooltip title="删账号不删 key：名下的 key 会解除归属并继续可用。">
             <Button size="small" danger loading={removing} onClick={() => remove(false)}>
               删除账号
             </Button>
@@ -378,11 +378,11 @@ export function SupplierAccountDetailDrawer({
 
           <DetailRow
             index={3}
-            label="池内 key 与套餐"
+            label="key 与套餐"
                       >
             <div style={{ display: 'flex', gap: tokens.space.lg, flexWrap: 'wrap' }}>
               <Text style={{ fontSize: 12 }}>
-                池内 key {formatCount(account.keyCount)} 把
+                账号 key {formatCount(account.keyCount)} 把
                 {account.unlimitedKeyCount > 0 ? (
                   <Tooltip title="unlimited=1：上游给的是无限额度（balance 落 NULL），列表里据此显示「无限」徽标，绝不渲染成一个金额或负数。">
                     <Tag
@@ -400,9 +400,9 @@ export function SupplierAccountDetailDrawer({
                   </Tooltip>
                 ) : null}
               </Text>
-              <Tooltip title="只拿到掩码、进不了池的 key 数（对账用）。它们不参与网关路由，也不与上面的池内 key 相加。">
+              <Tooltip title="只有掩码、未进入 key 池的数量（对账用），不参与网关路由，也不与上面的账号 key 数相加。">
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  {`仅掩码未入池 ${formatCount(account.maskedKeyCount)}`}
+                  {`仅掩码 ${formatCount(account.maskedKeyCount)}`}
                 </Text>
               </Tooltip>
               <Text type="secondary" style={{ fontSize: 12 }}>

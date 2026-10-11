@@ -170,7 +170,7 @@ export default function StatsPage() {
     if (!data) return null;
     const bad = data.series.filter((item) => item.points.length !== data.axis.length);
     if (bad.length === 0) return null;
-    return `有 ${bad.length} 条序列的点数与时间轴不等长（契约 §6 要求等长且下标对齐）：${bad
+    return `有 ${bad.length} 条序列的点数与时间轴不等长：${bad
       .slice(0, 3)
       .map((item) => item.label)
       .join('、')}${bad.length > 3 ? ' 等' : ''}。图表按后端返回原样绘制，未做补桶。`;
@@ -409,7 +409,7 @@ export default function StatsPage() {
           </Space>
           <Space size={tokens.space.md} wrap>
             {usage.data && usage.data.bucket !== bucket ? (
-              <Tooltip title="契约 C2：后端可按数据量降级粒度，前端按回显渲染。">
+              <Tooltip title="数据量大时后端可能自动降低粒度，以实际回显为准。">
                 <Tag
                   bordered={false}
                   style={{ marginInlineEnd: 0, background: tokens.tint.info, color: tokens.color.info }}

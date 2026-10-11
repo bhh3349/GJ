@@ -427,7 +427,7 @@ export default function LogsPage() {
                       }}
                     />
                   </Tooltip>
-                  <Tooltip title="契约只支持精确状态码匹配，没有「只看失败」这种区间参数">
+                  <Tooltip title="只支持精确状态码匹配">
                     <Select
                       allowClear
                       size="small"
@@ -441,7 +441,7 @@ export default function LogsPage() {
                       }}
                     />
                   </Tooltip>
-                  <Tooltip title="默认不查已软删的上游 / key / 组；打开后按 id 过滤仍可命中（C4 保留了日志外键）">
+                  <Tooltip title="默认不查已删除的上游 / key / 组；打开后按 id 过滤仍可命中">
                     <Segmented
                       size="small"
                       value={includeDeleted ? 'with' : 'without'}

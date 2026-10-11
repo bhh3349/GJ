@@ -95,7 +95,7 @@ export function SupplierImportModal({ open, upstreamId, onClose, onSubmitted }: 
           <Input.TextArea
             rows={8}
             style={{ fontFamily: tokens.font.mono }}
-            placeholder={'手机号,密码\n16200000000,password1'}
+            placeholder={'手机号,密码\n16xxxxxxxxxxx,password'}
           />
         </Form.Item>
       </Form>
@@ -184,7 +184,7 @@ export function SupplierCreateKeysModal({
   return (
     <Modal
       open={open}
-      title="新建 key 并入池"
+      title="新建 key"
       okText="提交建 key"
       cancelText="取消"
       confirmLoading={isPending('keys')}

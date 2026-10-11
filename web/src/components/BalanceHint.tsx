@@ -59,7 +59,7 @@ const HINT_CONFIG: Record<HintCode, { type: 'info' | 'warning' | 'error'; title:
     type: 'info',
     title: '本次请求被限流（429）',
     description:
-      '可能是出口 IP 的请求预算已用尽，也可能该 key 自身撞到限额 —— 两者在这里同形，无法区分，所以不替你归因。稍后重试即可，不必改配置。',
+      '可能是出口 IP 的请求预算已用尽，也可能该 key 自身撞到限额。请稍后重试。',
   },
 };
 

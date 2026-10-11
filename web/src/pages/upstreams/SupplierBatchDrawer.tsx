@@ -129,7 +129,7 @@ export function SupplierBatchDrawer({
     },
     {
       title: (
-        <Tooltip title="供应商错误码原样（如 LOGIN_INVALID_CREDENTIALS）或本契约错误码。不做翻译 —— 码是排查时的检索键。">
+        <Tooltip title="供应商错误码原样或本系统错误码，不做翻译，便于检索排查。">
           <span>码</span>
         </Tooltip>
       ),
@@ -158,7 +158,7 @@ export function SupplierBatchDrawer({
     },
     {
       title: (
-        <Tooltip title="上游明文全程不经浏览器：服务端取回后当场加密落库，出口只有这条掩码。所以这里没有「一次性明文」可看 —— 那是 §3 人工从供应商控制台复制明文的路子才需要的。">
+        <Tooltip title="上游明文全程不经浏览器：服务端取回后当场加密落库，出口只有这条掩码。">
           <span>key（掩码）</span>
         </Tooltip>
       ),
@@ -276,8 +276,7 @@ export function SupplierBatchDrawer({
           message="任务已到终态，但结果不是本页认识的批量形状"
           description={
             <Text style={{ fontSize: 12 }}>
-              `result` 的形状只对 §15.2 的四个批量端点成立。这个任务可能来自别的入口
-              （如全量模型同步），请到对应的页面看它的结论。这里不猜、也不把缺失的计数字段当 0 渲染。
+              这个任务可能来自别的入口（如全量模型同步），请到对应的页面看它的结论。
             </Text>
           }
         />
@@ -331,8 +330,7 @@ export function SupplierBatchDrawer({
               )} 行`}
               description={
                 <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-                  本期<Text strong style={{ fontSize: 12 }}>没有分页</Text>（契约 §15.12 锚 2），所以这里没有「下一页」可点。要看全：按 `ids`
-                  分批重发，或用上方的「导出对账 CSV」把台账带出去。上面的计数是<Text strong style={{ fontSize: 12 }}>全量</Text>的，不受截断影响。
+                  逐行明细没有分页，没有「下一页」可点。要看全：按 `ids` 分批重发，或用上方的「导出对账 CSV」把台账带出去。上面的计数是<Text strong style={{ fontSize: 12 }}>全量</Text>的，不受截断影响。
                 </Text>
               }
             />

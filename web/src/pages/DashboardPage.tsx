@@ -268,7 +268,7 @@ export default function DashboardPage() {
       </div>
 
       {/*
-        余额同步观测区（契约 §14.3，只读）。独立取数：`/stats/overview` 不带余额历史，
+        余额同步观测区（只读）。独立取数：`/stats/overview` 不带余额历史，
         所以这一块自己打 `/api/stats/balance/sync`，失败不影响上面的实时面板。
         echarts 在该组件内部按需加载，不进首屏关键路径。
       */}

@@ -31,7 +31,7 @@ const { Text } = Typography;
 function QuotaCell({ value }: { value: QuotaValue }) {
   if (value === null) {
     return (
-      <Tooltip title="未设置上限（契约 §4：null = 不限）">
+      <Tooltip title="未设置上限（不限）">
         <Text type="secondary">不限</Text>
       </Tooltip>
     );

@@ -49,8 +49,8 @@ const { Text } = Typography;
 type SupplierFormValue = 'common' | 'tierflow';
 
 const SUPPLIER_OPTIONS: { value: SupplierFormValue; label: string }[] = [
-  { value: 'common', label: '通用（无账号面）' },
-  { value: 'tierflow', label: 'TierFlow（供应商账号面）' },
+  { value: 'common', label: '通用' },
+  { value: 'tierflow', label: 'TierFlow' },
 ];
 
 interface UpstreamFormValues {
@@ -291,10 +291,7 @@ export function UpstreamModal({ open, editing, onClose, onSaved }: UpstreamModal
             </Form.Item>
           </Space>
 
-          {/*
-            契约 §15.6：建/改上游表单里**唯一**多出来的控件。默认「通用」= `supplier: null`。
-            这里刻意不做「按 Base URL 自动选中」—— 那正是 §15.6 禁止的猜测。
-          */}
+          {/* 供应商决定该上游是否启用账号池。 */}
           <Form.Item name="supplier" label="供应商" style={{ maxWidth: 360 }}>
             <Select<SupplierFormValue> options={SUPPLIER_OPTIONS} />
           </Form.Item>

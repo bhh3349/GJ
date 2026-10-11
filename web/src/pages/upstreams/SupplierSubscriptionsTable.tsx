@@ -118,7 +118,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
     },
     {
       title: (
-        <Tooltip title="套餐剩余 = amount_total - amount_used（§15.8 第 6 问：套餐余额是账号级的量）。两端都是服务端给的分，相减不做量纲换算；任一端缺失就是「未知」。这不是池内 key 的余额，也不计进任何合计。">
+        <Tooltip title="套餐剩余 = 总额 - 已用；任一端缺失就是「未知」。这不是账号 key 的余额，也不计进任何合计。">
           <span>套餐剩余</span>
         </Tooltip>
       ),
@@ -205,7 +205,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
     },
     {
       title: (
-        <Tooltip title="上游给的那把套餐自带 key 的掩码。只读：它永不进池、不参与网关路由，与池内 key 之间只有「后 4 位可能对上」这一条弱对账关系（§15.2 keys/sync）。">
+        <Tooltip title="上游给的套餐自带 key 掩码。只读，永不进池、不参与网关路由。">
           <span>套餐 key（掩码）</span>
         </Tooltip>
       ),
@@ -217,7 +217,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
           {row.hasKey ? (
             <Tooltip title="上游表示这个套餐带 key。它只以掩码存在 —— 建行等于造一把不可用凭据，所以不进池。">
               <Tag bordered={false} style={{ marginInlineEnd: 0, fontSize: 10, background: tokens.tint.neutral, color: tokens.color.textSecondary }}>
-                未入池
+                仅掩码
               </Tag>
             </Tooltip>
           ) : null}

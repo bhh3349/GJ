@@ -20,7 +20,7 @@ const SOURCE_LABEL: Record<BalanceSource, string> = {
 };
 
 const SOURCE_HINT: Record<BalanceSource, string> = {
-  manual: '人工录入（优先于模板查询结果，见契约 C5）',
+  manual: '人工录入',
   template: '按上游余额查询模板取回',
 };
 

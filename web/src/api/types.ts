@@ -927,6 +927,12 @@ export interface AssistantLogContext {
 export interface AssistantChatRequest {
   /** 至少 1 条；空/缺失 → 400 INVALID_PARAM。 */
   messages: AssistantMessage[];
+  /**
+   * 本轮助手使用的站内模型名（契约 §13.1 / v1.10.0）。省略 / 空串 = 用装配侧缺省模型。
+   * 取值面 = 站内已启用模型 × 已启用上游（与后端校验同一判据）；不在集合内 →
+   * `400 INVALID_PARAM`（`details.field="model"`），不静默回落。
+   */
+  model?: string;
   logContext?: AssistantLogContext;
 }
 

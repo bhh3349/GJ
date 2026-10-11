@@ -5,6 +5,8 @@
  * - **对话只在内存** —— 状态就在这个 hook 的 `useState` 里，不写 `sessionStorage`、不写服务端（§13 头注 1）。
  * - **全量发历史、不本地裁剪** —— 每次请求把整段对话原样回传，上限由服务端裁并以 `done.truncated` 回报（§13.3）。
  * - **失败说人话** —— 终止帧的 `error` 原样留在气泡里，不弹 toast 掩盖；断流保留已收文本（§13.2）。
+ * - **本轮模型由调用方给** —— `model` 为 `null` 时请求体里**没有这个字段**（§13.1：缺省 = 用装配侧
+ *   `ASSISTANT_MODEL`）。选中值不写进对话历史、不落库，每轮自带（§13 头注 1「无状态」）。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -95,9 +97,10 @@ export interface UseAssistantChatResult {
   streaming: boolean;
   /** 正在跑的那条助手回合 id，供气泡显示取消按钮。 */
   activeTurnId: string | null;
-  send: (text: string, logContext: AssistantLogContext | null) => void;
+  /** `model` 传 `null` / 空串 = 请求体不带该字段，服务端用装配侧缺省（契约 §13.1 / v1.10.0）。 */
+  send: (text: string, logContext: AssistantLogContext | null, model: string | null) => void;
   /** 重放最后一个问题：丢弃其后内容，`seq` 从 1 重来（新请求新流）。 */
-  retry: (logContext: AssistantLogContext | null) => void;
+  retry: (logContext: AssistantLogContext | null, model: string | null) => void;
   cancel: () => void;
   clear: () => void;
 }
@@ -137,6 +140,7 @@ export function useAssistantChat(): UseAssistantChatResult {
       messages: AssistantMessage[],
       turnId: string,
       logContext: AssistantLogContext | null,
+      model: string | null,
     ): Promise<void> => {
       const controller = new AbortController();
       abortRef.current = controller;
@@ -153,6 +157,8 @@ export function useAssistantChat(): UseAssistantChatResult {
       const body: AssistantChatRequest = { messages };
       // `exactOptionalPropertyTypes`：空上下文就**不发这个字段**（省略 = 纯闲聊，§13.1）。
       if (logContext) body.logContext = logContext;
+      // 模型同理：不选 / 清空就**不发** `model`，服务端用装配侧缺省（§13.1 / ADR-0023）。
+      if (model !== null && model !== '') body.model = model;
 
       /** `seq` 单请求内从 1 起单调递增；跳变即丢帧/乱序。 */
       let expectedSeq = 1;
@@ -241,7 +247,7 @@ export function useAssistantChat(): UseAssistantChatResult {
   );
 
   const send = useCallback(
-    (text: string, logContext: AssistantLogContext | null) => {
+    (text: string, logContext: AssistantLogContext | null, model: string | null) => {
       const content = text.trim();
       if (content === '' || abortRef.current !== null) return;
 
@@ -250,13 +256,13 @@ export function useAssistantChat(): UseAssistantChatResult {
       const assistantTurn = newTurn('assistant');
       commit((prev) => [...prev, userTurn, assistantTurn]);
 
-      void runStream(history, assistantTurn.id, logContext);
+      void runStream(history, assistantTurn.id, logContext, model);
     },
     [commit, runStream],
   );
 
   const retry = useCallback(
-    (logContext: AssistantLogContext | null) => {
+    (logContext: AssistantLogContext | null, model: string | null) => {
       if (abortRef.current !== null) return;
 
       const current = turnsRef.current;
@@ -276,7 +282,7 @@ export function useAssistantChat(): UseAssistantChatResult {
       const assistantTurn = newTurn('assistant');
       commit((prev) => [...prev.slice(0, lastUserIndex + 1), assistantTurn]);
 
-      void runStream(history, assistantTurn.id, logContext);
+      void runStream(history, assistantTurn.id, logContext, model);
     },
     [commit, runStream],
   );

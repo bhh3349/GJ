@@ -9,6 +9,8 @@
  * - **成功不弹 toast，失败内联** —— 终止帧的 `{code, message}` 留在气泡里；这页只在
  *   「清空对话」这类命令式动作上用确认弹窗，问答链路一条 toast 都没有。
  * - **观测上下文结构化** —— 只暴露 `LogContextBar` 的 §12.3 白名单，没有自由文本查询入口。
+ * - **本轮模型可选** —— 选择器只给「后端接受的那个集合」；不选就请求体不带 `model`（§13.1）。
+ *   模型名非法时服务端在开流前回 `400`，错误照旧内联在气泡里，不弹 toast。
  */
 import { ClearOutlined, SendOutlined, SettingOutlined } from '@ant-design/icons';
 import { App, Button, Input, Space, Tag, Typography } from 'antd';
@@ -16,6 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { PageHeader } from '@/components/PageHeader';
 import { EmptyState } from '@/components/states/StateBlock';
+import { AssistantModelSelect } from '@/pages/assistant/AssistantModelSelect';
 import { AssistantTurnCard } from '@/pages/assistant/AssistantTurnCard';
 import {
   EMPTY_LOG_CONTEXT,
@@ -45,6 +48,8 @@ export default function AssistantPage() {
   const [draft, setDraft] = useState('');
   const [logCtx, setLogCtx] = useState<LogContextDraft>(EMPTY_LOG_CONTEXT);
   const [showContext, setShowContext] = useState(false);
+  // 本轮模型（契约 §13.1 / v1.10.0）：只在内存里，刷新即回到「不指定」。
+  const [model, setModel] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickRef = useRef(true);
@@ -67,16 +72,16 @@ export default function AssistantPage() {
       const content = text.trim();
       if (content === '' || inFlight) return;
       stickRef.current = true;
-      chat.send(content, logContext);
+      chat.send(content, logContext, model);
       setDraft('');
     },
-    [chat, inFlight, logContext],
+    [chat, inFlight, logContext, model],
   );
 
   const retry = useCallback(() => {
     stickRef.current = true;
-    chat.retry(logContext);
-  }, [chat, logContext]);
+    chat.retry(logContext, model);
+  }, [chat, logContext, model]);
 
   const onClear = useCallback(() => {
     modal.confirm({
@@ -151,6 +156,7 @@ export default function AssistantPage() {
           >
             对话不保存
           </Tag>
+          <AssistantModelSelect value={model} onChange={setModel} disabled={inFlight} />
         </div>
 
         {showContext ? (
@@ -267,9 +273,7 @@ export default function AssistantPage() {
                   ? slowFirstByte
                     ? '仍在等待上游 —— 首字已超过 15s，不判失败；可继续等或取消'
                     : '正在生成 —— 可随时取消，取消即 abort 上游'
-                  : logContext === null
-                    ? '当前不注入日志（纯闲聊）'
-                    : '本轮会把命中的错误事件作为「数据」注入'}
+                  : `本轮模型：${model ?? '服务端缺省'}${logContext === null ? ' · 不注入日志' : ' · 注入命中的错误事件'}`}
               </Text>
               <Space size={tokens.space.sm}>
                 {inFlight ? (

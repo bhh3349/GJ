@@ -316,7 +316,7 @@ describe('key 对账与创建', () => {
     const res = await client(impl).tokens(CRED, 'tierflow-4225-2');
     expect(res.ok).toBe(true);
     if (!res.ok) return;
-    expect(calls[0]?.url).toBe('https://tierflow.cn/api/token/search?keyword=');
+    expect(calls[0]?.url).toBe('https://tierflow.cn/api/token/search?keyword=&p=1&size=100');
     expect(res.data.map((r) => r.name)).toEqual(['tierflow-4225-2']);
     expect(res.data[0]?.tail).toBe('WnWw');
   });
@@ -512,7 +512,7 @@ describe('管理面根（§16.1.1：baseUrl 是数据面口径，管理面六端
     await c.tokens(CRED);
     await c.request({ method: 'GET', path: '/api/status' });
     expect(calls[0]?.url).toBe('https://tierflow.cn/api/user/self');
-    expect(calls[1]?.url).toBe('https://tierflow.cn/api/token/search?keyword=');
+    expect(calls[1]?.url).toBe('https://tierflow.cn/api/token/search?keyword=&p=1&size=100');
     expect(calls[2]?.url).toBe('https://tierflow.cn/api/status');
     for (const call of calls) {
       expect(call.url.startsWith('https://tierflow.cn/api/')).toBe(true);

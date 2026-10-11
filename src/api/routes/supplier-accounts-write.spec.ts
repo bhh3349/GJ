@@ -798,6 +798,49 @@ describe('POST /keys/sync', () => {
     // 不带时区的时间串按 UTC 补 Z（写入侧的归一化，见 `supplier/subscriptions.ts`）。
     expect(sub?.endAt).toBe('2026-11-01T00:00:00.000Z');
   });
+
+  it('套餐行实测形状：元素包一层 subscription，时间键是 start_time/end_time（epoch 秒）', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    // 2026-10-12 线上实测形状（只读复现）：外层的 has_key/auto_renew 与内层 subscription。
+    h.upstream.on('/api/subscription/self', () =>
+      ok({
+        all_subscriptions: [
+          {
+            subscription: {
+              sub_no: 'SB-N1',
+              plan_slug: 'lite',
+              plan_title: '轻享版',
+              amount_total: 14950000,
+              amount_used: 2168881,
+              basic_token_total: 8000000,
+              basic_token_used: 2666169,
+              paid_money: 29.9,
+              status: 'active',
+              source: 'registration',
+              start_time: 1790960876,
+              end_time: 1793552876,
+            },
+            has_key: false,
+            auto_renew: false,
+          },
+        ],
+      }),
+    );
+
+    await runBatch(h, '/api/supplier-accounts/keys/sync', { upstreamId: id, ids: [accountId] });
+
+    const subs = listSupplierSubscriptions(h.db, { upstreamId: id, page: 1, pageSize: 10 });
+    // 曾经这里恒为 0 行（外层读不到 sub_no）。这一条钉死「包一层也能读到」。
+    expect(subs.total).toBe(1);
+    const sub = subs.items[0];
+    expect(sub?.subNo).toBe('SB-N1');
+    expect(sub?.amountTotalCents).toBe(2990);
+    expect(sub?.amountUsedCents).toBe(434);
+    expect(sub?.paidCents).toBe(2990);
+    expect(sub?.endAt).toBe('2026-11-01T17:07:56.000Z');
+  });
 });
 
 // ---------------------------------------------------------------------------

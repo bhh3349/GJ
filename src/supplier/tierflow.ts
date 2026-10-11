@@ -281,6 +281,14 @@ export const TIERFLOW_PATHS = {
   status: '/api/status',
 } as const;
 
+/**
+ * `/api/token/search` 的每页条数。实测（2026-10-12）：上游**默认 `page_size=10`**，
+ * 不带 `size` 时账号超过 10 把 key 会被**静默截断**（少对账、甚至误判撞号）。
+ * `100` > 站点 `max_user_tokens`（实测 50），覆盖单账号全部 key —— `keyword` 仍留空（搜索不可靠）。
+ */
+export const TOKEN_SEARCH_PAGE_SIZE = 100;
+const TOKEN_SEARCH_QUERY: Record<string, string | number> = { keyword: '', p: 1, size: TOKEN_SEARCH_PAGE_SIZE };
+
 // ---------------------------------------------------------------------------
 // 客户端
 // ---------------------------------------------------------------------------
@@ -531,7 +539,7 @@ export function createTierFlowClient(options: TierFlowOptions): TierFlowClient {
       const res = await request({
         method: 'GET',
         path: TIERFLOW_PATHS.tokenSearch,
-        query: { keyword: '' },
+        query: TOKEN_SEARCH_QUERY,
         credential,
       });
       if (!res.ok) return res;
@@ -571,7 +579,7 @@ export function createTierFlowClient(options: TierFlowOptions): TierFlowClient {
         const again = await request({
           method: 'GET',
           path: TIERFLOW_PATHS.tokenSearch,
-          query: { keyword: '' },
+          query: TOKEN_SEARCH_QUERY,
           credential,
         });
         if (again.ok) {
@@ -843,7 +851,9 @@ function readString(source: unknown, key: string): string | null {
 
 function readQuotaPerUnit(data: Record<string, unknown> | null): number {
   const config = asRecord(data?.['config']);
-  const raw = config?.['quota_per_unit'] ?? data?.['quota_per_unit'];
+  // 实测（2026-10-12）：`/api/user/self` 把 `quota_per_unit` **直接放在 `data.quota_per_unit`**，
+  // **没有 `config` 层**（文档 §1.4 写的 `config.quota_per_unit` 是过时写法）。两条都收，实测那条优先。
+  const raw = data?.['quota_per_unit'] ?? config?.['quota_per_unit'];
   return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_QUOTA_PER_UNIT;
 }
 

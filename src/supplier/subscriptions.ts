@@ -127,8 +127,14 @@ export function mapSubscription(
   raw: unknown,
   quotaPerUnit: number,
 ): SupplierSubscriptionWrite | null {
-  const row = asRecord(raw);
-  if (row === null) return null;
+  const outer = asRecord(raw);
+  if (outer === null) return null;
+
+  // 实测（2026-10-12）：endpoint 的 `all_subscriptions[]` 每个元素**包一层**
+  // `{ subscription: {…}, has_key, auto_renew }` —— 套餐字段在**内层** `subscription` 里。
+  // 之前在**外层**读 `sub_no` 一律读不到 → 每行 `null` → 被整行丢弃，套餐表**静默变空**。
+  // 兼容"字段直接平铺在外层"的旧形状：无 `subscription` 层时退回外层（幂等，零回归）。
+  const row = asRecord(outer['subscription']) ?? outer;
 
   const subNo = readString(row, 'sub_no', 'subNo');
   if (subNo === null) return null;
@@ -136,7 +142,8 @@ export function mapSubscription(
   // `paid_money` 是**浮点元**，不是 quota：只 round，不过 quotaToCents。
   const paidYuan = readNumber(row, 'paid_money', 'paidMoney');
   const keyMasked = maskFromUpstream(readString(row, 'key', 'key_masked', 'keyMasked') ?? '');
-  const hasKeyFlag = readBool(row, 'has_key', 'hasKey');
+  // `has_key` / `auto_renew` 在**外层**；两处都收（内层若也给则以内层为准）。
+  const hasKeyFlag = readBool(row, 'has_key', 'hasKey') ?? readBool(outer, 'has_key', 'hasKey');
 
   return {
     subNo,
@@ -149,11 +156,12 @@ export function mapSubscription(
     basicTokenUsed: readNumber(row, 'basic_token_used', 'basicTokenUsed'),
     status: readString(row, 'status'),
     source: readString(row, 'source'),
-    startAt: normalizeUpstreamTime(row['start_at'] ?? row['startAt']),
-    endAt: normalizeUpstreamTime(row['end_at'] ?? row['endAt']),
+    // 实测字段名是 `start_time` / `end_time`（epoch 秒）；`start_at` / `end_at` 是文档旧写法，一并收。
+    startAt: normalizeUpstreamTime(row['start_time'] ?? row['startTime'] ?? row['start_at'] ?? row['startAt']),
+    endAt: normalizeUpstreamTime(row['end_time'] ?? row['endTime'] ?? row['end_at'] ?? row['endAt']),
     // **三态**（§15.1）：`null` = 上游根本没给这个字段，**不是 false**。
     // 合并两态等于替供应商下结论"不会自动续费"。
-    autoRenew: readBool(row, 'auto_renew', 'autoRenew'),
+    autoRenew: readBool(row, 'auto_renew', 'autoRenew') ?? readBool(outer, 'auto_renew', 'autoRenew'),
     // `has_key` 缺失但有掩码时按"有"算：掩码本身就是"有 key"的证据，
     // 反过来（有 has_key=true 却没掩码）也成立 —— 两处有一处为真即真。
     hasKey: hasKeyFlag === true || keyMasked !== null,

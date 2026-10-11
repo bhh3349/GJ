@@ -14,16 +14,13 @@
  * 前端不得自造承诺" —— `count` / 账号数是最容易被顺手乘 2 的两个数（§15.5：建 key = 2 次请求/账号），
  * 乘出来的数字不是承诺而是编造，所以这里只回显**选择事实**（选了几个账号、要建几把），不做乘法。
  */
-import { Alert, Form, Input, InputNumber, Modal, Select, Space, Switch, Typography } from 'antd';
+import { Form, Input, InputNumber, Modal, Select, Space, Switch } from 'antd';
 import { useEffect } from 'react';
 
 import { supplierAccountsApi } from '@/api/endpoints';
 import { useAction } from '@/api/hooks';
 import type { SupplierKeysRequest } from '@/api/types';
 import { tokens } from '@/theme/tokens';
-import { formatCount } from '@/utils/format';
-
-const { Text } = Typography;
 
 /** 契约 §15.2 `keys`：`count` 1..10，越界**在本次 HTTP 里就 400**（不变成立刻失败的异步任务）。 */
 const KEY_COUNT_MIN = 1;
@@ -93,45 +90,15 @@ export function SupplierImportModal({ open, upstreamId, onClose, onSubmitted }: 
       destroyOnClose
       width={560}
     >
-      <Alert
-        type="warning"
-        showIcon
-        style={{ marginBottom: tokens.space.md, background: tokens.tint.warning, border: 'none' }}
-        message="这一格是全程唯一出现密码明文的地方"
-        description={
-          <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-            提交后立即从页面抹掉，服务端<Text strong style={{ fontSize: 12 }}>只进不回</Text>：响应、日志、审计、任务结果、错误信息里都没有它。
-            请别把这段文本贴到聊天 / 工单 / 截图里 —— 契约 §15.9 的口径是「用后即弃」。
-          </Text>
-        }
-      />
       <Form<ImportFormValues> form={form} layout="vertical">
-        <Form.Item
-          name="text"
-          label="账号清单"
-          rules={[{ required: true, message: '至少给一行' }]}
-          extra={
-            <span>
-              每行一条，格式「手机号,密码」。解析不了的行
-              <Text strong style={{ fontSize: 12 }}>
-                跳过并逐行报原因
-              </Text>
-              （记 `skipped`，不记 `failed`）。
-            </span>
-          }
-        >
+        <Form.Item name="text" label="账号清单" rules={[{ required: true, message: '至少给一行' }]}>
           <Input.TextArea
             rows={8}
             style={{ fontFamily: tokens.font.mono }}
-            placeholder={'16200000000,password1\n16200000001,password2'}
+            placeholder={'手机号,密码\n16xxxxxxxxxxx,password'}
           />
         </Form.Item>
       </Form>
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        导入是<Text strong style={{ fontSize: 12 }}>异步任务</Text>：27 个账号一轮约 1 分钟（§15.5），
-        提交后本页会等到终态才给逐行结论。
-        解析失败的行与命中排除名单的行都算「没做过」（`skipped`），与「做了但没成」（`failed`）不是一回事。
-      </Text>
     </Modal>
   );
 }
@@ -217,7 +184,7 @@ export function SupplierCreateKeysModal({
   return (
     <Modal
       open={open}
-      title="新建 key 并入池"
+      title="新建 key"
       okText="提交建 key"
       cancelText="取消"
       confirmLoading={isPending('keys')}
@@ -228,18 +195,6 @@ export function SupplierCreateKeysModal({
       destroyOnClose
       width={560}
     >
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: tokens.space.md, background: tokens.tint.neutral, border: 'none' }}
-        message="上游明文不经浏览器"
-        description={
-          <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-            服务端自己去上游取 key、当场加密落库，回给页面的只有 `keyId` 与掩码 ——
-            所以结论浮层里没有「一次性明文」可看，那是人工从供应商控制台复制的路子才需要的（§15.8 第 3 问）。
-          </Text>
-        }
-      />
       <Form<KeysFormValues> form={form} layout="vertical">
         <Space size={tokens.space.md} style={{ display: 'flex' }} align="start">
           <Form.Item
@@ -247,7 +202,6 @@ export function SupplierCreateKeysModal({
             label="建几把"
             rules={[{ required: true, message: '给出把数' }]}
             style={{ width: 130 }}
-            extra={`${KEY_COUNT_MIN}–${KEY_COUNT_MAX}`}
           >
             <InputNumber min={KEY_COUNT_MIN} max={KEY_COUNT_MAX} style={{ width: '100%' }} />
           </Form.Item>
@@ -256,32 +210,11 @@ export function SupplierCreateKeysModal({
           </Form.Item>
         </Space>
 
-        <Form.Item
-          name="unlimited"
-          label="无限额度"
-          valuePropName="checked"
-          extra="置 1 时该 key 的余额落 NULL（§15.7 落库规则）—— 列表里显示为「无限」徽标，绝不渲染成一个金额。"
-        >
+        <Form.Item name="unlimited" label="无限额度" valuePropName="checked">
           <Switch />
         </Form.Item>
 
-        <Form.Item
-          name="yuan"
-          label="本把额度（元，可选）"
-          extra={
-            unlimited
-              ? '已勾选无限额度，本格不生效；留空即「额度未知」—— 未知 ≠ 0。'
-              : (
-                <span>
-                  提交时换算为「分」整数存库。留空 = 额度未知（
-                  <Text strong style={{ fontSize: 12 }}>
-                    不是 0
-                  </Text>
-                  ）。
-                </span>
-              )
-          }
-        >
+        <Form.Item name="yuan" label="本把额度（元，可选）">
           <InputNumber
             min={0}
             step={1}
@@ -292,11 +225,7 @@ export function SupplierCreateKeysModal({
           />
         </Form.Item>
 
-        <Form.Item
-          name="models"
-          label="模型白名单（可选）"
-          extra="留空 = 不限模型。契约把「空数组」与「省略」归一化为同一个 NULL，所以这里不区分「没填」与「填了又删空」。"
-        >
+        <Form.Item name="models" label="模型白名单（可选）">
           <Select
             mode="tags"
             style={{ width: '100%' }}
@@ -309,13 +238,6 @@ export function SupplierCreateKeysModal({
           <Input placeholder="如：客服核对批次" />
         </Form.Item>
       </Form>
-
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        打谁：{ids ? `已勾选的 ${formatCount(ids.length)} 个账号` : '该上游全部账号'}
-        。
-        这是一个<Text strong style={{ fontSize: 12 }}>打上游</Text>的动作（每个账号 2 次请求，§15.5），
-        提交后本页等到终态给逐行结论 —— 会有几次请求由服务端的 `result` 说了算，这里不预告一个自己算的数（§14.7）。
-      </Text>
     </Modal>
   );
 }

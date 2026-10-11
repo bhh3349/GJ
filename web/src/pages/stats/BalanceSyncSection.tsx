@@ -15,7 +15,7 @@
  *
  * 图表走 `React.lazy`：echarts 只在用户真的进到这一块时才下载，不碰首屏关键路径。
  */
-import { InfoCircleOutlined, ReloadOutlined } from '@ant-design/icons';
+import { ReloadOutlined } from '@ant-design/icons';
 import { Button, Segmented, Space, Tag, Tooltip, Typography } from 'antd';
 import { Suspense, lazy, useState } from 'react';
 
@@ -84,11 +84,6 @@ export function BalanceSyncSection({ upstreamId, showDrift = true }: BalanceSync
       >
         <Space size={tokens.space.sm} align="center" wrap>
           <Text style={{ fontSize: 13, fontWeight: 600 }}>余额同步</Text>
-          <Tooltip title="只读观测口：不改状态、不触发查询。自动同步的开关与间隔由部署侧 BALANCE_SYNC_MINUTES 决定，管理面上没有写入口。">
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              自动同步状态与趋势 <InfoCircleOutlined style={{ fontSize: 11 }} />
-            </Text>
-          </Tooltip>
         </Space>
         <Space size={tokens.space.sm} align="center">
           <Segmented
@@ -169,8 +164,7 @@ export function BalanceSyncSection({ upstreamId, showDrift = true }: BalanceSync
           </Space>
 
           <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: tokens.space.sm }}>
-            观测窗口 {formatIso(data.window.from)} → {formatIso(data.window.to)}（该窗口只影响下面这张图与漂移统计，
-            与同步节奏无关）
+            观测窗口 {formatIso(data.window.from)} → {formatIso(data.window.to)}
           </Text>
 
           {data.series.length === 0 ? (
@@ -184,7 +178,7 @@ export function BalanceSyncSection({ upstreamId, showDrift = true }: BalanceSync
                 fontSize: 13,
               }}
             >
-              窗口内还没有余额快照。快照只在「覆盖整个上游」的同步后写入，单 key 手动刷新不写快照。
+              窗口内还没有余额快照
             </div>
           ) : (
             <Suspense

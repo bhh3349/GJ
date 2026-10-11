@@ -13,7 +13,7 @@
  *    （窗口内、上限 20 条）**不是一回事**，两者分开标注，别混成一个数。
  * 3. 余额**上升不告警**（充值 / 上游按周期重置都正常），后端也不会给这样的 alert。
  */
-import { Alert, Empty, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { Empty, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 
 import type { BalanceDrift, BalanceDriftAlert, BalanceDriftCode, BalanceSyncUpstreamState } from '@/api/types';
@@ -110,27 +110,6 @@ export function BalanceDriftPanel({ drift, upstreams }: BalanceDriftPanelProps) 
         padding: tokens.space.lg,
       }}
     >
-      <div style={{ marginBottom: tokens.space.md }}>
-        <Space size={tokens.space.sm} align="center" wrap>
-          <Text style={{ fontSize: 13, fontWeight: 600 }}>余额漂移提示</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            方向级 · 只提示不判钱（本地无单价）
-          </Text>
-        </Space>
-      </div>
-
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: tokens.space.md, background: tokens.tint.neutral, border: 'none' }}
-        message={
-          <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-            判据只用「余额方向 + token 用量是否为零」，口径为上游级快照对比。它并不表示账目对不上，
-            也不代表有任何请求被拦截 —— 漂移只 warn + 计数，不拦请求、不改任何数。
-          </Text>
-        }
-      />
-
       <Space size={tokens.space.lg} wrap style={{ marginBottom: tokens.space.md }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
           进程内累计 · 有支出无流量{' '}
@@ -145,9 +124,6 @@ export function BalanceDriftPanel({ drift, upstreams }: BalanceDriftPanelProps) 
           >
             {formatCount(unchanged)}
           </Text>
-        </Text>
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          重启归零，与下方窗口内条目不是同一个计数
         </Text>
       </Space>
 

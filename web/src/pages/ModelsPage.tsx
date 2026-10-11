@@ -136,7 +136,6 @@ export default function ModelsPage() {
     <>
       <PageHeader
         title="模型档案"
-        description="模型类型、支持能力、价格、可用 key"
         extra={
           <Space>
             <Button
@@ -304,13 +303,7 @@ export default function ModelsPage() {
         <ErrorState error={list.error} onRetry={list.reload} variant="page" title="模型档案加载失败" />
       ) : models.length === 0 ? (
         <EmptyState
-          title={filterActive ? '当前筛选条件下没有模型' : '还没有模型档案'}
-          description={
-            filterActive
-              ? '换个筛选条件，或清空筛选看全部。'
-              : '模型档案来自上游拉取：先加好上游并挂上 key，再点右上角「全量同步」。'
-          }
-          minHeight={320}
+          title={filterActive ? '当前筛选条件下没有模型' : '还没有模型档案'}          minHeight={320}
           action={
             filterActive ? null : (
               <Button

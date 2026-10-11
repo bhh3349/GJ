@@ -9,7 +9,7 @@
  *
  * 配额口径：`rpm`/`tpm`/`dailyQuota` 为 `null` = **不限**，与 `0`（等于全部拒绝）不同。
  */
-import { Alert, Form, Input, InputNumber, Modal, Space, Switch, Typography } from 'antd';
+import { Form, Input, InputNumber, Modal, Space, Switch, Typography } from 'antd';
 import { useEffect } from 'react';
 
 import { groupsApi } from '@/api/endpoints';
@@ -49,13 +49,6 @@ export function GatewayKeyRevealModal({ reveal, onClose }: GatewayKeyRevealModal
       maskClosable={false}
       width={560}
     >
-      <Alert
-        type="warning"
-        showIcon
-        style={{ marginBottom: tokens.space.md }}
-        message="关闭后无法再次查看"
-        description="系统只保存 sha256 摘要，明文不再落盘、不再回显、不进日志。丢失只能重置或重新签发。"
-      />
       <Paragraph type="secondary" style={{ marginBottom: tokens.space.xs }}>
         {reveal?.context ?? ''}
       </Paragraph>
@@ -81,7 +74,7 @@ export function GatewayKeyRevealModal({ reveal, onClose }: GatewayKeyRevealModal
         </Text>
       </div>
       <Text type="secondary" style={{ fontSize: 12 }}>
-        掩码：{reveal?.maskedKey ?? '—'}（列表里只会出现这个）
+        掩码：{reveal?.maskedKey ?? '—'}
       </Text>
     </Modal>
   );
@@ -190,38 +183,18 @@ export function GroupFormModal({
       width={560}
     >
       <Form<GroupFormValues> form={form} layout="vertical" requiredMark="optional">
-        {editing === null ? (
-          <Alert
-            type="info"
-            showIcon
-            style={{ marginBottom: tokens.space.md }}
-            message="创建后会自动签发第一把网关 key"
-            description="明文 key 只在创建响应里出现一次，请当场保存。"
-          />
-        ) : null}
-
         <Form.Item name="name" label="组名" rules={[{ required: true, message: '请输入组名' }]}>
           <Input placeholder="如 内部测试组" />
         </Form.Item>
 
         <Space size={tokens.space.md} style={{ display: 'flex' }} align="start">
-          <Form.Item
-            name="rpm"
-            label="RPM（每分钟请求）"
-            extra="留空 = 不限"
-            style={{ flex: 1 }}
-          >
+          <Form.Item name="rpm" label="RPM（每分钟请求）" style={{ flex: 1 }}>
             <InputNumber min={0} step={10} style={{ width: '100%' }} placeholder="不限" />
           </Form.Item>
-          <Form.Item name="tpm" label="TPM（每分钟 token）" extra="留空 = 不限" style={{ flex: 1 }}>
+          <Form.Item name="tpm" label="TPM（每分钟 token）" style={{ flex: 1 }}>
             <InputNumber min={0} step={1000} style={{ width: '100%' }} placeholder="不限" />
           </Form.Item>
-          <Form.Item
-            name="dailyQuota"
-            label="日配额（请求数）"
-            extra="留空 = 不限"
-            style={{ flex: 1 }}
-          >
+          <Form.Item name="dailyQuota" label="日配额（请求数）" style={{ flex: 1 }}>
             <InputNumber min={0} step={100} style={{ width: '100%' }} placeholder="不限" />
           </Form.Item>
         </Space>

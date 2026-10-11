@@ -164,9 +164,6 @@ export function BalancePanel() {
       >
         <Space size={tokens.space.sm} align="center">
           <Text style={{ fontSize: 13, fontWeight: 600 }}>余额三口径</Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            全局合计 = 各上游合计之和（后端给，不在前端重算）
-          </Text>
         </Space>
         <Button
           size="small"

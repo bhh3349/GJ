@@ -7,7 +7,7 @@
  * - 配额 `null` = **不限**，不是 0。`0` 是「全部拒绝」，两者在 UI 上必须能分开看。
  * - 组里的网关 key 明文永不再取回：列表只显示 `gatewayKeyMasked`。
  */
-import { KeyOutlined, PlusOutlined } from '@ant-design/icons';
+import { PlusOutlined } from '@ant-design/icons';
 import { App, Button, Empty, Input, Progress, Space, Switch, Table, Tooltip, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useState } from 'react';
@@ -31,7 +31,7 @@ const { Text } = Typography;
 function QuotaCell({ value }: { value: QuotaValue }) {
   if (value === null) {
     return (
-      <Tooltip title="未设置上限（契约 §4：null = 不限）">
+      <Tooltip title="未设置上限（不限）">
         <Text type="secondary">不限</Text>
       </Tooltip>
     );
@@ -119,9 +119,7 @@ export default function GroupsPage() {
           <Text style={{ fontFamily: tokens.font.mono, fontSize: 12 }}>
             {row.gatewayKeyMasked ?? <Text type="secondary">未签发</Text>}
           </Text>
-          <Text type="secondary" style={{ fontSize: 11 }}>
-            共 {row.keyCount} 把（明文仅签发时可见一次）
-          </Text>
+          <Text type="secondary" style={{ fontSize: 11 }}>共 {row.keyCount} 把</Text>
         </div>
       ),
     },
@@ -254,7 +252,6 @@ export default function GroupsPage() {
     <>
       <PageHeader
         title="用户组"
-        description="建组、发 key、配额设置"
         extra={
           <Button type="primary" size="small" icon={<PlusOutlined />} onClick={openCreate}>
             新建用户组
@@ -347,13 +344,6 @@ export default function GroupsPage() {
       {/* 明文只在本次签发后驻留内存；关闭即置 null，不缓存、不写 localStorage。 */}
       <GatewayKeyRevealModal reveal={reveal} onClose={() => setReveal(null)} />
 
-      {/* 签发入口的第二处提示位：列表为空时也告诉管理员 key 从哪来 */}
-      {list.data && list.data.items.length > 0 && (
-        <Text type="secondary" style={{ display: 'block', marginTop: tokens.space.md, fontSize: 12 }}>
-          <KeyOutlined /> 网关 key 明文仅在创建/签发响应里出现一次，之后系统只保留 sha256 摘要与
-          <Text code>****后4位</Text>掩码。
-        </Text>
-      )}
     </>
   );
 }

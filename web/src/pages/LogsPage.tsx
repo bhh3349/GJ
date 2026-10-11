@@ -327,7 +327,6 @@ export default function LogsPage() {
     <>
       <PageHeader
         title="日志"
-        description="调用记录与审计（保留 30 天）"
         extra={
           <Space>
             {tab === 'calls' ? (
@@ -428,7 +427,7 @@ export default function LogsPage() {
                       }}
                     />
                   </Tooltip>
-                  <Tooltip title="契约只支持精确状态码匹配，没有「只看失败」这种区间参数">
+                  <Tooltip title="只支持精确状态码匹配">
                     <Select
                       allowClear
                       size="small"
@@ -442,7 +441,7 @@ export default function LogsPage() {
                       }}
                     />
                   </Tooltip>
-                  <Tooltip title="默认不查已软删的上游 / key / 组；打开后按 id 过滤仍可命中（C4 保留了日志外键）">
+                  <Tooltip title="默认不查已删除的上游 / key / 组；打开后按 id 过滤仍可命中">
                     <Segmented
                       size="small"
                       value={includeDeleted ? 'with' : 'without'}
@@ -495,8 +494,7 @@ export default function LogsPage() {
                       emptyText: (
                         <Empty
                           image={Empty.PRESENTED_IMAGE_SIMPLE}
-                          description="该时间区间与筛选条件下没有调用记录。"
-                        />
+                                      />
                       ),
                     }}
                   />
@@ -509,10 +507,6 @@ export default function LogsPage() {
             label: '审计',
             children: (
               <>
-                <Text type="secondary" style={{ display: 'block', marginBottom: tokens.space.md, fontSize: 12 }}>
-                  审计最小集：登录 / 登出 / 所有写操作。只读，不可编辑、不可删除。
-                </Text>
-
                 {audit.error && audit.data ? (
                   <div style={{ marginBottom: tokens.space.md }}>
                     <ErrorState error={audit.error} onRetry={audit.reload} title="刷新失败，以下为上一次成功的数据" />

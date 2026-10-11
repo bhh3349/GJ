@@ -42,7 +42,7 @@ function CitationList({ citations }: { citations: readonly AssistantCitation[] }
       }}
     >
       <Text type="secondary" style={{ fontSize: 11, letterSpacing: '0.04em' }}>
-        数据引用 · {citations.length} 条（仅展示，不跳转）
+        数据引用 · {citations.length} 条
       </Text>
 
       <div
@@ -98,7 +98,7 @@ function CitationList({ citations }: { citations: readonly AssistantCitation[] }
                   {formatIso(item.ts)}
                 </Text>
                 {item.model === null ? (
-                  <Tooltip title="未过鉴权的请求没有 clientModel（§12.1 产出边界），不是缺数据">
+                  <Tooltip title="未过鉴权的请求没有 clientModel，不是缺数据">
                     <Text type="secondary" style={{ fontSize: 11 }}>
                       模型未知
                     </Text>
@@ -240,11 +240,6 @@ export function AssistantTurnCard({
             <Text type="secondary" style={{ fontSize: 12 }}>
               {turn.slowFirstByte ? '仍在等待上游…' : '正在思考…'}
             </Text>
-            {turn.slowFirstByte ? (
-              <Text type="secondary" style={{ fontSize: 11 }}>
-                首字已超过 15s，不判失败；可继续等或取消
-              </Text>
-            ) : null}
             {active ? (
               <Button size="small" icon={<CloseOutlined />} onClick={onCancel}>
                 取消
@@ -259,9 +254,6 @@ export function AssistantTurnCard({
             <Button size="small" icon={<CloseOutlined />} onClick={onCancel}>
               取消
             </Button>
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              取消会 abort 上游，已收到的文本保留
-            </Text>
           </div>
         ) : null}
 
@@ -292,8 +284,8 @@ export function AssistantTurnCard({
               <div style={{ fontSize: 12, color: tokens.color.textSecondary }}>
                 <div>
                   {error.status > 0
-                    ? `契约 §10 中该码值对应 HTTP ${error.status}`
-                    : '客户端侧诊断码，未走 §10 码表（流未开或解析失败）'}
+                    ? `该错误码对应 HTTP ${error.status}`
+                    : '客户端侧诊断码（流未开或解析失败）'}
                 </div>
                 {retryHint(error) === null ? null : <div>{retryHint(error)}</div>}
               </div>
@@ -326,7 +318,7 @@ export function AssistantTurnCard({
             message="已取消"
             description={
               <span style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-                已 abort 上游（§13.4：不 abort 就是白烧 token + 占住并发槽位）。
+                已取消，上游请求同时中断。
               </span>
             }
             action={retryButton}

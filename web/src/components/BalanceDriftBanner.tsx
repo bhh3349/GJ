@@ -68,11 +68,6 @@ export function BalanceDriftBanner({ drift, upstreams }: BalanceDriftBannerProps
             </Text>
           </Tooltip>
         ) : null}
-        <Tooltip title="判据只用「余额方向 + token 用量是否为零」，口径为上游级快照对比。本网关本地没有单价，所以不与金额做任何比较，也不判断账目是否对得上。">
-          <Text type="secondary" style={{ fontSize: 12, cursor: 'help' }}>
-            方向级 · 只提示不判钱
-          </Text>
-        </Tooltip>
       </div>
     );
   }
@@ -88,9 +83,6 @@ export function BalanceDriftBanner({ drift, upstreams }: BalanceDriftBannerProps
             <Text style={{ fontSize: 13, fontWeight: 600 }}>
               {`余额漂移提示 ${formatCount(alertCount)} 条（窗口内）`}
             </Text>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              方向级 · 只提示不判钱 · 不拦请求
-            </Text>
           </Space>
         }
         description={
@@ -101,10 +93,6 @@ export function BalanceDriftBanner({ drift, upstreams }: BalanceDriftBannerProps
             </Text>
             <Text type="secondary" style={{ fontSize: 12 }}>
               {`进程内累计（重启归零）：有支出无流量 ${formatCount(spent)} · 有流量余额不变 ${formatCount(unchanged)}`}
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                {' '}
-                —— 与上面的窗口内条数不是同一个计数
-              </Text>
             </Text>
           </div>
         }

@@ -1,3 +1,4 @@
+/** Bo 指示（2026-10-11）：全站页头不带小字提示。 */
 import type { ReactNode } from 'react';
 
 import { tokens } from '@/theme/tokens';
@@ -8,8 +9,11 @@ export interface PageHeaderProps {
   extra?: ReactNode;
 }
 
-/** 页头：全站统一标题区，避免各页自己拼 Typography。 */
-export function PageHeader({ title, description, extra }: PageHeaderProps) {
+/**
+ * 页头：全站统一标题区，避免各页自己拼 Typography。
+ * description 是形参兼容：各页已按 Bo 指示不再传小字，仅历史调用可传、不再渲染。
+ */
+export function PageHeader({ title, extra }: PageHeaderProps) {
   return (
     <div
       style={{
@@ -32,17 +36,6 @@ export function PageHeader({ title, description, extra }: PageHeaderProps) {
         >
           {title}
         </h1>
-        {description ? (
-          <div
-            style={{
-              marginTop: tokens.space.xs,
-              fontSize: 12,
-              color: tokens.color.textTertiary,
-            }}
-          >
-            {description}
-          </div>
-        ) : null}
       </div>
       {extra ? <div>{extra}</div> : null}
     </div>

@@ -8,7 +8,7 @@
  * - `TOO_MANY_ATTEMPTS`(429) → 按钮倒计时禁用（每 IP 5 次/分钟）。
  * 登录失败用页内 Alert 而不是 toast：登录页是唯一的无壳页面，toast 容易被忽略。
  */
-import { Alert, Button, Card, Form, Input, Typography } from 'antd';
+import { Alert, Button, Card, Form, Input } from 'antd';
 import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 
@@ -92,9 +92,6 @@ export default function LoginPage() {
           <div style={{ fontSize: 18, fontWeight: 600, color: tokens.color.textPrimary }}>
             Gateway Console
           </div>
-          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-            单管理员账号 · 会话 24h 滑动续期 · Cookie 同源鉴权
-          </Typography.Text>
         </div>
 
         {failure ? (

@@ -98,7 +98,6 @@ export default function AssistantPage() {
     <>
       <PageHeader
         title="内置助手"
-        description="读观测面数据定位故障 —— 会话鉴权、只读取数、问答不落库"
         extra={
           <Space size={tokens.space.sm}>
             <Button
@@ -152,9 +151,6 @@ export default function AssistantPage() {
           >
             对话不保存
           </Tag>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            只在当前页面内存里，刷新或关闭即消失；服务端无状态、不落库（契约 §13）。
-          </Text>
         </div>
 
         {showContext ? (
@@ -206,7 +202,6 @@ export default function AssistantPage() {
               <EmptyState
                 minHeight={240}
                 title="还没有对话"
-                description="问观测面的问题，例如错误分型、异常 key、上游可用性。留空「观测上下文」即为纯闲聊，不注入任何日志。"
                 action={
                   <Space direction="vertical" size={tokens.space.sm} style={{ marginTop: tokens.space.md }}>
                     {STARTERS.map((text) => (

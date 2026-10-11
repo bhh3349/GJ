@@ -190,8 +190,7 @@ export function EgressPoolCard() {
           style={{ background: tokens.tint.neutral, border: 'none' }}
           message={
             <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-              尚未收到 §7 池级帧 <Text code>egress_pool</Text>。收不到帧只说明「未接线 /
-              未发射」—— 缺省不是证据，这里不推断出口数量，也不显示「0 个出口」或「全部离线」。
+              尚未收到实时帧。收不到帧只说明通道未接线，出口数量未知。
             </Text>
           }
         />
@@ -208,7 +207,7 @@ export function EgressPoolCard() {
           image={Empty.PRESENTED_IMAGE_SIMPLE}
           description={
             <Text type="secondary" style={{ fontSize: 12 }}>
-              未配置出口 —— 通道已接线且回报池为空，不是离线故障。
+              未配置出口
             </Text>
           }
         />

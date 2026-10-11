@@ -29,6 +29,17 @@ import { formatCents, formatCount, formatIso, formatRelative } from '@/utils/for
 
 const { Text } = Typography;
 
+/**
+ * 上游 `basic_token_*` 的单位是 **quota**（与钱包同口径：1 元 = 500000 quota）。
+ * 契约 §15.1 只把 `amount_total` / `amount_used` 折成了 `…Cents`，`basic_token_*` 按原值透传
+ * （字段名无 `Cents` 后缀即证据）—— 所以这一列的量纲要在这里折：quota → 分，再交给
+ * `formatCents`。换算比集中在**这一处**，将来后端补 `basicTokenTotalCents` 时整块删掉即可。
+ */
+const QUOTA_PER_UNIT = 500_000;
+function quotaToCents(quota: number | null): number | null {
+  return quota === null ? null : Math.round((quota / QUOTA_PER_UNIT) * 100);
+}
+
 export interface SupplierSubscriptionsTableProps {
   upstreamId: string;
   /** 账号 id → 掩码（来自账号列表，用于把 `accountIdentifier` 与当前列表对上；取不到就退回台账自带的掩码）。 */
@@ -118,7 +129,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
     },
     {
       title: (
-        <Tooltip title="套餐剩余 = amount_total - amount_used（§15.8 第 6 问：套餐余额是账号级的量）。两端都是服务端给的分，相减不做量纲换算；任一端缺失就是「未知」。这不是池内 key 的余额，也不计进任何合计。">
+        <Tooltip title="套餐剩余 = 总额 - 已用；任一端缺失就是「未知」。这不是账号 key 的余额，也不计进任何合计。">
           <span>套餐剩余</span>
         </Tooltip>
       ),
@@ -141,24 +152,22 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
     },
     {
       title: (
-        <Tooltip title="套餐的 token 余量（basic_token_total - basic_token_used）。与金额列是两套量纲，不做换算。">
-          <span>token 余量</span>
+        <Tooltip title="套餐赠送的基础额度剩余（basic_token_total - basic_token_used）。这两个字段上游给的是 quota、与钱包同口径（1 元 = 500000 quota），此处按同一换算比折元渲染；任一端缺失即「未知」。这不是账号 key 的余额。">
+          <span>基础额度</span>
         </Tooltip>
       ),
       key: 'tokens',
-      width: 130,
+      width: 158,
       align: 'right',
       render: (_: unknown, row) => {
-        const total = row.basicTokenTotal;
-        const used = row.basicTokenUsed;
+        const total = quotaToCents(row.basicTokenTotal);
+        const used = quotaToCents(row.basicTokenUsed);
         const remaining = total === null || used === null ? null : total - used;
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2, alignItems: 'flex-end' }}>
-            <Text style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums' }}>
-              {remaining === null ? <Text type="secondary" italic style={{ fontSize: 12 }}>未知</Text> : formatCount(remaining)}
-            </Text>
+            <BalanceText value={remaining} />
             <Text type="secondary" style={{ fontSize: 11 }}>
-              {`/ ${formatCount(total)}`}
+              {`总额 ${formatCents(total)} · 已用 ${formatCents(used)}`}
             </Text>
           </div>
         );
@@ -205,7 +214,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
     },
     {
       title: (
-        <Tooltip title="上游给的那把套餐自带 key 的掩码。只读：它永不进池、不参与网关路由，与池内 key 之间只有「后 4 位可能对上」这一条弱对账关系（§15.2 keys/sync）。">
+        <Tooltip title="上游给的套餐自带 key 掩码。只读，永不进池、不参与网关路由。">
           <span>套餐 key（掩码）</span>
         </Tooltip>
       ),
@@ -217,7 +226,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
           {row.hasKey ? (
             <Tooltip title="上游表示这个套餐带 key。它只以掩码存在 —— 建行等于造一把不可用凭据，所以不进池。">
               <Tag bordered={false} style={{ marginInlineEnd: 0, fontSize: 10, background: tokens.tint.neutral, color: tokens.color.textSecondary }}>
-                未入池
+                仅掩码
               </Tag>
             </Tooltip>
           ) : null}
@@ -240,29 +249,12 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
     >
       <Space size={tokens.space.sm} align="center" wrap style={{ marginBottom: tokens.space.md }}>
         <Text style={{ fontSize: 13, fontWeight: 600 }}>套餐台账（按账号分组）</Text>
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          只读 · 不发上游请求
-        </Text>
         {ledger.data ? (
           <Text type="secondary" style={{ fontSize: 12 }}>
-            {`${formatCount(accountCount)} 个账号 · ${formatCount(grouped.length)} 条套餐 · 服务端按 end_at 升序，这里按账号归拢并保持组内该序`}
+            {`${formatCount(accountCount)} 个账号 · ${formatCount(grouped.length)} 条套餐`}
           </Text>
         ) : null}
       </Space>
-
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: tokens.space.md, background: tokens.tint.neutral, border: 'none' }}
-        message={
-          <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-            套餐<Text strong style={{ fontSize: 12 }}>不建成 key</Text>（§15.8 第 6 问）：它的剩余额度是账号级的量，
-            既不进 `totalBalance`、不进 §14 快照，也不参与网关准入判断。所以这一格
-            <Text strong style={{ fontSize: 12 }}>没有</Text>「新建套餐」按钮 ——
-            套餐是上游的事实，我们只能同步它；账号面上真正能新建的只有<Text strong style={{ fontSize: 12 }}>池内 key</Text>。
-          </Text>
-        }
-      />
 
       {truncated ? (
         <Alert
@@ -303,10 +295,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
                 description={
-                  <Text type="secondary">
-                    这个上游还没有套餐台账。套餐由「刷新余额」/「同步 key」时随上游响应一并记入 ——
-                    它不会凭空出现，也不在管理面手工创建。
-                  </Text>
+                  <Text type="secondary">还没有套餐台账</Text>
                 }
               />
             ),

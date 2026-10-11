@@ -85,7 +85,7 @@ function detailCounts(details: unknown, row: Upstream): SubtreeCounts {
   return { keyCount: pick('keyCount') ?? row.keyCount, modelCount: pick('modelCount') };
 }
 
-/** 二次确认正文：先给「删掉什么」的数量，再给「丢掉什么」的不可逆代价。 */
+/** 二次确认正文：只说删掉什么（数量）；代价解释性小字已按 Bo 指示摘除。 */
 function DeleteUpstreamBody({ name, counts }: { name: string; counts: SubtreeCounts }) {
   const parts: string[] = [];
   if (counts.keyCount > 0) parts.push(`Key ${counts.keyCount} 个`);
@@ -94,21 +94,10 @@ function DeleteUpstreamBody({ name, counts }: { name: string; counts: SubtreeCou
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
+    <div>
       <Text>
         将物理删除「{name}」整棵子树
         {parts.length > 0 ? `：${parts.join(' · ')}` : ''}。
-      </Text>
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        计数只含未软删的 key；此前软删、仍挂在库上的 key 行也会一并消失 —— 行级外键不解除，留着就删不掉上游。
-      </Text>
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        模型档案随上游一起消失，
-        <Text style={{ color: tokens.color.warning }}>你在档案卡上手改的开关 / 价格会一并丢失</Text>
-        ，且不可撤销。
-      </Text>
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        历史调用日志不受影响：日志行自带 key 掩码与模型名，本次删除由审计日志留痕。
       </Text>
     </div>
   );
@@ -204,7 +193,6 @@ export default function UpstreamsPage() {
     confirmManualRefresh(modal, {
       title: `查「${row.name}」的余额？`,
       scope: '打谁：这一条上游名下全部配了余额查询方式的 key（没配的会被跳过）',
-      cost: '会真的打上游，而且这是一“批”：该上游被查到的 key 一把一次请求（§14.7）。出口预算与网关数据面共用同一条 ⇒ key 多时可能挤到客户端流量。',
       onOk: () => refreshBalance(row),
     });
   };
@@ -361,7 +349,7 @@ export default function UpstreamsPage() {
     },
     {
       title: (
-        <Tooltip title="自动同步运行态（契约 §14.3，只读）。间隔 / 抖动 / 退避是服务端配置的回显，前端不自算；开关与间隔由部署侧 BALANCE_SYNC_MINUTES 决定，管理面没有写入口。">
+        <Tooltip title="自动同步为只读展示；开关与间隔由服务端配置决定，管理面没有写入口。">
           <span>自动同步</span>
         </Tooltip>
       ),
@@ -444,7 +432,7 @@ export default function UpstreamsPage() {
             画一个点进去全是"不是供应商账号型"的按钮，等于把一次拒绝做成一个功能。
           */}
           {row.supplier === 'tierflow' ? (
-            <Tooltip title="供应商账号池：账号 → 池内 key / 套餐（契约 §15）">
+            <Tooltip title="供应商账号池：账号、key、套餐统一管理">
               <Button
                 size="small"
                 type="link"
@@ -523,11 +511,9 @@ export default function UpstreamsPage() {
           setPage(1);
         }}
       />
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        共 {formatCount(list.data?.total ?? 0)} 个上游
-      </Text>
+      <Text type="secondary" style={{ fontSize: 12 }}>共 {formatCount(list.data?.total ?? 0)} 个</Text>
       {syncStatus.data ? (
-        <Tooltip title="自动同步的生效参数由服务端回显（契约 §14.3），前端不得自算间隔 / 抖动 / 退避。要改间隔请改部署侧 BALANCE_SYNC_MINUTES —— 管理面没有写入口。">
+        <Tooltip title="自动同步参数由服务端配置；要改间隔请改部署侧 BALANCE_SYNC_MINUTES，管理面没有写入口。">
           <Text type="secondary" style={{ fontSize: 12 }}>
             {syncStatus.data.auto.enabled
               ? `自动同步：每 ${syncStatus.data.auto.intervalMinutes} 分钟 ±${formatPercent(
@@ -545,7 +531,6 @@ export default function UpstreamsPage() {
     <>
       <PageHeader
         title="上游管理"
-        description="Base URL 的增删改与余额查询模板"
         extra={
           <Space>
             <Button

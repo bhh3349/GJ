@@ -141,7 +141,6 @@ export function KeyFormModal({
             name="key"
             label="API Key 明文"
             rules={[{ required: true, message: '请输入上游 key 明文' }]}
-            extra="明文只在这一处进入系统，服务端立即 aes-256-gcm 加密落盘，之后任何响应都只回后 4 位。"
           >
             <Input.Password
               autoComplete="off"
@@ -194,12 +193,7 @@ export function KeyFormModal({
             </Form.Item>
           </Space>
         ) : (
-          <Alert
-            type="warning"
-            showIcon
-            style={{ marginBottom: tokens.space.md }}
-            message="余额类 key 的金额请在列表里用「录入余额」填写（分），不要在这里编一个数。"
-          />
+          <Alert type="warning" showIcon style={{ marginBottom: 16 }} message="余额类 key 请在列表里用「录入余额」维护" />
         )}
 
         {editingId ? (
@@ -306,11 +300,7 @@ export function BalanceModal({ open, target, onClose, onSaved }: BalanceModalPro
       width={480}
     >
       <Form<BalanceFormValues> form={form} layout="vertical">
-        <Form.Item
-          name="yuan"
-          label="余额（元）"
-          extra="提交时换算为「分」整数存库。录 0 就是 0，与「未知」是两个不同状态。"
-        >
+        <Form.Item name="yuan" label="余额（元）">
           <InputNumber
             min={0}
             step={1}

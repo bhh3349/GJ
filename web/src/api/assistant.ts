@@ -12,10 +12,11 @@
  * 终止语义：服务端「恰好一个终止帧」。本层读到 `done` / `error` 即停止读取并释放连接；
  * 若流自然结束却没见到终止帧，调用方据「未收到终止帧」判**断流**（保留已收文本 + 可重试）。
  */
-import { ApiError, notifyIfSessionExpired, type ApiErrorBody } from './http';
+import { ApiError, assertAdminPath, notifyIfSessionExpired, type ApiErrorBody } from './http';
 import type { AssistantChatRequest, AssistantCitation, AssistantFrame } from './types';
 
-const ASSISTANT_CHAT_PATH = '/api/assistant/chat';
+/** 与 http.ts 的 buildUrl 同一道护栏：/v1 前缀是网关面路径，管理面 SSE 一律禁发。 */
+const ASSISTANT_CHAT_PATH = assertAdminPath('/api/assistant/chat');
 
 /** 客户端侧诊断码。**不是** §10 网关码值，永不出现在 SSE 帧里，只用于内联错态展示。 */
 const STREAM_MALFORMED = 'STREAM_MALFORMED';

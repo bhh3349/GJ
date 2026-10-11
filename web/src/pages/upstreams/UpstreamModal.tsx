@@ -49,8 +49,8 @@ const { Text } = Typography;
 type SupplierFormValue = 'common' | 'tierflow';
 
 const SUPPLIER_OPTIONS: { value: SupplierFormValue; label: string }[] = [
-  { value: 'common', label: '通用（无账号面）' },
-  { value: 'tierflow', label: 'TierFlow（供应商账号面）' },
+  { value: 'common', label: '通用' },
+  { value: 'tierflow', label: 'TierFlow' },
 ];
 
 interface UpstreamFormValues {
@@ -291,16 +291,8 @@ export function UpstreamModal({ open, editing, onClose, onSaved }: UpstreamModal
             </Form.Item>
           </Space>
 
-          {/*
-            契约 §15.6：建/改上游表单里**唯一**多出来的控件。默认「通用」= `supplier: null`。
-            这里刻意不做「按 Base URL 自动选中」—— 那正是 §15.6 禁止的猜测。
-          */}
-          <Form.Item
-            name="supplier"
-            label="供应商"
-            extra="账号面判据只有这一个字段（§15.6 / §15.12）：选定 TierFlow 后，该上游才出现账号池入口。前端不解析 Base URL 猜供应商。"
-            style={{ maxWidth: 360 }}
-          >
+          {/* 供应商决定该上游是否启用账号池。 */}
+          <Form.Item name="supplier" label="供应商" style={{ maxWidth: 360 }}>
             <Select<SupplierFormValue> options={SUPPLIER_OPTIONS} />
           </Form.Item>
 
@@ -325,12 +317,7 @@ export function UpstreamModal({ open, editing, onClose, onSaved }: UpstreamModal
             />
           ) : null}
 
-          <Form.Item
-            name="queryEnabled"
-            label="余额查询模板"
-            valuePropName="checked"
-            extra="关闭时该上游只能手动录入余额（契约 §2：balanceQuery.enabled=false）。"
-          >
+          <Form.Item name="queryEnabled" label="余额查询模板" valuePropName="checked">
             <Switch />
           </Form.Item>
 
@@ -356,13 +343,6 @@ export function UpstreamModal({ open, editing, onClose, onSaved }: UpstreamModal
 
           {queryEnabled ? (
             <>
-              <Alert
-                type="info"
-                showIcon
-                style={{ marginBottom: tokens.space.md }}
-                message="占位符 {key} 在执行时才被替换"
-                description="替换后的字符串永不落盘、永不进日志、永不回显。这里编辑的是模板原文。"
-              />
               <Space size={tokens.space.md} style={{ display: 'flex' }} align="start">
                 <Form.Item
                   name="queryMethod"
@@ -380,11 +360,7 @@ export function UpstreamModal({ open, editing, onClose, onSaved }: UpstreamModal
                 </Form.Item>
               </Space>
 
-              <Form.Item
-                name="headersJson"
-                label="请求头（JSON）"
-                extra='示例：{"Authorization": "Bearer {key}"}'
-              >
+              <Form.Item name="headersJson" label="请求头（JSON）">
                 <Input.TextArea rows={3} style={{ fontFamily: tokens.font.mono }} />
               </Form.Item>
 
@@ -426,9 +402,6 @@ export function UpstreamModal({ open, editing, onClose, onSaved }: UpstreamModal
                 </Form.Item>
               </Space>
 
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                单位换算到「分」由后端负责；前端只负责把模板原样存下去。
-              </Text>
             </>
           ) : null}
         </Form>

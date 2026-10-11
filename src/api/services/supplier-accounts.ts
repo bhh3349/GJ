@@ -32,10 +32,11 @@
 import { sanitizeUpstreamBody } from '../../balance/raw.js';
 import type { Db } from '../../db/database.js';
 import { newId } from '../../db/ids.js';
-import { createKey } from '../../db/repo/keys.js';
+import { createKey, deleteKey } from '../../db/repo/keys.js';
 import {
   createSupplierAccount,
   findSupplierAccountByIdentifierHash,
+  latestSubscriptionSubNo,
   linkSupplierAccountKey,
   listLinkedPooledKeyMasks,
   listSupplierAccountRefs,
@@ -43,6 +44,7 @@ import {
   replaceSupplierAccountKeyLedger,
   replaceSupplierSubscriptions,
   requireSupplierAccount,
+  upsertSupplierSubscription,
   updateSupplierAccount,
   upstreamSupplier,
   type SupplierAccountKeyWrite,
@@ -59,6 +61,7 @@ import { mapSubscription } from '../../supplier/subscriptions.js';
 import {
   callWithRelogin,
   createTierFlowClient,
+  DEFAULT_QUOTA_PER_UNIT,
   maskFromUpstream,
   maskTail,
   TIERFLOW_PATHS,
@@ -1366,6 +1369,289 @@ async function createKeysForAccount(
  */
 function describeWithProgress(message: string, createdSoFar: number): string {
   return createdSoFar === 0 ? message : `${message}（本账号已建出 ${createdSoFar} 把）`;
+}
+
+// ---------------------------------------------------------------------------
+// 6) POST /api/supplier-accounts/rotate-key（§15.13 套餐 key 轮换，契约 v1.9.0 / ADR-0022）
+// ---------------------------------------------------------------------------
+
+/**
+ * **规则 1（先落库、后失效）的落库腿**：新 key 明文进密文库 + 记台账。
+ * 明文**只在这一行的栈内** —— `createKey` 返回前已 aes-256-gcm 落库，
+ * 之后不进 result、不进响应、不进日志（§15.2「明文不经浏览器」同一条纪律）。
+ *
+ * `tokenPlan` **刻意省略**：`createKey` 会把 `token_plan_remaining` 落 `NULL` = 余量未知，
+ * 不会凭空写一个 0（§15.2「不猜」；真实余量由 `keys/sync` / 余额刷新回填）。
+ */
+function poolRotatedKey(
+  ctx: SupplierOps,
+  upstreamId: string,
+  accountId: string,
+  input: { plaintext: string; subNo: string; planTitle: string },
+): string {
+  const key = createKey(
+    ctx.db,
+    {
+      upstreamId,
+      key: input.plaintext,
+      category: 'token-plan',
+      label: `套餐-${input.planTitle}`,
+    },
+    ctx.masterKey,
+  );
+  linkSupplierAccountKey(ctx.db, accountId, key.id, key.maskedKey, `套餐key轮换-${input.subNo}`);
+  return key.id;
+}
+
+/**
+ * **规则 1 的失效腿**：禁用被替换的旧 key（软删：`enabled=0` + `deleted_at`，行保留）。
+ * 调用前提 = 新 key 已经落库 —— 顺序反了，一次失败就会造成"新旧全失"。
+ * 台账行**不删**：它记录的是"这把旧 key 曾属于该账号"的历史，删除会把审计对账面抹掉。
+ */
+function disableSupersededKey(ctx: SupplierOps, oldKeyId: string): void {
+  try {
+    deleteKey(ctx.db, oldKeyId);
+  } catch {
+    // 已被并发删掉 / 已软删：目标态（旧 key 不可用）已达成，不是错误。
+  }
+}
+
+/**
+ * 旧 key 认领腿之取证：在发重置请求**之前**查一次该套餐专属 key 的掩码（`GET …/token?sub_no=`）。
+ *
+ * **实测（2026-10-12）**：上游重置换尾 —— 同一把套餐 key 重置前后后 4 位不同（`…iHLd` → `…5w2l`）。
+ * 所以认领锚点只能是**重置前**这一查的结果；拿新掩码去台账找旧 key **永远落空**。
+ * **best-effort**：直连（不带被动重登，同 `fillSubscriptionKeyMasks`），查不到 / 失败一律 `null`（不猜），
+ * 那时本次不自动禁用旧 key，由 `message` 提示人工核对。
+ */
+async function fetchSubscriptionKeyMask(
+  client: TierFlowClient,
+  session: SessionCred,
+  subNo: string,
+): Promise<string | null> {
+  const res = await client.request({
+    method: 'GET',
+    path: TIERFLOW_PATHS.subscriptionTokens,
+    query: { sub_no: subNo },
+    credential: session,
+  });
+  return res.ok ? findMaskInPayload(res.data) : null;
+}
+
+/**
+ * 旧 key 定位（§15.13 规则 3）：**只按掩码精确相等**认领，且锚点是**重置前**的旧掩码 `oldMasked`
+ * （见 `fetchSubscriptionKeyMask`：上游重置换尾，新掩码对不上）。
+ * 撞号 / 找不到都不动旧 key —— 旧 key 会失效，但池里**不会误禁**别人的 key；
+ * `message` 把这句话说清楚，操作员的手动兜底是本面上的启用/禁用按钮。
+ */
+function pickSupersededTokenRow(
+  ledger: readonly { pooledKeyId: string; maskedKey: string }[],
+  oldMasked: string | null,
+): { pooledKeyId: string; maskedKey: string } | null {
+  if (oldMasked === null || oldMasked === '') return null;
+  const hits = ledger.filter((row) => row.maskedKey === oldMasked);
+  return hits.length === 1 ? (hits[0] ?? null) : null;
+}
+
+export function startSupplierRotateKey(ctx: SupplierOps, body: unknown, hooks: BatchHooks = {}): TaskDto {
+  const upstreamId = requiredString(body, 'upstreamId');
+  const ids = readIds(body);
+  // `subNo` 可选（§15.13）：给了 = 每个目标账号都重置**这一个**套餐号；省略 = 各自**最新到期**的套餐。
+  const rawSubNo = asRecord(body)?.['subNo'];
+  if (rawSubNo !== undefined && rawSubNo !== null && (typeof rawSubNo !== 'string' || rawSubNo.trim() === '')) {
+    throw ApiError.invalidParam('subNo', 'subNo 必须是非空字符串');
+  }
+  const subNo = typeof rawSubNo === 'string' && rawSubNo.trim() !== '' ? rawSubNo.trim() : null;
+  const { baseUrl } = requireTierflowUpstream(ctx.db, upstreamId);
+  // 省略 ids = 该上游**全部**账号（与 refresh 同口径）：会话过期的账号正是"点重置想救回来"的那个。
+  const targets = resolveTargets(ctx.db, upstreamId, ids, undefined);
+
+  return startTask(ctx.db, 'supplier_rotate_key', targets.length, async (reporter) => {
+    const tally = new BatchTally(targets.length);
+    const excluded = excludedHashSet(ctx.excluded);
+    const queue = accountQueue(ctx);
+
+    await Promise.all(
+      targets.map((ref, index) =>
+        queue.run(async () => {
+          tally.put(index, await rotateOne(ctx, baseUrl, upstreamId, ref, excluded, subNo));
+          reporter.step();
+        }),
+      ),
+    );
+
+    const result = tally.build();
+    hooks.onFinish?.(result);
+    return result;
+  });
+}
+
+/**
+ * 一个账号的重置（§15.13 语义顺序，三条次序纪律都不是风格问题）：
+ *
+ * 1. **先落库、后失效** —— 新 key 明文只在重置响应里出现这一次；先把明文送进密文库，
+ *    之后任何一步失败都只是"旧 key 还挂着"的**安全态**，不存在"新 key 明文已丢"的不可恢复态。
+ * 2. **只按掩码精确相等认领旧 key** —— 撞号 / 找不到都不禁用：宁可留一把已失效的旧 key，
+ *    也不要把 A 账号的 key 禁到 B 账号头上（§15.2 `KEY_MASK_AMBIGUOUS` 同一条取向）。
+ * 3. **重置不改账号状态判定** —— §15.1 的 `status` 是"最近一次查询"的结论，重置不是查询；
+ *    失败只写 `statusMessage`（同 `failurePatch` 的取向），成功不把它顶成 `active`。
+ */
+async function rotateOne(
+  ctx: SupplierOps,
+  baseUrl: string,
+  upstreamId: string,
+  ref: SupplierAccountRef,
+  excluded: ReadonlySet<string>,
+  subNo: string | null,
+): Promise<SupplierBatchItem> {
+  if (isExcludedHash(ref.identifierHash, excluded)) {
+    return emptyItem({
+      accountId: ref.id,
+      identifier: ref.identifier,
+      action: null,
+      ok: false,
+      code: EXCLUDED_IDENTIFIER,
+      message: '该账号在排除名单里，本次未做任何重置',
+    });
+  }
+
+  const cred = readSupplierCredential(ctx.db, ref.id, ctx.masterKey);
+  if (cred === null) {
+    return emptyItem({
+      accountId: ref.id,
+      identifier: ref.identifier,
+      action: 'rotate',
+      ok: false,
+      code: 'INTERNAL',
+      message: '凭据读不回来（多半是 MASTER_KEY 与写入时不一致）',
+    });
+  }
+
+  const start = sessionOf(cred);
+  if (start === null) {
+    // 重置是写操作，**不在这里顺手登一次**（同 `keys` 的理由：一个动作只做一件事）。
+    return emptyItem({
+      accountId: ref.id,
+      identifier: cred.maskedIdentifier,
+      action: 'rotate',
+      ok: false,
+      code: 'SESSION_EXPIRED',
+      message: '该账号没有可用会话，请先重登或刷新后再重置',
+    });
+  }
+
+  // `subNo` 省略 = 该账号**最新到期**的套餐（`end_at` 最大；名下无套餐记录则这一行失败）。
+  const targetSubNo = subNo ?? latestSubscriptionSubNo(ctx.db, ref.id);
+  if (targetSubNo === null) {
+    return emptyItem({
+      accountId: ref.id,
+      identifier: cred.maskedIdentifier,
+      action: 'rotate',
+      ok: false,
+      code: 'SUBSCRIPTION_NOT_FOUND',
+      message: '该账号名下没有套餐记录，无法重置套餐 key（先执行一次刷新或 keys/sync）',
+    });
+  }
+
+  const budget = createReloginBudget(cred);
+  const client = clientFor(ctx, baseUrl);
+
+  // §15.13 规则 3 的取证腿：重置**之前**先取旧掩码（重置换尾，拿新掩码永远认领不到旧 key），
+  // 并拍一张"重置前台账快照"（新 key 入台账后再读会把新 key 自己当成旧 key）。
+  const oldMasked = await fetchSubscriptionKeyMask(client, start, targetSubNo);
+  const ledgerBefore = listLinkedPooledKeyMasks(ctx.db, ref.id);
+
+  // ① 上游重置（拿到新明文 = 本端点的唯一意义）。重试预算同全线：callWithRelogin 的一次被动重登。
+  const call = await callWithRelogin(client, budget.credential(start), (c) =>
+    client.rotateSubscriptionToken(c, targetSubNo),
+  );
+  persistRenewed(ctx, ref.id, call.renewed);
+  budget.note(call.relogged);
+
+  if (!call.result.ok) {
+    updateSupplierAccount(ctx.db, ref.id, failurePatch(call.result, cred));
+    return emptyItem({
+      accountId: ref.id,
+      identifier: cred.maskedIdentifier,
+      action: call.relogged ? 'relogin' : 'rotate',
+      ok: false,
+      code: codeForFailure(call.result.failure),
+      message: safeMessage(call.result.message, cred),
+    });
+  }
+
+  // ② 顺手对账套餐（驱动器 `subscriptions` 一次请求；失败不阻塞主流程 —— 重置已经成功）。
+  const subRows = await callWithRelogin(client, budget.credential(sessionAfter(call.renewed, start)), (c) =>
+    client.subscriptions(c),
+  );
+  persistRenewed(ctx, ref.id, subRows.renewed);
+  budget.note(subRows.relogged);
+  const mapped = subRows.result.ok
+    ? mapSubscriptions(subRows.result.data, DEFAULT_QUOTA_PER_UNIT)
+    : [];
+  if (mapped.length > 0) replaceSupplierSubscriptions(ctx.db, ref.id, mapped);
+  const plan = mapped.find((row) => row.subNo === targetSubNo) ?? null;
+
+  // ③ 新 key 落库（规则 1 的前半段：先落库）。
+  const plaintext = call.result.data.plaintext;
+  if (plaintext === null) {
+    // 驱动器契约上 ok 必带明文（无明文时它自己回 rejected）；真出现时**不落一把空 key**，
+    // 按 `KEY_PLAINTEXT_MISSING` 报出去 —— 上游的旧 key 此时已失效，必须让人看见。
+    return emptyItem({
+      accountId: ref.id,
+      identifier: cred.maskedIdentifier,
+      action: call.relogged ? 'relogin' : 'rotate',
+      ok: false,
+      code: KEY_PLAINTEXT_MISSING,
+      message: '上游重置成功但响应里没有 key 明文，未能入池（请人工核实并在上游确认旧 key 是否已失效）',
+    });
+  }
+  const planTitle = plan?.planTitle ?? plan?.planSlug ?? targetSubNo;
+  const keyId = poolRotatedKey(ctx, upstreamId, ref.id, {
+    plaintext,
+    subNo: targetSubNo,
+    planTitle,
+  });
+
+  // ④ 套餐行的 has_key / key_masked 以**本次响应**为准（请求前旧掩码已经是废的）。
+  upsertSupplierSubscription(ctx.db, ref.id, {
+    subNo: targetSubNo,
+    planTitle: plan?.planTitle ?? null,
+    planSlug: plan?.planSlug ?? null,
+    amountTotalCents: plan?.amountTotalCents ?? null,
+    amountUsedCents: plan?.amountUsedCents ?? null,
+    paidCents: plan?.paidCents ?? null,
+    basicTokenTotal: plan?.basicTokenTotal ?? null,
+    basicTokenUsed: plan?.basicTokenUsed ?? null,
+    status: plan?.status ?? null,
+    source: plan?.source ?? null,
+    startAt: plan?.startAt ?? null,
+    endAt: plan?.endAt ?? null,
+    autoRenew: plan?.autoRenew ?? null,
+    hasKey: true,
+    keyMasked: call.result.data.maskedKey,
+  });
+
+  // ⑤ 旧 key 退场（规则 1 的后半段：后失效）。锚点是**重置前**取到的旧掩码 `oldMasked`
+  //    （实测重置换尾；拿新掩码永远认领不到 —— 见 `pickSupersededTokenRow`）。
+  const superseded = pickSupersededTokenRow(ledgerBefore, oldMasked);
+  let message: string | null = null;
+  if (superseded !== null) {
+    disableSupersededKey(ctx, superseded.pooledKeyId);
+  } else {
+    message = '新 key 已入池；旧 key 未能按掩码认领（撞号或不在池内），未自动禁用，请人工核对';
+  }
+
+  return emptyItem({
+    accountId: ref.id,
+    identifier: cred.maskedIdentifier,
+    action: call.relogged || subRows.relogged ? 'relogin' : 'rotate',
+    ok: true,
+    keyId,
+    keyMasked: call.result.data.maskedKey,
+    tokenNo: null,
+    message,
+  });
 }
 
 // ---------------------------------------------------------------------------

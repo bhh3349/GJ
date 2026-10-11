@@ -667,11 +667,11 @@ export interface SupplierTestParsed {
 /**
  * 契约 §15.3 批量任务逐行结果。
  *
- * `action` 的五个取值**每个都必须有生产者**（§15.3 明令不留"枚举里有、没人发"的空值）：
+ * `action` 的六个取值**每个都必须有生产者**（§15.3 明令不留"枚举里有、没人发"的空值）：
  * `login` = `import` 里新建账号的首登；`relogin` = 已有账号在 `import`/`refresh`/`keys` 中被重登；
- * `refresh` = `refresh`；`create` = `keys`；`sync` = `keys/sync`。
+ * `refresh` = `refresh`；`create` = `keys`；`sync` = `keys/sync`；`rotate` = §15.13 套餐 key 轮换。
  */
-export type SupplierBatchAction = 'login' | 'relogin' | 'refresh' | 'create' | 'sync';
+export type SupplierBatchAction = 'login' | 'relogin' | 'refresh' | 'create' | 'sync' | 'rotate';
 
 /** 一行。**不含任何凭据** —— `keyMasked` 是掩码，`keyId`/`tokenNo` 是内部标识。 */
 export interface SupplierBatchItem {

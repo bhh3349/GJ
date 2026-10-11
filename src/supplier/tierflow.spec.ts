@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  adminRootOf,
   DEFAULT_QUOTA_PER_UNIT,
   callWithRelogin,
   centsToQuota,
@@ -441,5 +442,51 @@ describe('§15.9 被动重登策略', () => {
     );
     expect(res.result.ok).toBe(false);
     expect(calls).toHaveLength(0);
+  });
+});
+
+describe('管理面根（§16.1.1：baseUrl 是数据面口径，管理面六端点打站点根）', () => {
+  it('adminRootOf：剥 /v1 后缀；不带 /v1 的根幂等；/v1/ 结尾（尾斜杠）也剥；/v11 不误伤', () => {
+    expect(adminRootOf('https://tierflow.cn/v1')).toBe('https://tierflow.cn');
+    expect(adminRootOf('https://tierflow.cn/v1/')).toBe('https://tierflow.cn');
+    expect(adminRootOf('https://tierflow.cn/')).toBe('https://tierflow.cn');
+    expect(adminRootOf('https://tierflow.cn/v11')).toBe('https://tierflow.cn/v11');
+    expect(adminRootOf('https://tierflow.cn/x/v1')).toBe('https://tierflow.cn/x');
+  });
+
+  it('带 /v1 的 baseUrl：登录打站点根 —— 复现「Invalid URL (POST /v1/api/user/login)」的那一笔', async () => {
+    // 在册上游的真实形状：数据面转发要 /v1（baseUrl + /chat/completions），管理面要站点根
+    const { impl, calls } = fakeFetch(() => json({ success: true, data: { session: 's1' } }));
+    const c = createTierFlowClient({ baseUrl: 'https://tierflow.cn/v1', fetchImpl: impl });
+    await c.login('u', 'p');
+    expect(c.adminRoot).toBe('https://tierflow.cn');
+    expect(calls[0]?.url).toBe('https://tierflow.cn/api/user/login');
+    expect(calls[0]?.url).not.toContain('/v1/');
+  });
+
+  it('带 /v1 的 baseUrl：具名操作与裸 request 同样打站点根，六端点一处在 constructor 收口', async () => {
+    const { impl, calls } = fakeFetch((call) =>
+      call.url.includes('/api/token/search')
+        ? json({ success: true, data: { items: [] } })
+        : json({ success: true, data: { quota: 500000 } }),
+    );
+    const c = createTierFlowClient({ baseUrl: 'https://tierflow.cn/v1', fetchImpl: impl });
+    await c.self(CRED);
+    await c.tokens(CRED);
+    await c.request({ method: 'GET', path: '/api/status' });
+    expect(calls[0]?.url).toBe('https://tierflow.cn/api/user/self');
+    expect(calls[1]?.url).toBe('https://tierflow.cn/api/token/search?keyword=');
+    expect(calls[2]?.url).toBe('https://tierflow.cn/api/status');
+    for (const call of calls) {
+      expect(call.url.startsWith('https://tierflow.cn/api/')).toBe(true);
+    }
+  });
+
+  it('不带 /v1 的 baseUrl：行为与既有用例逐字一致（回归锁）', async () => {
+    const { impl, calls } = fakeFetch(() => json({ success: true, data: { session: 's1' } }));
+    const c = createTierFlowClient({ baseUrl: 'https://tierflow.cn', fetchImpl: impl });
+    await c.login('u', 'p');
+    expect(c.adminRoot).toBe('https://tierflow.cn');
+    expect(calls[0]?.url).toBe('https://tierflow.cn/api/user/login');
   });
 });

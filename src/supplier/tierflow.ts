@@ -281,7 +281,11 @@ export const TIERFLOW_PATHS = {
 // ---------------------------------------------------------------------------
 
 export interface TierFlowOptions {
-  /** 上游根，如 `https://tierflow.cn`。尾斜杠会被抹掉。 */
+  /**
+   * 上游档案的 baseUrl = **数据面根**（如 `https://tierflow.cn/v1`：网关转发拼
+   * `baseUrl + /chat/completions` 要带 `/v1`）。尾斜杠会被抹掉；管理面根由客户端
+   * 自己剥 `/v1` 后缀算出（`adminRoot`），不在档案上存第二个字段。
+   */
   baseUrl: string;
   /**
    * 出站 fetch。**必填、无兜底**（ADR-0021 决策 4c「8 处 fetchImpl 兜底全拆」，本处是**内层**）。
@@ -342,6 +346,13 @@ export interface UpstreamTokenRow {
 
 export interface TierFlowClient {
   readonly baseUrl: string;
+  /**
+   * 管理面根 = `baseUrl` 剥掉 `/v1` 后缀（构造时算一次，不进热路径）。六个端点全拼它，
+   * 不拼 `baseUrl` —— 在册上游的 baseUrl 常带 `/v1`，直接拼管理面路径会打成
+   * `tierflow.cn/v1/api/user/login` 这类不存在的路径，上游原样回 404
+   * `Invalid URL (POST /v1/api/user/login)`（§16.1.1 实测钉死）。
+   */
+  readonly adminRoot: string;
   /** 裸请求。六个端点之外的调试用；正常路径请用下面的具名操作。 */
   request(spec: RequestSpec): Promise<TierFlowResult<unknown>>;
   /** 登录换会话。**不重试**（每号一次，§15.5）—— 重试策略在调用方。 */
@@ -363,11 +374,12 @@ export interface TierFlowClient {
 
 export function createTierFlowClient(options: TierFlowOptions): TierFlowClient {
   const baseUrl = options.baseUrl.replace(/\/+$/, '');
+  const adminRoot = adminRootOf(options.baseUrl);
   const fetchImpl = options.fetchImpl;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   async function request(spec: RequestSpec): Promise<TierFlowResult<unknown>> {
-    const url = buildUrl(baseUrl, spec.path, spec.query);
+    const url = buildUrl(adminRoot, spec.path, spec.query);
     const secrets: (string | null | undefined)[] = [spec.credential?.session, spec.credential?.tfUser];
 
     const headers: Record<string, string> = { Accept: 'application/json' };
@@ -465,6 +477,7 @@ export function createTierFlowClient(options: TierFlowOptions): TierFlowClient {
 
   return {
     baseUrl,
+    adminRoot,
     request,
 
     /**
@@ -590,7 +603,7 @@ export function createTierFlowClient(options: TierFlowOptions): TierFlowClient {
     identifier: string,
     password: string,
   ): Promise<TierFlowResult<LoginOutcome>> {
-    const url = buildUrl(baseUrl, TIERFLOW_PATHS.login, undefined);
+    const url = buildUrl(adminRoot, TIERFLOW_PATHS.login, undefined);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const secrets = [password];
@@ -742,6 +755,16 @@ export async function callWithRelogin<T>(
 // ---------------------------------------------------------------------------
 // 小工具
 // ---------------------------------------------------------------------------
+
+/** 管理面根 = baseUrl 剥掉 `/v1` 后缀（§16.1.1）。
+ *
+ * baseUrl 的口径是**数据面**的，而本驱动器六个端点全是站点根下的 `/api/*`。
+ * 两套口径共用一个字段，剥前缀只收口在这一处：`https://tierflow.cn/v1` →
+ * `https://tierflow.cn`；不带 `/v1` 的根原样返回（幂等）。
+ */
+export function adminRootOf(baseUrl: string): string {
+  return baseUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
+}
 
 export function buildUrl(
   baseUrl: string,

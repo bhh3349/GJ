@@ -37,6 +37,20 @@ export type HealthKey =
   | 'balance-unknown'
   | 'ok';
 
+/**
+ * 健康档的严重度顺序 = 判定链顺序（连接 → 钱 → 正常）。
+ * 舰队点阵的排序与「需要处理」清单的顺序都从这一个序读 —— 同一个"谁更急"，不许两套。
+ */
+export const HEALTH_SEVERITY_ORDER: readonly HealthKey[] = [
+  'login-failed',
+  'session-expired',
+  'never-checked',
+  'exhausted',
+  'low',
+  'balance-unknown',
+  'ok',
+];
+
 export interface AccountHealth {
   key: HealthKey;
   label: string;

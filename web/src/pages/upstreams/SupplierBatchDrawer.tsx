@@ -346,7 +346,7 @@ export function SupplierBatchDrawer({
               description={
                 <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
                   上游 key 由服务端取回后当场加密入池，明文不进浏览器，此后管理面也取不回。
-                  要拿明文只能去上游站点的 key 列表；网关侧发流量不需要它 —— 选用的是池内这把。
+                  要拿明文只能去上游站点的 key 列表；网关侧发流量不需要它 —— 用的是已经加进账号池的这一把。
                 </Text>
               }
             />

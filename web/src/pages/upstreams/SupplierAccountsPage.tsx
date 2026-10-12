@@ -79,6 +79,7 @@ import {
 import { BalanceText } from '@/components/BalanceText';
 import { RemainingBar } from '@/components/RemainingBar';
 import { confirmManualRefresh } from '@/components/ManualRefreshConfirm';
+import { SupplierFleetMatrix } from '@/pages/upstreams/SupplierFleetMatrix';
 import { SupplierPoolFilters } from '@/pages/upstreams/SupplierPoolFilters';
 import { SupplierPoolFundsCards } from '@/pages/upstreams/SupplierPoolFundsCards';
 import { PageHeader } from '@/components/PageHeader';
@@ -480,7 +481,7 @@ export default function SupplierAccountsPage() {
     },
     {
       title: (
-        <Tooltip title="这一列按「要不要动手」判，判据自上而下：登录失败 / 会话过期 / 未查询过 → 余额未知 → 额度耗尽 → 余额偏低 → 正常。它比左边的「状态」多一层：能登录的号也再分余额够不够。">
+        <Tooltip title="这一列按「要不要动手」判，从上往下第一个命中即停：登录失败 / 会话过期 / 未查询过 → 余额未知 → 额度耗尽 → 余额偏低 → 正常。它比左边的「状态」多一层：能登录的号也再分余额够不够。">
           <span>健康</span>
         </Tooltip>
       ),
@@ -733,6 +734,14 @@ export default function SupplierAccountsPage() {
               children: (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.md }}>
                   <SupplierPoolFundsCards funds={funds} upstream={upstream.data ?? null} />
+
+                  <SupplierFleetMatrix
+                    accounts={pool.data?.items ?? null}
+                    accountTotal={pool.data?.total ?? 0}
+                    activeAccountId={detailId}
+                    failed={pool.error !== null && pool.data === null}
+                    onSelect={setDetailId}
+                  />
 
                   <SupplierPoolFilters
                     filters={poolFilters}

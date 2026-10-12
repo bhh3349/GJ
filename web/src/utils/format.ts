@@ -94,6 +94,38 @@ export function formatLatency(ms: number | null | undefined): string {
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`;
 }
 
+/**
+ * 进程运行时长（秒 → 「8h 33m」这类可读串）。契约 §12.2 `uptimeSec` 给的是**整数秒**。
+ *
+ * 上限只到「天」：`uptimeSec` 是进程口径（重启归零），不是"系统装了多久"，
+ * 所以不往年月换算 —— 那会读成一个不存在的精度。
+ */
+export function formatDuration(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) return '—';
+  const total = Math.max(0, Math.floor(seconds));
+  if (total < 60) return `${total}s`;
+  const days = Math.floor(total / 86_400);
+  const hours = Math.floor((total % 86_400) / 3_600);
+  const minutes = Math.floor((total % 3_600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  return `${minutes}m`;
+}
+
+/** 字节数 → 人类可读（用于 §12.2 `db.fileSizeBytes` / `walSizeBytes`）。`null` 是「取不到」，不是 0。 */
+export function formatBytes(value: number | null | undefined): string {
+  if (value === null || value === undefined || !Number.isFinite(value)) return '—';
+  if (value < 1024) return `${value} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let size = value / 1024;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) {
+    size /= 1024;
+    index += 1;
+  }
+  return `${size.toFixed(size < 10 ? 1 : 0)} ${units[index]}`;
+}
+
 /** 冷却剩余时间，展示为「冷却中 · 剩 4m」这类可读文案。 */
 export function formatCooldown(until: string | null | undefined): string | null {
   if (!until) return null;

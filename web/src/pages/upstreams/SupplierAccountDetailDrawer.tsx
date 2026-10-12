@@ -246,14 +246,15 @@ export function SupplierAccountDetailDrawer({
                 ? '算不出剩余占比（总额或已用缺失，或总额为 0）—— 不画一根 0% 的假条。'
                 : `剩余占总额 ${Math.round(ratio * 100)}%`
             }
-          >
-            <Text style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums' }}>
-              {remaining === null ? '未知' : formatCents(remaining)}
-              <Text type="secondary" style={{ fontSize: 11 }}>
-                {` / ${formatCents(total)}`}
+            value={
+              <Text style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums' }}>
+                {remaining === null ? '未知' : formatCents(remaining)}
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  {` / ${formatCents(total)}`}
+                </Text>
               </Text>
-            </Text>
-          </RemainingBar>
+            }
+          />
         );
       },
     },

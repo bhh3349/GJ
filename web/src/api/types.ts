@@ -595,6 +595,8 @@ export interface BalanceScope {
   balanceKeyCount?: number;
   /** 未知 ≠ 0，必须单独呈现。 */
   balanceUnknownKeyCount: number;
+  /** `balanceKeyCount` 中 `unlimited=1` 的子集：不进金额合计、也不算未知（§15.6/§15.7）。 */
+  unlimitedKeyCount?: number;
   tokenPlanKeyCount: number;
   currency?: string;
   /** 仅 `/api/stats/balance` 的 byUpstream 下钻带 `keys`。 */
@@ -609,6 +611,12 @@ export interface BalanceKeyRow {
   balanceUpdatedAt?: Iso8601;
   balanceSource?: BalanceSource;
   balanceUnknownKeyCount?: number;
+  /**
+   * 契约 §2 / ADR-0018 决策 8（v1.6.0 起后端 `KeyBalanceEntry` 就带这一位）。
+   * 无限额度 key 的 `balance` 恒为 `null`，但语义**不是「未知」**：两者数据同形、语义相反，
+   * 只能靠这个旗标区分。漏传它的地方会把无限额度 key 渲染成「未知」——那是显示缺陷，不是数据缺失。
+   */
+  unlimited?: boolean;
 }
 
 export interface BalanceStats {
@@ -963,6 +971,171 @@ export type ObservabilityCategory = (typeof OBSERVABILITY_CATEGORIES)[number];
 export type ObservabilityWindow = '60s' | '5m' | '1h';
 
 export type ObservabilitySeverity = 'warn' | 'error';
+
+// ── §12.2 健康指标 `GET /api/observability/health`（只读，实时算） ──────────
+
+/**
+ * 契约 §12.2 的 `traffic.latencyMs`：`usage_logs.latency_ms` 的**最近秩**分位（nearest-rank，不做插值）。
+ * `samples = 0` 时两个分位是 `null` —— **不是 0**（把「没有样本」画成「0ms 延迟」是造假）。
+ */
+export interface ObservabilityLatency {
+  p50: number | null;
+  p99: number | null;
+  samples: number;
+}
+
+/** §12.2 `traffic.*`：与 §6 `overview` **同一份 SQL、同一口径**，但这里是观测面自己的响应体。 */
+export interface ObservabilityTraffic {
+  qps: number;
+  /** 0..1 小数。`requests=0` 时后端给 `successRate=1` 是**约定而非断言** ⇒ 调用方仍须自行显示「无流量」。 */
+  successRate: number;
+  requests: number;
+  errors: number;
+  tokens: TokenBuckets;
+  latencyMs: ObservabilityLatency;
+}
+
+/** §12.2 `keys.items[]` 单项（与 §3 Key 的 `health` / `cooldownUntil` / `consecutiveFailures` 同源）。 */
+export interface ObservabilityKeyItem {
+  keyId: string;
+  maskedKey: string;
+  upstreamId: string;
+  health: KeyHealth;
+  cooldownUntil: Iso8601 | null;
+  consecutiveFailures: number;
+}
+
+/** §12.2 `keys.*`：`total` 与三个分档计数同源（`key_runtime`，新鲜度 ≤1s）。 */
+export interface ObservabilityKeys {
+  total: number;
+  healthy: number;
+  cooling: number;
+  disabled: number;
+  /** 全量 key 明细（无分页）。 */
+  items: ObservabilityKeyItem[];
+}
+
+/** §12.2 `db.*`：`ok` 是**真跑一次** `SELECT 1` 的结果，不是"连接对象还在"。取不到的两列是 `null`。 */
+export interface ObservabilityDb {
+  ok: boolean;
+  schemaVersion: number;
+  fileSizeBytes: number | null;
+  walSizeBytes: number | null;
+  queryMs: number;
+}
+
+/** §12.2 `events.byCategory[]` 单项。只列**出现过**的分型，**不补 0**（与 §6 时间轴补 0 不同）。 */
+export interface ObservabilityEventBucket {
+  category: ObservabilityCategory;
+  severity: ObservabilitySeverity;
+  count: number;
+  lastAt: Iso8601;
+}
+
+/** §12.2 `events.*`：`dropped` 是**进程启动以来**的累计丢弃数（不是窗口内）—— 丢事件不许静默。 */
+export interface ObservabilityEvents {
+  total: number;
+  dropped: number;
+  byCategory: ObservabilityEventBucket[];
+}
+
+/**
+ * §12.2 `assistant.*`：内置助手独立计量。**进程内计数、重启归零、不落表**；
+ * 计入 `keys.*` 健康，**不计入 `traffic.*`**（不写 `usage_logs`，不污染业务 QPS / 成功率）。
+ */
+export interface ObservabilityAssistant {
+  requests: number;
+  errors: number;
+  tokens: TokenBuckets;
+}
+
+/** `GET /api/observability/health?window=` 的 200 响应（契约 §12.2）。 */
+export interface ObservabilityHealth {
+  generatedAt: Iso8601;
+  /** 后端回显**实际**生效的窗口（解析规则同 §6，上限 24h）。 */
+  window: ObservabilityWindow;
+  uptimeSec: number;
+  startedAt: Iso8601;
+  traffic: ObservabilityTraffic;
+  keys: ObservabilityKeys;
+  db: ObservabilityDb;
+  events: ObservabilityEvents;
+  assistant: ObservabilityAssistant;
+}
+
+/** §12.2 健康快照（`gateway_health_snapshots`）：每 60s 一条，是**当时算出来的历史**，不允许事后重算。 */
+export interface ObservabilityHealthSnapshot {
+  id: string;
+  ts: Iso8601;
+  windowSec: number;
+  qps: number;
+  successRate: number;
+  requests: number;
+  errors: number;
+  /** 样本为 0 时是 `null`，**不是 0**。 */
+  p50Ms: number | null;
+  p99Ms: number | null;
+  keys: {
+    total: number;
+    healthy: number;
+    cooling: number;
+    disabled: number;
+  };
+  dbOk: boolean;
+  errorCount: number;
+}
+
+/** §12.3：响应在 §0.3 分页信封之上**追加** `range`，回显**实际**生效的窗口（前端按回显渲染，不自算）。 */
+export interface ObservabilityPaged<T> extends Paged<T> {
+  range: { from: Iso8601; to: Iso8601 };
+}
+
+/** §12.3 错误事件查询的一行（§12.1 `GatewayErrorEvent` 的读面投影）。 */
+export interface ObservabilityErrorEvent {
+  id: string;
+  ts: Iso8601;
+  /** 关联键（§6 `x-request-id`）。本列上线前的历史行为 `null`。 */
+  requestId: string | null;
+  severity: ObservabilitySeverity;
+  category: ObservabilityCategory;
+  /** 最终回给客户端的 HTTP 状态；客户端断开写 `499`（该值只存在于事件流）。 */
+  status: number;
+  gatewayCode: string | null;
+  failureReason: FailureReason | null;
+  endpoint: string;
+  /** 未过鉴权（401）恒为 `null`（§12.1 产出边界 2）。 */
+  model: string | null;
+  upstreamId: string | null;
+  keyId: string | null;
+  /** `****后4位`；没有"哪一把 key"可言时产出侧写 `****`（退化形态），不是 `null`。 */
+  keyMasked: string | null;
+  stream: boolean;
+  upstreamStatus: number | null;
+  /** **真实**上游尝试次数（`0` = 一次都没发出去）。 */
+  attempts: number;
+  candidates: number | null;
+  latencyMs: number | null;
+  /** 已脱敏 + 截断 512 字符的人类可读归因。只读展示，绝不当 HTML 渲染。 */
+  message: string | null;
+}
+
+/** §12.3 `GET /api/observability/errors` 的过滤参数。`category` 是**逗号分隔多值**（最多 9）。 */
+export interface ObservabilityErrorQuery extends PageQuery {
+  from?: Iso8601;
+  to?: Iso8601;
+  category?: string;
+  severity?: ObservabilitySeverity;
+  upstreamId?: string;
+  keyId?: string;
+  model?: string;
+  requestId?: string;
+}
+
+/** §12.3 `GET /api/observability/health/snapshots` 的过滤参数（默认最近 6h）。 */
+export interface ObservabilitySnapshotQuery extends PageQuery {
+  from?: Iso8601;
+  to?: Iso8601;
+}
 
 // ── §13 内置 AI 助手聊天 `POST /api/assistant/chat`（v1.2.0） ─────────────
 

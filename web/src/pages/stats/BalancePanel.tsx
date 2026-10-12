@@ -5,7 +5,10 @@
  * 1. 合计只统计 `category="balance"` 的 key，token-plan 类**不进金额**；
  * 2. 全局合计 = 各上游合计之和（所以这里不重算，直接显示后端给的数）；
  * 3. 任一层只要有未知项，`balanceUnknownKeyCount > 0` 必须单独呈现，**未知不得补 0**；
- * 4. 已软删的 key 不进任何合计与未知计数（后端已处理，前端不补人）。
+ * 4. 已软删的 key 不进任何合计与未知计数（后端已处理，前端不补人）；
+ * 5. **无限额度 ≠ 未知**（ADR-0018 决策 8）：这类 key `balance` 恒 `null`，靠 `unlimited` 旗标
+ *    区分，渲染「无限额度」徽标，**不进未知计数、也不列「未计入」**。
+ *    2026-10-12 曾因此把 46 把无限 key 全渲染成「未知」被 Bo 抓到 —— 本列必须传 `unlimited`。
  *
  * 金额一律走 `BalanceText`，`null` 显示「未知」而不是 ¥0.00。
  */
@@ -18,6 +21,7 @@ import { statsApi } from '@/api/endpoints';
 import { useResource } from '@/api/hooks';
 import type { BalanceKeyRow, BalanceScope } from '@/api/types';
 import { BalanceText } from '@/components/BalanceText';
+import { Panel } from '@/components/Panel';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { tokens } from '@/theme/tokens';
 import { formatCount } from '@/utils/format';
@@ -63,6 +67,7 @@ const keyColumns: ColumnsType<BalanceKeyRow> = [
         value={row.balance}
         source={row.balanceSource ?? null}
         updatedAt={row.balanceUpdatedAt ?? null}
+        unlimited={row.unlimited === true}
         showMeta
       />
     ),
@@ -71,7 +76,14 @@ const keyColumns: ColumnsType<BalanceKeyRow> = [
     title: '是否计入合计',
     key: 'note',
     render: (_: unknown, row) =>
-      row.balance === null ? (
+      row.unlimited === true ? (
+        // 无限额度走单独一档：它既不是「未计入」（那是未知），也不是「已计入」。
+        <Tooltip title="无限额度 key：上游不限额、不返回金额，因此不参与任何金额合计 —— 它也不算「未知」。">
+          <Tag bordered={false} style={{ marginInlineEnd: 0, background: tokens.tint.info, color: tokens.color.info }}>
+            不计金额
+          </Tag>
+        </Tooltip>
+      ) : row.balance === null ? (
         <Tooltip title="该 key 未录入余额，或上游查询不到。未知 ≠ 0，不计入合计。">
           <Tag bordered={false} style={{ marginInlineEnd: 0, background: tokens.tint.warning, color: tokens.color.warning }}>
             未计入
@@ -145,26 +157,9 @@ export function BalancePanel() {
   ];
 
   return (
-    <div
-      style={{
-        border: `1px solid ${tokens.color.border}`,
-        borderRadius: tokens.radius.md,
-        background: tokens.color.bgContainer,
-        padding: tokens.space.lg,
-      }}
-    >
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: tokens.space.md,
-          marginBottom: tokens.space.md,
-        }}
-      >
-        <Space size={tokens.space.sm} align="center">
-          <Text style={{ fontSize: 13, fontWeight: 600 }}>余额三口径</Text>
-        </Space>
+    <Panel
+      title="余额三口径"
+      extra={
         <Button
           size="small"
           icon={<ReloadOutlined />}
@@ -173,8 +168,8 @@ export function BalancePanel() {
         >
           刷新
         </Button>
-      </div>
-
+      }
+    >
       {balance.error && balance.data ? (
         <div style={{ marginBottom: tokens.space.md }}>
           <ErrorState
@@ -222,6 +217,11 @@ export function BalancePanel() {
               <Tooltip title="余额未知的 key 数量（未知 ≠ 0，不计入合计）">
                 <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
                   未知 key <CountCell value={global?.balanceUnknownKeyCount} tone="warning" />
+                </Text>
+              </Tooltip>
+              <Tooltip title="无限额度 key：不参与金额合计，也不算未知（与「未知 key」在 balanceKeyCount 内互不重叠）">
+                <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
+                  无限额度 key <CountCell value={global?.unlimitedKeyCount} tone="default" />
                 </Text>
               </Tooltip>
               <Tooltip title="token-plan 类 key 不计入任何金额合计">
@@ -278,6 +278,6 @@ export function BalancePanel() {
           />
         </>
       )}
-    </div>
+    </Panel>
   );
 }

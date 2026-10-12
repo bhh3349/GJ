@@ -22,6 +22,7 @@ import { Suspense, lazy, useState } from 'react';
 import { statsApi } from '@/api/endpoints';
 import { useResource } from '@/api/hooks';
 import { BalanceDriftPanel } from '@/pages/stats/BalanceDriftPanel';
+import { Panel } from '@/components/Panel';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { tokens } from '@/theme/tokens';
 import { formatIso, formatPercent, formatRelative } from '@/utils/format';
@@ -64,27 +65,9 @@ export function BalanceSyncSection({ upstreamId, showDrift = true }: BalanceSync
   const auto = data?.auto;
 
   return (
-    <div
-      style={{
-        border: `1px solid ${tokens.color.border}`,
-        borderRadius: tokens.radius.md,
-        background: tokens.color.bgContainer,
-        padding: tokens.space.lg,
-      }}
-    >
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: tokens.space.md,
-          marginBottom: tokens.space.md,
-          flexWrap: 'wrap',
-        }}
-      >
-        <Space size={tokens.space.sm} align="center" wrap>
-          <Text style={{ fontSize: 13, fontWeight: 600 }}>余额同步</Text>
-        </Space>
+    <Panel
+      title="余额同步"
+      extra={
         <Space size={tokens.space.sm} align="center">
           <Segmented
             size="small"
@@ -101,8 +84,8 @@ export function BalanceSyncSection({ upstreamId, showDrift = true }: BalanceSync
             刷新
           </Button>
         </Space>
-      </div>
-
+      }
+    >
       {sync.error && sync.data ? (
         <div style={{ marginBottom: tokens.space.md }}>
           <ErrorState error={sync.error} onRetry={sync.reload} title="刷新失败，以下为上一次成功的数据" />
@@ -208,6 +191,6 @@ export function BalanceSyncSection({ upstreamId, showDrift = true }: BalanceSync
           ) : null}
         </>
       ) : null}
-    </div>
+    </Panel>
   );
 }

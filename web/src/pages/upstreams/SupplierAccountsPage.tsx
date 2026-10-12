@@ -180,9 +180,8 @@ const SUBSCRIPTION_COLUMNS: ColumnsType<SupplierSubscription> = [
               ? '算不出剩余占比（总额或已用缺失，或总额为 0）—— 不画一根 0% 的假条。'
               : `剩余占总额 ${Math.round(ratio * 100)}%（总额 ${formatCents(total)}）`
           }
-        >
-          <BalanceText value={remaining} />
-        </RemainingBar>
+          value={<BalanceText value={remaining} />}
+        />
       );
     },
   },

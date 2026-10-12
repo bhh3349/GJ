@@ -72,13 +72,18 @@ export function BalanceDriftPanel({ drift, upstreams }: BalanceDriftPanelProps) 
     {
       title: '上游',
       dataIndex: 'upstreamId',
+      width: 170,
+      ellipsis: true,
       render: (upstreamId: string) => <Text style={{ fontSize: 13 }}>{nameOf(upstreamId)}</Text>,
     },
     {
+      // 两个 ISO 时间串并排是这一行最宽的内容；不声明宽度时它会吃掉整行剩余宽度，
+      // 把左边的「提示」标签挤到换行。声明后窄屏走横向滚动。
       title: '判定窗口',
       key: 'window',
+      width: 330,
       render: (_: unknown, row) => (
-        <Text type="secondary" style={{ fontSize: 12 }}>
+        <Text type="secondary" style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums' }}>
           {formatIso(row.from)} → {formatIso(row.to)}
         </Text>
       ),
@@ -133,6 +138,8 @@ export function BalanceDriftPanel({ drift, upstreams }: BalanceDriftPanelProps) 
         columns={columns}
         dataSource={drift.alerts}
         pagination={false}
+        tableLayout="fixed"
+        scroll={{ x: 650 }}
         locale={{
           emptyText: (
             <Empty

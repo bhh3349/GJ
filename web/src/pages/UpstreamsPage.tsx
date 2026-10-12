@@ -220,10 +220,17 @@ export default function UpstreamsPage() {
       ),
     },
     {
+      // Base URL 是这一行唯一"能吃剩余宽度"的列，但必须给它一个**下限**：
+      // 不声明宽度时窄屏下它会被其它列挤到几十像素，URL 从 host 中间断开。
       title: 'Base URL',
       dataIndex: 'baseUrl',
+      width: 240,
       render: (value: string) => (
-        <Text style={{ fontFamily: tokens.font.mono, fontSize: 12 }} copyable={{ text: value }}>
+        <Text
+          style={{ fontFamily: tokens.font.mono, fontSize: 12 }}
+          ellipsis={{ tooltip: value }}
+          copyable={{ text: value }}
+        >
           {value}
         </Text>
       ),
@@ -571,7 +578,7 @@ export default function UpstreamsPage() {
           columns={columns}
           dataSource={list.data?.items ?? []}
           loading={list.refreshing}
-          scroll={{ x: 1340 }}
+          scroll={{ x: 1430 }}
           pagination={{
             current: page,
             pageSize,

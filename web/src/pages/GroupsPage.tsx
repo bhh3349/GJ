@@ -299,7 +299,7 @@ export default function GroupsPage() {
           columns={columns}
           dataSource={list.data?.items ?? []}
           loading={list.refreshing}
-          scroll={{ x: 1200 }}
+          scroll={{ x: 1220 }}
           pagination={{
             current: page,
             pageSize,

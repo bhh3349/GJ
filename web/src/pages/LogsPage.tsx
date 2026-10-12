@@ -292,10 +292,13 @@ export default function LogsPage() {
       ),
     },
     {
+      // 审计表的 id 是等长不透明串，给它一个宽度 + 省略号：不声明宽度时 auto 布局会把
+      // 整行剩余宽度全给它，目标列变成一条长得没意义的空白。
       title: '目标',
       key: 'target',
+      width: 300,
       render: (_: unknown, row) => (
-        <Text style={{ fontSize: 12 }}>
+        <Text style={{ fontSize: 12 }} ellipsis={{ tooltip: `${row.targetType} ${row.targetId}` }}>
           {row.targetType}
           <Text type="secondary" style={{ fontFamily: tokens.font.mono, fontSize: 11 }}>
             {' '}
@@ -477,7 +480,7 @@ export default function LogsPage() {
                     columns={callColumns}
                     dataSource={logs.data?.items ?? []}
                     loading={logs.refreshing}
-                    scroll={{ x: 1240 }}
+                    scroll={{ x: 1180 }}
                     pagination={{
                       current: page,
                       pageSize,
@@ -524,7 +527,7 @@ export default function LogsPage() {
                     columns={auditColumns}
                     dataSource={audit.data?.items ?? []}
                     loading={audit.refreshing}
-                    scroll={{ x: 900 }}
+                    scroll={{ x: 1080 }}
                     pagination={{
                       current: auditPage,
                       pageSize: PAGE_SIZE_DEFAULT,

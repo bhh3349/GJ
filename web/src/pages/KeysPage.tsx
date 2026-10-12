@@ -265,11 +265,17 @@ export default function KeysPage() {
 
   const columns: ColumnsType<UpstreamKey> = [
     {
+      // 唯一"吃剩余宽度"的列：给它一个下限（220），scroll.x 按下限算，
+      // 否则窄屏时它会被自己声明的其它列挤到只剩几十像素。
       title: '标签 / Key',
       dataIndex: 'label',
+      width: 220,
+      ellipsis: true,
       render: (_: string, row) => (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <Text style={{ fontSize: 13 }}>{row.label || '（无标签）'}</Text>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+          <Text style={{ fontSize: 13 }} ellipsis={{ tooltip: row.label || '（无标签）' }}>
+            {row.label || '（无标签）'}
+          </Text>
           <Text type="secondary" style={{ fontFamily: tokens.font.mono, fontSize: 12 }}>
             {row.maskedKey}
           </Text>
@@ -642,7 +648,7 @@ export default function KeysPage() {
           onChange: (keys) => setSelectedIds(keys as string[]),
           getCheckboxProps: (row) => ({ disabled: Boolean(row.deletedAt) }),
         }}
-        scroll={{ x: 1200 }}
+        scroll={{ x: 1400 }}
         pagination={{
           current: page,
           pageSize,

@@ -16,6 +16,12 @@
   --warning: #fbbf24;
   --error: #f87171;
   --radius-md: 10px;
+  /* 间距档位（与 theme/tokens.ts 的 space 同一套值，两边改一处就要改另一处）。 */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
   --motion-base: 200ms;
   --motion-easing: cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -87,6 +93,60 @@ body {
   50% {
     opacity: 0.15;
   }
+}
+
+/*
+ * 页面级栅格（2026-10-12 排版巡检收口）。
+ *
+ * 为什么放 CSS 而不是各页内联 style：内联写法在站内被复制了 19 份，每份的 gap / minmax
+ * 都略有出入，于是"同一个系统的同一类区块"在不同页宽度行为不一致，改一处规范要翻 19 个文件。
+ * 收在这里之后，间距与断点只有一个事实源；`var(--*)` 与 theme/tokens.ts 同源。
+ */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-md);
+  margin-bottom: var(--space-lg);
+}
+
+/* 三块并排；窄于 ~900px 时自动堆叠，不横向溢出。 */
+.panel-grid-3 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--space-md);
+  margin-bottom: var(--space-lg);
+}
+
+/* 主区块（趋势图）吃剩余宽度，副区块（明细表）固定一档。 */
+.panel-grid-wide {
+  display: grid;
+  grid-template-columns: minmax(0, 2.2fr) minmax(300px, 1fr);
+  gap: var(--space-md);
+  margin-bottom: var(--space-lg);
+}
+
+/* 余额与调用侧并列：两等分，不再独占整排。 */
+.panel-grid-balance {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--space-md);
+  margin-bottom: var(--space-lg);
+}
+
+/* 单列堆叠的断点：窄屏（含折叠侧栏 + 小窗）下不硬挤两列。 */
+@media (max-width: 1180px) {
+  .panel-grid-wide {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/*
+ * 表格里的长文本一律**收尾**而不是换行撑高。
+ * AntD 的单元格默认允许换行，等宽 id / 掩码这类内容在窄列里会逐字折断，
+ * 一行行读下来就是 Bo 截图里那种"文字缩在小空间"的观感。
+ */
+.ant-table-cell .ant-typography {
+  word-break: keep-all;
 }
 
 :focus-visible {

@@ -18,6 +18,19 @@
  * 表头那条**到期时间轴**是同一批数据的另一个切面：按天堆柱，点一根就把下面筛成那天到期的
  * 那些。判据与柱上的计数是**同一次日期归一**（本地日），所以"柱上写 3、筛出 3 行"必然一致；
  * 没有 `end_at` 的行不上轴、也不属于任何一天（把「不知道」画成一个确定的点是造假）。
+ *
+ * ## 排版（Bo 2026-10-12 指出的缺陷，这一节是修它的依据）
+ *
+ * 旧版有两个都指向同一处的排版错误，且都是**实现缺陷**，不是数据问题：
+ *
+ * 1. `caption={…}` 被写进了 `RemainingBar` 的**子节点位置**而不是属性位置 —— React 于是把
+ *    字面量 `caption=` 当文本渲染出来，屏幕上出现「caption=总额 ¥29.90 ·」这种开发术语串。
+ *    全站同类问题已用脚本扫过（`web-layout-parity.spec.ts` 第 1 条把它钉成防回退断言）。
+ * 2. **只有「套餐」一列没给宽度**。AntD 默认 `tableLayout: auto` 会把剩余宽度全给了它，
+ *    于是左边一大片空白、右边三列被挤到逐字换行。现在**每一列都给宽度 + `tableLayout: fixed`**：
+ *    格子按声明的宽度分配，放不下由 `ellipsis` 收尾，不再出现"一列独占空间、其余列挤成面条"。
+ *
+ * 宽度总和与 `scroll.x` 一致（见 `COLUMN_WIDTH_SUM`），窄屏走横向滚动而不是压缩列。
  */
 import { Alert, Empty, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
@@ -42,6 +55,28 @@ const { Text } = Typography;
  * `Cents` 后缀即证据）—— 站内曾按「1 元 = 500000 quota」折元渲染，**是错误推断，已撤**：
  * 这一列只显示 Token 计数，不做任何折元换算。
  */
+
+/** 每列都声明宽度（`tableLayout: fixed` 的前提）；总数即 `scroll.x`。 */
+const COLUMN_WIDTHS = {
+  account: 172,
+  plan: 186,
+  remaining: 176,
+  tokens: 208,
+  expiry: 96,
+  renew: 92,
+  key: 156,
+} as const;
+
+const COLUMN_WIDTH_SUM = Object.values(COLUMN_WIDTHS).reduce((sum, value) => sum + value, 0);
+
+/** 单行省略：这一张表的原则是「放不下就收尾」，不是「放不下就换行撑高」。 */
+const oneLine: React.CSSProperties = {
+  display: 'block',
+  minWidth: 0,
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  whiteSpace: 'nowrap',
+};
 
 export interface SupplierSubscriptionsTableProps {
   upstreamId: string;
@@ -129,39 +164,56 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
         </Tooltip>
       ),
       key: 'account',
-      width: 168,
+      width: COLUMN_WIDTHS.account,
       onCell: (_row, index) => ({ rowSpan: spans[index ?? 0] ?? 1 }),
-      render: (_: unknown, row) => (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <Text style={{ fontFamily: tokens.font.mono, fontSize: 12 }}>
-            {identifierOf(row.accountId) ?? row.accountIdentifier}
-          </Text>
-          <Text type="secondary" style={{ fontFamily: tokens.font.mono, fontSize: 10 }}>
-            {row.accountId}
-          </Text>
-        </div>
-      ),
+      render: (_: unknown, row) => {
+        const identifier = identifierOf(row.accountId) ?? row.accountIdentifier;
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+            <Text style={{ ...oneLine, fontFamily: tokens.font.mono, fontSize: 12 }} title={identifier}>
+              {identifier}
+            </Text>
+            <Text
+              type="secondary"
+              style={{ ...oneLine, fontFamily: tokens.font.mono, fontSize: 10 }}
+              title={row.accountId}
+            >
+              {row.accountId}
+            </Text>
+          </div>
+        );
+      },
     },
     {
       title: '套餐',
       key: 'plan',
-      render: (_: unknown, row) => (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <Text style={{ fontSize: 12 }}>{row.planTitle ?? row.planSlug ?? '（上游未给套餐名）'}</Text>
-          <Text type="secondary" style={{ fontFamily: tokens.font.mono, fontSize: 11 }}>
-            {row.subNo}
-          </Text>
-        </div>
-      ),
+      width: COLUMN_WIDTHS.plan,
+      render: (_: unknown, row) => {
+        const plan = row.planTitle ?? row.planSlug ?? '（上游未给套餐名）';
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
+            <Text style={oneLine} title={plan}>
+              {plan}
+            </Text>
+            <Text
+              type="secondary"
+              style={{ ...oneLine, fontFamily: tokens.font.mono, fontSize: 11 }}
+              title={row.subNo}
+            >
+              {row.subNo}
+            </Text>
+          </div>
+        );
+      },
     },
     {
       title: (
-        <Tooltip title="套餐剩余 = 总额 - 已用；任一端缺失就是「未知」。这不是账号 key 的余额，也不计进任何合计。">
+        <Tooltip title="套餐剩余 = 总额 − 已用；任一端缺失就是「未知」。这不是账号 key 的余额，也不计进任何合计。">
           <span>套餐剩余</span>
         </Tooltip>
       ),
       key: 'remaining',
-      width: 140,
+      width: COLUMN_WIDTHS.remaining,
       align: 'right',
       render: (_: unknown, row) => {
         const total = row.amountTotalCents;
@@ -174,23 +226,22 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
             hint={
               ratio === null
                 ? '算不出剩余占比（总额或已用缺失，或总额为 0）—— 不画一根 0% 的假条。'
-                : `剩余占总额 ${Math.round(ratio * 100)}%（总额 ${formatCents(total)}）`
+                : `剩余占总额 ${Math.round(ratio * 100)}%`
             }
-          >
-            <BalanceText value={remaining} />
-            caption={`总额 ${formatCents(total)} · 已用 ${formatCents(used)}`}
-          </RemainingBar>
+            value={<BalanceText value={remaining} />}
+            caption={`总 ${formatCents(total)} · 已用 ${formatCents(used)}`}
+          />
         );
       },
     },
     {
       title: (
-        <Tooltip title="套餐赠送的基础额度剩余（basic_token_total - basic_token_used），单位是 Token 个数 —— 调用基础模型时扣减，1M = 100 万 Token。它不是钱，因此不按钱渲染、不进任何金额合计；任一端缺失即「未知」。这不是账号 key 的余额。">
+        <Tooltip title="套餐赠送的基础额度剩余（basic_token_total − basic_token_used），单位是 Token 个数 —— 调用基础模型时扣减，1M = 100 万 Token。它不是钱，因此不按钱渲染、不进任何金额合计；任一端缺失即「未知」。这不是账号 key 的余额。">
           <span>基础额度（Token）</span>
         </Tooltip>
       ),
       key: 'tokens',
-      width: 158,
+      width: COLUMN_WIDTHS.tokens,
       align: 'right',
       render: (_: unknown, row) => {
         // 原值即 Token 计数，直接加减，不做任何折元换算。
@@ -206,28 +257,29 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
                 ? '算不出剩余占比（Token 数缺失或总额为 0）—— 不画一根 0% 的假条。'
                 : `剩余占总额 ${Math.round(ratio * 100)}%（总额 ${formatCount(total)} Token，已用 ${formatCount(used)} Token）`
             }
-          >
-            {remaining === null ? (
-              <Text type="secondary" italic>
-                未知
-              </Text>
-            ) : (
-              <Text strong style={{ fontVariantNumeric: 'tabular-nums' }}>
-                {formatTokens(remaining)}
-              </Text>
-            )}
-            caption={total === null ? null : `总额 ${formatTokens(total)} · 已用 ${formatTokens(used)}`}
-          </RemainingBar>
+            value={
+              remaining === null ? (
+                <Text type="secondary" italic>
+                  未知
+                </Text>
+              ) : (
+                <Text strong style={{ fontVariantNumeric: 'tabular-nums' }}>
+                  {formatTokens(remaining)}
+                </Text>
+              )
+            }
+            caption={total === null ? null : `总 ${formatTokens(total)} · 已用 ${formatTokens(used)}`}
+          />
         );
       },
     },
     {
       title: '到期',
       dataIndex: 'endAt',
-      width: 120,
+      width: COLUMN_WIDTHS.expiry,
       render: (value: string | null) => (
         <Tooltip title={value ? formatIso(value) : '上游未给到期时间 —— 不按「永久」渲染，也不按「已过期」渲染。'}>
-          <Text type="secondary" style={{ fontSize: 12 }}>
+          <Text type="secondary" style={{ ...oneLine, fontSize: 12 }}>
             {value ? formatRelative(value) : '未提供'}
           </Text>
         </Tooltip>
@@ -240,10 +292,10 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
         </Tooltip>
       ),
       dataIndex: 'autoRenew',
-      width: 100,
+      width: COLUMN_WIDTHS.renew,
       render: (value: boolean | null) =>
         value === null ? (
-          <Text type="secondary" style={{ fontSize: 12 }}>
+          <Text type="secondary" style={{ ...oneLine, fontSize: 12 }}>
             未提供
           </Text>
         ) : (
@@ -252,6 +304,10 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
             style={{
               marginInlineEnd: 0,
               fontSize: 11,
+              maxWidth: '100%',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
               background: value ? tokens.tint.info : tokens.tint.neutral,
               color: value ? tokens.color.info : tokens.color.textSecondary,
             }}
@@ -267,18 +323,33 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
         </Tooltip>
       ),
       dataIndex: 'keyMasked',
-      width: 150,
+      key: 'keyMasked',
+      width: COLUMN_WIDTHS.key,
       render: (value: string | null, row) => (
-        <Space size={tokens.space.xs} align="center">
-          <Text style={{ fontFamily: tokens.font.mono, fontSize: 11 }}>{value ?? '—'}</Text>
+        <div style={{ display: 'flex', alignItems: 'center', gap: tokens.space.xs, minWidth: 0 }}>
+          <Text
+            style={{ ...oneLine, flex: '1 1 auto', fontFamily: tokens.font.mono, fontSize: 11 }}
+            {...(value ? { title: value } : {})}
+          >
+            {value ?? '—'}
+          </Text>
           {row.hasKey ? (
             <Tooltip title="上游表示这个套餐带 key。它只以掩码存在 —— 建行等于造一把不可用凭据，所以不进池。">
-              <Tag bordered={false} style={{ marginInlineEnd: 0, fontSize: 10, background: tokens.tint.neutral, color: tokens.color.textSecondary }}>
+              <Tag
+                bordered={false}
+                style={{
+                  marginInlineEnd: 0,
+                  flex: 'none',
+                  fontSize: 10,
+                  background: tokens.tint.neutral,
+                  color: tokens.color.textSecondary,
+                }}
+              >
                 仅掩码
               </Tag>
             </Tooltip>
           ) : null}
-        </Space>
+        </div>
       ),
     },
   ];
@@ -346,7 +417,8 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
           dataSource={grouped}
           loading={ledger.refreshing}
           pagination={false}
-          scroll={{ x: 1080 }}
+          tableLayout="fixed"
+          scroll={{ x: COLUMN_WIDTH_SUM }}
           locale={{
             emptyText: (
               <Empty

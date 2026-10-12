@@ -32,6 +32,13 @@ import type {
   ModelProbeRequest,
   ModelProbeResult,
   ModelProfile,
+  ObservabilityErrorEvent,
+  ObservabilityErrorQuery,
+  ObservabilityHealth,
+  ObservabilityHealthSnapshot,
+  ObservabilityPaged,
+  ObservabilitySnapshotQuery,
+  ObservabilityWindow,
   Paged,
   SessionInfo,
   StatsOverview,
@@ -182,6 +189,30 @@ export const statsApi = {
    */
   balanceSync: (query: BalanceSyncQuery = {}) =>
     api.get<BalanceSyncStatus>('/stats/balance/sync', { query: q(query) }),
+};
+
+// ── §12 运维观测（只读） ────────────────────────────────────────────────────
+//
+// 这一组是**只读**端点（契约 §12.3 末行：全部端点无副作用、不写审计），所以仪表盘
+// 可以直接轮询它们。字段名逐字按 §12.2 的响应体建模，本层不做改名、不做默认值填充。
+
+export const observabilityApi = {
+  /** §12.2 健康指标（实时算，不读快照表）。`window` 缺省由后端定为 `5m`。 */
+  health: (window?: ObservabilityWindow) =>
+    api.get<ObservabilityHealth>('/observability/health', {
+      // exactOptionalPropertyTypes：不显式写 `query: undefined`，没传窗口就让后端定。
+      ...(window ? { query: { window } } : {}),
+    }),
+  /** §12.3 历史快照，`ts DESC, id DESC`；默认最近 6h。 */
+  snapshots: (query: ObservabilitySnapshotQuery = {}) =>
+    api.get<ObservabilityPaged<ObservabilityHealthSnapshot>>('/observability/health/snapshots', {
+      query: q(query),
+    }),
+  /** §12.3 错误事件查询，`ts DESC, id DESC`；默认最近 1h。 */
+  errors: (query: ObservabilityErrorQuery = {}) =>
+    api.get<ObservabilityPaged<ObservabilityErrorEvent>>('/observability/errors', {
+      query: q(query),
+    }),
 };
 
 // ── §15 供应商账号面（TierFlow） ───────────────────────────────────────────

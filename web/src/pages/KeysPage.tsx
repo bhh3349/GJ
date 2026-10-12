@@ -42,6 +42,7 @@ import {
 } from '@/api/types';
 import { BalanceHint } from '@/components/BalanceHint';
 import { BalanceText } from '@/components/BalanceText';
+import { balanceReadiness } from '@/utils/balanceReadiness';
 import { HealthTag, failureReasonLabel } from '@/components/HealthTag';
 import { confirmManualRefresh } from '@/components/ManualRefreshConfirm';
 import { PageHeader } from '@/components/PageHeader';
@@ -95,6 +96,17 @@ export default function KeysPage() {
   const upstreamName = useMemo(() => {
     const map = new Map<string, string>();
     for (const item of upstreams.data?.items ?? []) map.set(item.id, item.name);
+    return map;
+  }, [upstreams.data]);
+
+  /**
+   * 每把 key 的上游现在能不能查余额。单 key「查余额」在后端无查询方式时是当场 422 拒绝
+   * （`assertQueryable`），点了必然报错 —— 所以这里先判一次，把原因说清楚再决定发不发。
+   * 上游列表还没到手时判为"不知道"，此时**照常发起**：不拿一个未取到的观测去禁掉用户的动作。
+   */
+  const readinessByUpstream = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof balanceReadiness>>();
+    for (const item of upstreams.data?.items ?? []) map.set(item.id, balanceReadiness(item));
     return map;
   }, [upstreams.data]);
 
@@ -164,6 +176,11 @@ export default function KeysPage() {
   };
 
   const refreshOne = async (row: UpstreamKey) => {
+    const ready = readinessByUpstream.get(row.upstreamId);
+    if (ready && !ready.queryable) {
+      message.warning(ready.reason ?? '这把 key 所在的上游现在查不了余额');
+      return;
+    }
     const result = await run(
       `refresh:${row.id}`,
       () => keysApi.refreshBalance(row.id),

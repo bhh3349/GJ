@@ -14,16 +14,21 @@
  *    剩余额度由 `(amountTotal - amountUsed)` 得来，**任一端为 null 就是"未知"而不是 0**（§0.2）。
  * 4. **不跨页合并**。分组天然要求同一账号的行在同一页，而 `pageSize` 上限 200 ⇒ 这里
  *    **只取一页并如实说出被截断**，不画一个会把同一账号劈成两半的「下一页」。
+ *
+ * 表头那条**到期时间轴**是同一批数据的另一个切面：按天堆柱，点一根就把下面筛成那天到期的
+ * 那些。判据与柱上的计数是**同一次日期归一**（本地日），所以"柱上写 3、筛出 3 行"必然一致；
+ * 没有 `end_at` 的行不上轴、也不属于任何一天（把「不知道」画成一个确定的点是造假）。
  */
 import { Alert, Empty, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 
 import { supplierAccountsApi } from '@/api/endpoints';
 import { useResource } from '@/api/hooks';
 import { PAGE_SIZE_MAX, type SupplierSubscriptionRow } from '@/api/types';
 import { BalanceText } from '@/components/BalanceText';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
+import { SubscriptionExpiryTimeline } from '@/pages/upstreams/SubscriptionExpiryTimeline';
 import { tokens } from '@/theme/tokens';
 import { formatCents, formatCount, formatIso, formatRelative } from '@/utils/format';
 
@@ -52,11 +57,35 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
     [upstreamId],
   );
 
+  /** 时间轴点中的那一天（`YYYY-MM-DD`，本地日）。`null` = 不按天筛。 */
+  const [day, setDay] = useState<string | null>(null);
+
+  /** 台账里的全部行（服务端这一页）。 */
+  const allRows = useMemo(() => ledger.data?.items ?? [], [ledger.data]);
+
+  /**
+   * 按天筛后的行。判据与时间轴**同一天**（本地日），所以"柱子上写 3"与"筛出来 3 行"必然一致。
+   * 上游没给 `end_at` 的行**不进任何一天**，因此按天筛时它们不出现 —— 这是对的：
+   * 没有时刻的行不属于任何一天。
+   */
+  const rows = useMemo(() => {
+    if (day === null) return allRows;
+    return allRows.filter((row) => {
+      if (!row.endAt) return false;
+      const at = new Date(row.endAt);
+      if (Number.isNaN(at.getTime())) return false;
+      const key = `${at.getFullYear()}-${String(at.getMonth() + 1).padStart(2, '0')}-${String(
+        at.getDate(),
+      ).padStart(2, '0')}`;
+      return key === day;
+    });
+  }, [allRows, day]);
+
   /** 按账号分组：组序 = 首条出现位置（即该账号最早到期的套餐在前），组内保持服务端 `end_at ASC`。 */
   const grouped = useMemo(() => {
     const order: string[] = [];
     const buckets = new Map<string, SupplierSubscriptionRow[]>();
-    for (const row of ledger.data?.items ?? []) {
+    for (const row of rows) {
       const bucket = buckets.get(row.accountId);
       if (bucket) {
         bucket.push(row);
@@ -71,7 +100,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
       if (bucket) flat.push(...bucket);
     }
     return flat;
-  }, [ledger.data]);
+  }, [rows]);
 
   /** 每个位置的 `rowSpan`：组内第一条拿组大小，其余拿 0（合并成一格）。 */
   const spans = useMemo(() => {
@@ -236,7 +265,8 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
   ];
 
   const accountCount = new Set(grouped.map((row) => row.accountId)).size;
-  const truncated = (ledger.data?.total ?? 0) > grouped.length;
+  /** 截断判的是**服务端那一页**，与按天筛无关 —— 筛完变少不代表台账被截断。 */
+  const truncated = (ledger.data?.total ?? 0) > allRows.length;
 
   return (
     <div
@@ -251,7 +281,9 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
         <Text style={{ fontSize: 13, fontWeight: 600 }}>套餐台账（按账号分组）</Text>
         {ledger.data ? (
           <Text type="secondary" style={{ fontSize: 12 }}>
-            {`${formatCount(accountCount)} 个账号 · ${formatCount(grouped.length)} 条套餐`}
+            {day === null
+              ? `${formatCount(accountCount)} 个账号 · ${formatCount(grouped.length)} 条套餐`
+              : `已按 ${day} 到期筛：${formatCount(accountCount)} 个账号 · ${formatCount(grouped.length)} 条套餐`}
           </Text>
         ) : null}
       </Space>
@@ -277,6 +309,12 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
         </div>
       ) : null}
 
+      {ledger.data ? (
+        <div style={{ marginBottom: tokens.space.md }}>
+          <SubscriptionExpiryTimeline rows={allRows} selectedDay={day} onSelectDay={setDay} />
+        </div>
+      ) : null}
+
       {ledger.loading ? (
         <LoadingState tip="正在加载套餐台账…" minHeight={240} />
       ) : ledger.error && !ledger.data ? (
@@ -295,7 +333,9 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
                 description={
-                  <Text type="secondary">还没有套餐台账</Text>
+                  <Text type="secondary">
+                    {day === null ? '还没有套餐台账' : `${day} 没有到期的套餐`}
+                  </Text>
                 }
               />
             ),

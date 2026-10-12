@@ -464,7 +464,7 @@ export default function ModelsPage() {
                   <Text type="secondary" style={{ fontSize: 11 }}>
                     {upstreamName.get(model.upstreamId) ?? model.upstreamId} · 同步于{' '}
                     {formatRelative(model.lastSyncedAt)}
-                    {model.lastProbedAt === null ? '' : ` · 探测于 ${formatRelative(model.lastProbedAt)}`}
+                    {model.lastProbedAt == null ? '' : ` · 探测于 ${formatRelative(model.lastProbedAt)}`}
                   </Text>
                 </div>
               </Card>

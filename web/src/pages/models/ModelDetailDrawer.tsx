@@ -254,7 +254,7 @@ export function ModelDetailDrawer({
               上游 {model.upstreamId}
               {` · 最近同步 ${formatIso(model.lastSyncedAt)}`}
               {` · 更新 ${formatIso(model.updatedAt)}`}
-              {model.lastProbedAt === null ? ' · 从未探测' : ` · 最近探测 ${formatIso(model.lastProbedAt)}`}
+              {model.lastProbedAt == null ? ' · 从未探测' : ` · 最近探测 ${formatIso(model.lastProbedAt)}`}
             </Text>
 
             <div style={{ marginTop: tokens.space.md }}>

@@ -158,7 +158,7 @@ export function ModelProbePanel({ model, onSaved }: ModelProbePanelProps) {
       </div>
 
       <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
-        {model.lastProbedAt === null ? '从未探测过' : `最近探测 ${formatIso(model.lastProbedAt)}`}
+        {model.lastProbedAt == null ? '从未探测过' : `最近探测 ${formatIso(model.lastProbedAt)}`}
         {result === null ? '' : ` · 本次 ${formatIso(result.probedAt)}（${result.requests} 次上游请求）`}
       </Text>
 

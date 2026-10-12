@@ -35,6 +35,26 @@ export function formatCount(value: number | null | undefined): string {
   return value.toLocaleString('zh-CN');
 }
 
+/**
+ * Token 计数（上游 `basic_token_*` 那一套）。
+ *
+ * 口径由 Bo 2026-10-12 定死：那是**套餐赠送的剩余 Token**，调用基础模型时扣减，
+ * 1 个就是 1 个 Token，**不是钱、不折元**（曾按 1 元 = 500000 quota 折过，已撤）。
+ * 中文量级用「万」做主单位；到 1000 万以上再附一个 `M` —— 上游手册和上游自己的页面
+ * 都写 `8.0M` 这种形式，读的人要能和屏幕上那个数对上，所以两个单位同时给。
+ */
+export function formatTokens(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '—';
+  const sign = value < 0 ? '\u2212' : '';
+  const abs = Math.abs(value);
+  if (abs < 10_000) return `${sign}${abs.toLocaleString('zh-CN')}`;
+  if (abs < 10_000_000) {
+    return `${sign}${(abs / 10_000).toLocaleString('zh-CN', { maximumFractionDigits: 1 })} 万`;
+  }
+  const wan = Math.round(abs / 10_000).toLocaleString('zh-CN');
+  return `${sign}${wan} 万（${(abs / 1_000_000).toFixed(1)}M）`;
+}
+
 /** 紧凑计数：列表里省宽度，如 `154.0k`。 */
 export function formatCompact(value: number | null | undefined): string {
   if (value === null || value === undefined) return '—';

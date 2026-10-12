@@ -1040,7 +1040,12 @@ export interface SupplierSubscription {
   amountTotalCents: Cents | null;
   amountUsedCents: Cents | null;
   paidCents: Cents | null;
+  /**
+   * 套餐赠送的基础额度总额，**单位是 Token 个数**（Bo 2026-10-12 定死：调用基础模型时扣减，
+   * 1M = 100 万 Token）。契约 §15.1 按原值透传、无 `Cents` 后缀即证据 —— **不是钱，不得折元**。
+   */
   basicTokenTotal: number | null;
+  /** 同上口径：已消耗的 Token 个数。 */
   basicTokenUsed: number | null;
   status: string | null;
   source: string | null;

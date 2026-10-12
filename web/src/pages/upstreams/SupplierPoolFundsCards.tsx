@@ -9,9 +9,9 @@
  * - **未知不补 0**：余额未知的账号不计入合计，但必须数出来（「m 个未知不计」）。
  * - **只给全池数**：服务端没给池级口径、页内又没取回全池时**不显示合计** ——
  *   一个"第 1 页的合计"比"没有合计"更坏，它长得像池子的钱。
- * - **基础额度以原值计数为主值**：上游给的是 `basic_token_*` 计数，它**是不是**可折元的 quota
- *   站内还没有一锤实测（套餐台账那一列暂按 1 元 = 500000 折元渲染，是**推断**不是结论）。
- *   所以这里主值给原值、副行把折元写成**带前提的参考值**（「若按…」），不冒充结论。
+ * - **基础额度是 Token，不是钱**：Bo 2026-10-12 定死口径 —— `basic_token_*` 是**套餐赠送的
+ *   剩余 Token**，调用基础模型时扣减，1 个 = 1 个 Token。所以这一格**只给 Token 计数
+ *   （「万」为主单位）、绝不折元**；三个池子也因此**绝不可相加**（两个是钱、一个是量）。
  */
 import { Tooltip, Typography } from 'antd';
 import type { ReactNode } from 'react';
@@ -19,18 +19,15 @@ import type { ReactNode } from 'react';
 import type { Upstream } from '@/api/types';
 import { BalanceText } from '@/components/BalanceText';
 import { tokens } from '@/theme/tokens';
-import { formatCents, formatCount } from '@/utils/format';
+import { formatCount, formatTokens } from '@/utils/format';
 import type { PoolFunds } from '@/utils/poolFunds';
 import { LOW_BALANCE_CENTS } from '@/utils/supplierHealth';
 
 const { Text } = Typography;
 
-/** 与套餐台账那一列同一换算比（1 元 = 500000 quota）；这里只用于「若按此口径」的参考值。 */
-const QUOTA_PER_UNIT = 500_000;
-
 interface PoolCardProps {
   label: string;
-  /** 量纲徽标（¥ / 计数）。让三个池子一眼看出不是一个单位。 */
+  /** 量纲徽标（¥ / Token）。让三个池子一眼看出不是一个单位。 */
   unit: string;
   value: ReactNode;
   /** 大字下方的口径说明。 */
@@ -114,13 +111,11 @@ export function SupplierPoolFundsCards({ funds, upstream }: SupplierPoolFundsCar
   const basicTotal = funds.complete ? funds.basic.total : null;
   const partialNote = '合计要取回全池才给数';
 
-  const basicAsMoney = basicTotal === null ? null : basicTotal / QUOTA_PER_UNIT;
-
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: tokens.space.sm, flexWrap: 'wrap' }}>
         <Text style={{ fontSize: 13, fontWeight: 600 }}>账号池三个资金池</Text>
-        <Tooltip title="钱包是上游账号里的钱；高级额度是套餐里的钱；基础额度是套餐赠送的计数。三笔各自花各自的，网关选用 key 时看的也不是这三个数之和。">
+        <Tooltip title="钱包是上游账号里的钱；高级额度是套餐里的钱；基础额度是套餐赠送的剩余 Token（不是钱）。三笔各自花各自的、两个量纲，网关选用 key 时看的也不是这三个数之和。">
           <Text type="secondary" style={{ fontSize: 11 }}>
             互不相通 · 不可相加
           </Text>
@@ -170,27 +165,23 @@ export function SupplierPoolFundsCards({ funds, upstream }: SupplierPoolFundsCar
         <PoolCard
           size="sm"
           label="基础额度"
-          unit="计数"
+          unit="Token"
           value={
             basicTotal === null ? (
               <Text type="secondary" italic style={{ fontSize: 17 }}>
                 未知
               </Text>
             ) : (
-              formatCount(basicTotal)
+              formatTokens(basicTotal)
             )
           }
           caption={
             <>
               {`${formatCount(funds.basic.countedCount)} 条套餐计入 · ${formatCount(funds.basic.unknownCount)} 条缺额（未知，不计入）`}
-              <div>
-                {basicAsMoney === null
-                  ? '上游给的 basic_token_* 原值计数；能否折元还没有实测结论。'
-                  : `若按 1 元 = 500000 折则约 ${formatCents(Math.round(basicAsMoney * 100))} —— 这是带前提的参考值，不是结论。`}
-              </div>
+              <div>套餐赠送的剩余 Token，调用基础模型时扣减；1M = 100 万 Token，它不是钱。</div>
             </>
           }
-          hint="套餐赠送的基础额度剩余，取上游原值计数。它与上面两个池不是一个单位：能不能折元要等一次已知流量的实测（看站点两个计数器的降幅）才能定。"
+          hint="套餐赠送的基础额度剩余 = Σ(basic_token_total − basic_token_used)，单位是 Token 个数。调用基础模型时扣减；它不是钱，所以不与上面两个资金池相加。"
           pending={basicTotal === null ? partialNote : undefined}
         />
       </div>

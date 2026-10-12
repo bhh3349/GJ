@@ -31,20 +31,16 @@ import { RemainingBar } from '@/components/RemainingBar';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { SubscriptionExpiryTimeline } from '@/pages/upstreams/SubscriptionExpiryTimeline';
 import { tokens } from '@/theme/tokens';
-import { formatCents, formatCount, formatIso, formatRelative } from '@/utils/format';
+import { formatCents, formatCount, formatIso, formatRelative, formatTokens } from '@/utils/format';
 
 const { Text } = Typography;
 
 /**
- * 上游 `basic_token_*` 的单位是 **quota**（与钱包同口径：1 元 = 500000 quota）。
- * 契约 §15.1 只把 `amount_total` / `amount_used` 折成了 `…Cents`，`basic_token_*` 按原值透传
- * （字段名无 `Cents` 后缀即证据）—— 所以这一列的量纲要在这里折：quota → 分，再交给
- * `formatCents`。换算比集中在**这一处**，将来后端补 `basicTokenTotalCents` 时整块删掉即可。
+ * 上游 `basic_token_*` 的单位是 **Token**（Bo 2026-10-12 定死口径：那是套餐赠送的剩余
+ * Token，调用基础模型时扣减，1M = 100 万 Token）。契约 §15.1 按原值透传（字段名无
+ * `Cents` 后缀即证据）—— 站内曾按「1 元 = 500000 quota」折元渲染，**是错误推断，已撤**：
+ * 这一列只显示 Token 计数，不做任何折元换算。
  */
-const QUOTA_PER_UNIT = 500_000;
-function quotaToCents(quota: number | null): number | null {
-  return quota === null ? null : Math.round((quota / QUOTA_PER_UNIT) * 100);
-}
 
 export interface SupplierSubscriptionsTableProps {
   upstreamId: string;
@@ -188,32 +184,38 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
     },
     {
       title: (
-        <Tooltip title="套餐赠送的基础额度剩余（basic_token_total - basic_token_used）。这两个字段上游给的是 quota、与钱包同口径（1 元 = 500000 quota），此处按同一换算比折元渲染；任一端缺失即「未知」。这不是账号 key 的余额。">
-          <span>基础额度</span>
+        <Tooltip title="套餐赠送的基础额度剩余（basic_token_total - basic_token_used），单位是 Token 个数 —— 调用基础模型时扣减，1M = 100 万 Token。它不是钱，因此不按钱渲染、不进任何金额合计；任一端缺失即「未知」。这不是账号 key 的余额。">
+          <span>基础额度（Token）</span>
         </Tooltip>
       ),
       key: 'tokens',
       width: 158,
       align: 'right',
       render: (_: unknown, row) => {
-        const total = quotaToCents(row.basicTokenTotal);
-        const used = quotaToCents(row.basicTokenUsed);
+        // 原值即 Token 计数，直接加减，不做任何折元换算。
+        const total = row.basicTokenTotal;
+        const used = row.basicTokenUsed;
         const remaining = total === null || used === null ? null : total - used;
-        // 占比用原值算，不用折元后的数：折元只是显示，比例与单位无关，少一次四舍五入误差。
-        const rawTotal = row.basicTokenTotal;
-        const rawUsed = row.basicTokenUsed;
-        const ratio = rawTotal === null || rawUsed === null || rawTotal <= 0 ? null : (rawTotal - rawUsed) / rawTotal;
+        const ratio = total === null || used === null || total <= 0 ? null : (total - used) / total;
         return (
           <RemainingBar
             ratio={ratio}
             hint={
               ratio === null
-                ? '算不出剩余占比（原值缺失或总额为 0）—— 不画一根 0% 的假条。'
-                : `剩余占总额 ${Math.round(ratio * 100)}%（原值 ${formatCount(row.basicTokenTotal)}，已用 ${formatCount(row.basicTokenUsed)}）`
+                ? '算不出剩余占比（Token 数缺失或总额为 0）—— 不画一根 0% 的假条。'
+                : `剩余占总额 ${Math.round(ratio * 100)}%（总额 ${formatCount(total)} Token，已用 ${formatCount(used)} Token）`
             }
           >
-            <BalanceText value={remaining} />
-            caption={`总额 ${formatCents(total)} · 已用 ${formatCents(used)}`}
+            {remaining === null ? (
+              <Text type="secondary" italic>
+                未知
+              </Text>
+            ) : (
+              <Text strong style={{ fontVariantNumeric: 'tabular-nums' }}>
+                {formatTokens(remaining)}
+              </Text>
+            )}
+            caption={total === null ? null : `总额 ${formatTokens(total)} · 已用 ${formatTokens(used)}`}
           </RemainingBar>
         );
       },

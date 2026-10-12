@@ -3,12 +3,13 @@
  *
  * 三个池子来自三个不同的地方，**互不相通、不可相加**：
  *
- * 1. **钱包余额** = 各账号 `balanceCents` 之和（账号级，上游的钱包）。
- * 2. **套餐高级额度** = 各账号名下套餐 `amount_total - amount_used` 之和。
- * 3. **基础额度** = 各账号名下套餐 `basic_token_total - basic_token_used` 之和。
- *    上游给的是 `basic_token_*` 计数；它**是不是**「1 元 = 500000 quota」那一套量纲，
- *    站内还没有一锤实测（套餐台账那一列暂按 500000 折元渲染，那是**推断不是结论**），
- *    所以这一格**主值给原值 + 折元只当带前提的参考值**，等一次已知流量的实测再定。
+ * 1. **钱包余额**（¥）= 各账号 `balanceCents` 之和（账号级，上游的钱包）。
+ * 2. **套餐高级额度**（¥）= 各账号名下套餐 `amount_total - amount_used` 之和。
+ * 3. **基础额度**（Token）= 各账号名下套餐 `basic_token_total - basic_token_used` 之和。
+ *    上游给的是 `basic_token_*`，**单位是 Token**（Bo 2026-10-12 定死：套餐赠送的剩余
+ *    Token，调用基础模型时扣减，1M = 100 万 Token）。它**不是钱、不折元** —— 站内曾按
+ *    「1 元 = 500000 quota」折元渲染，那是错误推断，已整块撤掉。
+ *    所以三个池子是**两个量纲**（¥ / Token），这一点比"哪个数大"更重要。
  *
  * 三条纪律：
  * - **未知不进合计**：`balanceCents === null` 的账号不计入钱包合计，单独计数说出去（§0.2）。
@@ -22,7 +23,7 @@ import type { SupplierAccount, SupplierSubscription, Upstream } from '@/api/type
 import { LOW_BALANCE_CENTS } from '@/utils/supplierHealth';
 
 export interface PoolTotals {
-  /** 合计（分或计数）。一员都未知时为 0，但**读的人看 `unknownCount`**。 */
+  /** 合计（钱包与高级额度是分，基础额度是 Token 个数）。一员都未知时为 0，但**读的人看 `unknownCount`**。 */
   total: number;
   /** 计入合计的条目数（账号数 / 套餐条数）。 */
   countedCount: number;
@@ -54,7 +55,7 @@ function premiumRemainingCents(row: SupplierSubscription): number | null {
   return total === null || used === null ? null : total - used;
 }
 
-/** 套餐基础额度剩余（上游原值计数）：同上，任缺即 null。 */
+/** 套餐基础额度剩余（上游原值 = Token 个数，不是钱）：同上，任缺即 null。 */
 function basicRemaining(row: SupplierSubscription): number | null {
   const total = row.basicTokenTotal;
   const used = row.basicTokenUsed;

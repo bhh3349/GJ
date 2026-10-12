@@ -575,12 +575,15 @@ describe('POST /:id/login 与 /:id/test', () => {
   it('重登成功 → 200 + 最新一行，状态回 active', async () => {
     const h = await setup();
     const { id } = tierflowUpstream(h.db);
-    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-stale' });
+    // 没有会话可验活 → 直接登录（先验活那一路在下一条用例里测，两条不能混）。
+    const accountId = seedPasswordAccount(h.db, id, { session: null });
 
     const res = await post(h, `/api/supplier-accounts/${accountId}/login`);
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ id: accountId, status: 'active' });
     expect(h.upstream.count('/api/user/login')).toBe(1);
+    // 没有会话时一发探针都不发：这个端点在"无会话"形态下仍是只登一次。
+    expect(h.upstream.count('/api/user/self')).toBe(0);
     // 审计里只留结论，不留会话（§15.9 纪律 4）。
     const audits = h.db
       .prepare("SELECT action, detail, target_id FROM audit_log WHERE action = 'supplier.account.login'")
@@ -588,6 +591,56 @@ describe('POST /:id/login 与 /:id/test', () => {
     expect(audits).toHaveLength(1);
     expect(audits[0]?.target_id).toBe(accountId);
     expect(JSON.stringify(audits)).not.toContain('sess-new');
+  });
+
+  it('会话仍有效时点「重新登录」→ **零登录请求**（一次密码往返都不发）', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-live' });
+
+    const res = await post(h, `/api/supplier-accounts/${accountId}/login`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ id: accountId, status: 'active' });
+    // 验活用的就是 §15.9 自己那发探针，且只发一发。
+    expect(h.upstream.count('/api/user/self')).toBe(1);
+    expect(h.upstream.count('/api/user/login')).toBe(0);
+    // 会话没被换掉：库里那对密文原样不动（加密是随机的，相等 ⇒ 根本没写）。
+    expect(accountRow(h.db, accountId)['encrypted_session']).not.toBeNull();
+  });
+
+  it('会话过期时点「重新登录」→ 验活失败后才登一次并覆写会话', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-stale' });
+    const before = accountRow(h.db, accountId)['encrypted_session'];
+
+    let selfCalls = 0;
+    h.upstream.on('/api/user/self', () => {
+      selfCalls += 1;
+      return selfCalls === 1 ? rejected('会话失效', 401) : ok({ quota: 2168881, id: '42' });
+    });
+
+    const res = await post(h, `/api/supplier-accounts/${accountId}/login`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: 'active' });
+    expect(h.upstream.count('/api/user/login')).toBe(1);
+    // 登录成功后没有再补一发探针（只登一次、不循环）。
+    expect(selfCalls).toBe(1);
+    expect(accountRow(h.db, accountId)['encrypted_session']).not.toEqual(before);
+  });
+
+  it('验活那一发超时（非会话失效）→ 不当作换会话的理由，仍登一次', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-live' });
+    h.upstream.on('/api/user/self', () => {
+      throw new Error('探针抖动');
+    });
+
+    const res = await post(h, `/api/supplier-accounts/${accountId}/login`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ status: 'active' });
+    expect(h.upstream.count('/api/user/login')).toBe(1);
   });
 
   it('自测**永不写库**：连它顺手换回来的新会话也不落', async () => {

@@ -497,6 +497,12 @@ interface AccountOutcome {
  *
  * 与 `callWithRelogin` 分开是因为它解决的不是同一个问题：那边是"会话过了，续一下"，
  * 这边是"要么没有会话、要么操作员手工要求重来一次"。共同点是都只登一次、都不循环。
+ *
+ * **先验活、别急着换会话**：手里已有会话时先打一发 `/api/user/self` —— 它既是 §15.9 自己用的
+ * 同款探针（`refresh` 首发即它），也是这个端点唯一需要回答的问题"当前会话还活着吗"。活着就
+ * 不再用密码换一枚新的：一次登录 = 一次密码往返，是站点风控最该被珍惜的东西（"每号一次"）。
+ * 没有会话时**一发探针都不发**，直接登录。两条路都不新增任何请求次数 —— 省下的那发登录
+ * 正好抵掉多出来的那发探针。
  */
 async function loginAccount(
   ctx: SupplierOps,
@@ -509,6 +515,18 @@ async function loginAccount(
     const message = '该账号只有会话、没有存档密码，无从重登';
     updateSupplierAccount(ctx.db, cred.id, { status: 'session_expired', statusMessage: message });
     return { ok: false, relogged: false, code: 'SESSION_EXPIRED', message };
+  }
+
+  // 会话在手 → 先验活。活着就是"已登录"，不再换一枚新会话（零密码往返）。
+  const existing = sessionOf(cred);
+  if (existing !== null) {
+    const probe = await client.self(existing);
+    if (probe.ok) {
+      updateSupplierAccount(ctx.db, cred.id, { status: 'active', statusMessage: null });
+      return { ok: true, relogged: false, code: null, message: null };
+    }
+    // 非"会话失效"的失败（网络抖动 / 上游 5xx）**不当作换会话的理由**：照旧往下走登录 ——
+    // 登录是修账号 / 拿会话的动作，不该因为一发探针抖了就整行失败。
   }
 
   const res = await client.login(cred.identifier, cred.password);

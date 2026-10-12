@@ -186,7 +186,7 @@ export function SupplierPoolFundsCards({ funds, upstream }: SupplierPoolFundsCar
               <div>
                 {basicAsMoney === null
                   ? '上游给的 basic_token_* 原值计数；能否折元还没有实测结论。'
-                  : `若按 1 元 = 500000 折则约 ${formatCents(Math.round(basicAsMoney * 100))} —— 这是**带前提的参考值**，不是结论。`}
+                  : `若按 1 元 = 500000 折则约 ${formatCents(Math.round(basicAsMoney * 100))} —— 这是带前提的参考值，不是结论。`}
               </div>
             </>
           }

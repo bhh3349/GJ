@@ -27,6 +27,7 @@ import { supplierAccountsApi } from '@/api/endpoints';
 import { useResource } from '@/api/hooks';
 import { PAGE_SIZE_MAX, type SupplierSubscriptionRow } from '@/api/types';
 import { BalanceText } from '@/components/BalanceText';
+import { RemainingBar } from '@/components/RemainingBar';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { SubscriptionExpiryTimeline } from '@/pages/upstreams/SubscriptionExpiryTimeline';
 import { tokens } from '@/theme/tokens';
@@ -169,13 +170,19 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
         const total = row.amountTotalCents;
         const used = row.amountUsedCents;
         const remaining = total === null || used === null ? null : total - used;
+        const ratio = total === null || used === null || total <= 0 ? null : (total - used) / total;
         return (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, alignItems: 'flex-end' }}>
+          <RemainingBar
+            ratio={ratio}
+            hint={
+              ratio === null
+                ? '算不出剩余占比（总额或已用缺失，或总额为 0）—— 不画一根 0% 的假条。'
+                : `剩余占总额 ${Math.round(ratio * 100)}%（总额 ${formatCents(total)}）`
+            }
+          >
             <BalanceText value={remaining} />
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              {`总额 ${formatCents(total)} · 已用 ${formatCents(used)}`}
-            </Text>
-          </div>
+            caption={`总额 ${formatCents(total)} · 已用 ${formatCents(used)}`}
+          </RemainingBar>
         );
       },
     },
@@ -192,13 +199,22 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
         const total = quotaToCents(row.basicTokenTotal);
         const used = quotaToCents(row.basicTokenUsed);
         const remaining = total === null || used === null ? null : total - used;
+        // 占比用原值算，不用折元后的数：折元只是显示，比例与单位无关，少一次四舍五入误差。
+        const rawTotal = row.basicTokenTotal;
+        const rawUsed = row.basicTokenUsed;
+        const ratio = rawTotal === null || rawUsed === null || rawTotal <= 0 ? null : (rawTotal - rawUsed) / rawTotal;
         return (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, alignItems: 'flex-end' }}>
+          <RemainingBar
+            ratio={ratio}
+            hint={
+              ratio === null
+                ? '算不出剩余占比（原值缺失或总额为 0）—— 不画一根 0% 的假条。'
+                : `剩余占总额 ${Math.round(ratio * 100)}%（原值 ${formatCount(row.basicTokenTotal)}，已用 ${formatCount(row.basicTokenUsed)}）`
+            }
+          >
             <BalanceText value={remaining} />
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              {`总额 ${formatCents(total)} · 已用 ${formatCents(used)}`}
-            </Text>
-          </div>
+            caption={`总额 ${formatCents(total)} · 已用 ${formatCents(used)}`}
+          </RemainingBar>
         );
       },
     },

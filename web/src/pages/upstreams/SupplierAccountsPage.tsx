@@ -77,6 +77,7 @@ import {
   type TaskAccepted,
 } from '@/api/types';
 import { BalanceText } from '@/components/BalanceText';
+import { RemainingBar } from '@/components/RemainingBar';
 import { confirmManualRefresh } from '@/components/ManualRefreshConfirm';
 import { SupplierPoolFilters } from '@/pages/upstreams/SupplierPoolFilters';
 import { SupplierPoolFundsCards } from '@/pages/upstreams/SupplierPoolFundsCards';
@@ -88,7 +89,7 @@ import { SupplierBatchDrawer } from '@/pages/upstreams/SupplierBatchDrawer';
 import { SupplierCreateKeysModal, SupplierImportModal } from '@/pages/upstreams/SupplierModals';
 import { SupplierSubscriptionsTable } from '@/pages/upstreams/SupplierSubscriptionsTable';
 import { tokens } from '@/theme/tokens';
-import { formatCount, formatIso, formatRelative } from '@/utils/format';
+import { formatCents, formatCount, formatIso, formatRelative } from '@/utils/format';
 import {
   accountHealthOf,
   buildPoolFilters,
@@ -162,7 +163,20 @@ const SUBSCRIPTION_COLUMNS: ColumnsType<SupplierSubscription> = [
       // 两端都是服务端给的分，相减不涉及量纲换算；**任一端为 null 就是"未知"而不是 0**（§0.2）。
       const total = row.amountTotalCents;
       const used = row.amountUsedCents;
-      return <BalanceText value={total === null || used === null ? null : total - used} />;
+      const remaining = total === null || used === null ? null : total - used;
+      const ratio = total === null || used === null || total <= 0 ? null : (total - used) / total;
+      return (
+        <RemainingBar
+          ratio={ratio}
+          hint={
+            ratio === null
+              ? '算不出剩余占比（总额或已用缺失，或总额为 0）—— 不画一根 0% 的假条。'
+              : `剩余占总额 ${Math.round(ratio * 100)}%（总额 ${formatCents(total)}）`
+          }
+        >
+          <BalanceText value={remaining} />
+        </RemainingBar>
+      );
     },
   },
   {

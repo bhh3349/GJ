@@ -2,18 +2,22 @@
  * 展示层格式化。契约 §0.2 的红线在这里落地：
  * - 金额一律「分 → 元」换算后展示，**不在业务组件里做除法**。
  * - `null` 是「未知」，`0` 是「确实是 0」，两者文案不同、颜色不同，绝不合流。
+ * - 负数的符号用**真减号** U+2212（见 `formatCents`）：连字符比数字窄，等宽数字列会跳版。
  */
 import dayjs from 'dayjs';
 
 /** 金额（分）。`null` 用 `—`：适用于「上游没给」的价格、上下文档位。 */
 export function formatCents(value: number | null | undefined, currency = 'CNY'): string {
   if (value === null || value === undefined) return '—';
-  const units = value / 100;
   const symbol = currency === 'CNY' ? '¥' : `${currency} `;
-  return `${symbol}${units.toLocaleString('zh-CN', {
+  // 负数用**真减号** U+2212 而不是连字符：连字符在等宽字形里比数字窄，
+  // 一列金额里混进几个负数就跳版；减号与「+」「-」同宽，tabular-nums 才真的对齐。
+  const units = Math.abs(value) / 100;
+  const body = units.toLocaleString('zh-CN', {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
-  })}`;
+  });
+  return `${value < 0 ? '\u2212' : ''}${symbol}${body}`;
 }
 
 /**

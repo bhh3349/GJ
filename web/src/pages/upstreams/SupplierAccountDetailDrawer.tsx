@@ -40,6 +40,7 @@ import {
   type SupplierSubscription,
 } from '@/api/types';
 import { BalanceText } from '@/components/BalanceText';
+import { RemainingBar } from '@/components/RemainingBar';
 import { confirmManualRefresh } from '@/components/ManualRefreshConfirm';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { tokens } from '@/theme/tokens';
@@ -235,13 +236,23 @@ export function SupplierAccountDetailDrawer({
         const total = row.amountTotalCents;
         const used = row.amountUsedCents;
         const remaining = total === null || used === null ? null : total - used;
+        const ratio = total === null || used === null || total <= 0 ? null : (total - used) / total;
         return (
-          <Text style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums' }}>
-            {remaining === null ? '未知' : formatCents(remaining)}
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              {` / ${formatCents(total)}`}
+          <RemainingBar
+            ratio={ratio}
+            hint={
+              ratio === null
+                ? '算不出剩余占比（总额或已用缺失，或总额为 0）—— 不画一根 0% 的假条。'
+                : `剩余占总额 ${Math.round(ratio * 100)}%`
+            }
+          >
+            <Text style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums' }}>
+              {remaining === null ? '未知' : formatCents(remaining)}
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                {` / ${formatCents(total)}`}
+              </Text>
             </Text>
-          </Text>
+          </RemainingBar>
         );
       },
     },

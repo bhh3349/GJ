@@ -122,3 +122,139 @@ export function accountHealthOf(account: SupplierAccount): AccountHealth {
     hint: '能登录，余额也在阈值之上。',
   };
 }
+
+// ── 到期与筛选：与上面那一档是**两个维度**，别混 ────────────────────────────────
+//
+// `accountHealthOf` 回答「这个号现在什么状态」（一档），而「即将到期」是**时间维度**：
+// 一个余额充足的号也可能 3 天后套餐到期。两者都进「需要处理」清单，但判据各算各的 ——
+// 把到期塞进健康档会让「正常」这个标签自相矛盾。
+
+/** 相对今天还剩几天（负数 = 到期时刻已过）。时间串缺失或非法时为 `null`，**不猜 0**。 */
+export function daysUntil(iso: string | null | undefined): number | null {
+  if (!iso) return null;
+  const ts = Date.parse(iso);
+  if (!Number.isFinite(ts)) return null;
+  return Math.floor((ts - Date.now()) / 86_400_000);
+}
+
+/**
+ * 这个账号名下「即将到期（含已过期）」的套餐条数。
+ * 上游没给到期时间的套餐**不进这个计数** —— 没有时刻就没法说它快到期，
+ * 硬算会把「不知道」说成「还有 14 天」。
+ */
+export function expiringCount(account: SupplierAccount, withinDays = EXPIRING_WITHIN_DAYS): number {
+  let count = 0;
+  for (const row of account.subscriptions) {
+    const days = daysUntil(row.endAt);
+    if (days !== null && days <= withinDays) count += 1;
+  }
+  return count;
+}
+
+/** 清单里的一个筛选项：判据 + 人话 + 现在命中几个。 */
+export interface PoolFilter {
+  key: PoolFilterKey;
+  label: string;
+  count: number;
+  /** 这条为什么进清单（进悬浮说明）。 */
+  hint: string;
+  /** 严重度配色。与 `accountHealthOf` 同一套 tone，同一件事在两处不会一个红一个黄。 */
+  tone: HealthTone;
+}
+
+/**
+ * 「需要处理」的筛选项。**判定链之外的维度也在里面**（无会话 / 即将到期），
+ * 所以这里的 key 面比 `HealthKey` 宽 —— 它们是两种不同的问法。
+ */
+export type PoolFilterKey =
+  | 'login-failed'
+  | 'session-expired'
+  | 'never-checked'
+  | 'balance-unknown'
+  | 'exhausted'
+  | 'low'
+  | 'no-session'
+  | 'expiring';
+
+/** 一个账号是否命中某个筛选项。**唯一实现**：清单计数与表格筛选共用它，不会一个说 3 一个显示 2。 */
+export function matchesPoolFilter(account: SupplierAccount, key: PoolFilterKey): boolean {
+  switch (key) {
+    case 'login-failed':
+      return account.status === 'login_failed';
+    case 'session-expired':
+      return account.status === 'session_expired';
+    case 'never-checked':
+      return account.status === 'unknown';
+    case 'no-session':
+      return !account.hasSession;
+    case 'exhausted':
+      return account.balanceCents !== null && account.balanceCents < 0;
+    case 'low': {
+      const balance = account.balanceCents;
+      return balance !== null && balance >= 0 && balance < LOW_BALANCE_CENTS;
+    }
+    case 'balance-unknown':
+      return account.status !== 'unknown' && account.balanceCents === null;
+    case 'expiring':
+      return expiringCount(account) > 0;
+  }
+}
+
+/** 清单顺序 = 严重度顺序（连接 → 钱 → 时间），**不是**先来后到。 */
+const FILTER_ORDER: readonly PoolFilterKey[] = [
+  'login-failed',
+  'session-expired',
+  'no-session',
+  'never-checked',
+  'exhausted',
+  'low',
+  'balance-unknown',
+  'expiring',
+];
+
+const FILTER_LABEL: Record<PoolFilterKey, string> = {
+  'login-failed': '登录失败',
+  'session-expired': '会话过期',
+  'no-session': '无会话',
+  'never-checked': '未查询过',
+  exhausted: '额度耗尽',
+  low: '余额偏低',
+  'balance-unknown': '余额未知',
+  expiring: `即将到期（${EXPIRING_WITHIN_DAYS} 天内）`,
+};
+
+const FILTER_TONE: Record<PoolFilterKey, HealthTone> = {
+  'login-failed': 'error',
+  'session-expired': 'error',
+  'no-session': 'muted',
+  'never-checked': 'muted',
+  exhausted: 'orange',
+  low: 'warning',
+  'balance-unknown': 'muted',
+  expiring: 'warning',
+};
+
+const FILTER_HINT: Record<PoolFilterKey, string> = {
+  'login-failed': '这一轮登录上游没成功。名下的 key 还在跑，但这个号的余额与套餐刷不新。',
+  'session-expired': '存档会话过期了。有存档密码的号点「重新登录」就能自动换一本；没有的只能人工重导凭据。',
+  'no-session': '没有可用会话。所有要打上游的动作都得先登录一次，慢且多一次锁号风险。',
+  'never-checked': '从没成功查过。「未查询过」不是「正常」，两者在数据上是两件事。',
+  exhausted: '上游侧触到额度上限（实测超出只有几毛，是封顶特征不是欠费）。名下的 key 会开始拿不到流量。',
+  low: `余额不足 ¥${(LOW_BALANCE_CENTS / 100).toFixed(2)}，还能用一阵，但离停止供应不远了。`,
+  'balance-unknown': '能登录，但这次没拿到余额。未知不计入任何合计，也不参与低余额提示。',
+  expiring: `名下套餐在 ${EXPIRING_WITHIN_DAYS} 天内到期（含已过期）—— 到期即为事实，与余额多少无关。`,
+};
+
+/**
+ * 由池内账号算出「需要处理」清单。`count === 0` 的项**不返回** ——
+ * 清单是待办列表，不是图例；摆一排 0 会让人以为那些格子坏了。
+ */
+export function buildPoolFilters(accounts: readonly SupplierAccount[]): PoolFilter[] {
+  return FILTER_ORDER.map((key) => ({
+    key,
+    label: FILTER_LABEL[key],
+    hint: FILTER_HINT[key],
+    tone: FILTER_TONE[key],
+    count: accounts.filter((account) => matchesPoolFilter(account, key)).length,
+  })).filter((item) => item.count > 0);
+}

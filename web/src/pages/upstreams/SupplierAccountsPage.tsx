@@ -78,6 +78,7 @@ import {
 } from '@/api/types';
 import { BalanceText } from '@/components/BalanceText';
 import { confirmManualRefresh } from '@/components/ManualRefreshConfirm';
+import { SupplierPoolFilters } from '@/pages/upstreams/SupplierPoolFilters';
 import { SupplierPoolFundsCards } from '@/pages/upstreams/SupplierPoolFundsCards';
 import { PageHeader } from '@/components/PageHeader';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
@@ -88,7 +89,13 @@ import { SupplierCreateKeysModal, SupplierImportModal } from '@/pages/upstreams/
 import { SupplierSubscriptionsTable } from '@/pages/upstreams/SupplierSubscriptionsTable';
 import { tokens } from '@/theme/tokens';
 import { formatCount, formatIso, formatRelative } from '@/utils/format';
-import { accountHealthOf, healthTint } from '@/utils/supplierHealth';
+import {
+  accountHealthOf,
+  buildPoolFilters,
+  healthTint,
+  matchesPoolFilter,
+  type PoolFilterKey,
+} from '@/utils/supplierHealth';
 import { computePoolFunds } from '@/utils/poolFunds';
 
 const { Text } = Typography;
@@ -209,6 +216,13 @@ export default function SupplierAccountsPage() {
   /** 勾选的账号 id。**空数组与"未选"在这里是两件事**，所以用 `null` 表示未选（见 `scopeOf`）。 */
   const [selected, setSelected] = useState<string[]>([]);
   const [detailId, setDetailId] = useState<string | null>(null);
+  /**
+   * 「需要处理」清单点出来的**本地**筛选（`utils/supplierHealth.ts` 的判据）。
+   * 服务端没有这些谓词的过滤参数（§15.2 只支持 `status` / `q`），所以本地筛的范围是
+   * **整池快照**（`pool`，最多 200 个），不是当前页 —— 于是这一层进入时**清掉**服务端
+   * 的搜索与状态筛选，两者不叠加：叠起来读的人分不清筛掉的是谁干的。
+   */
+  const [poolFilter, setPoolFilter] = useState<PoolFilterKey | null>(null);
   const [importOpen, setImportOpen] = useState(false);
   const [keysOpen, setKeysOpen] = useState(false);
   const [batchTitle, setBatchTitle] = useState('');
@@ -256,6 +270,35 @@ export default function SupplierAccountsPage() {
         : null,
     [pool.data],
   );
+
+  /** 清单：由整池快照算出，0 的项不出现。 */
+  const poolFilters = useMemo(() => (pool.data ? buildPoolFilters(pool.data.items) : []), [pool.data]);
+
+  /**
+   * 本地筛中的行（`null` = 没进入本地筛，表格走服务端分页那一套）。
+   * 判据与上面清单的计数**共用同一个函数** —— 不会出现「清单说 3 个、点进去 2 行」。
+   */
+  const localRows = useMemo(
+    () =>
+      poolFilter !== null && pool.data
+        ? pool.data.items.filter((row) => matchesPoolFilter(row, poolFilter))
+        : null,
+    [poolFilter, pool.data],
+  );
+
+  /** 进入 / 退出本地筛。进入时把服务端的搜索与状态筛选清掉（不叠加）。 */
+  const togglePoolFilter = (key: PoolFilterKey): void => {
+    if (poolFilter === key) {
+      setPoolFilter(null);
+      return;
+    }
+    setPoolFilter(key);
+    setQ('');
+    setStatus(undefined);
+    setPage(1);
+  };
+
+  const coveredCount = pool.data?.items.length ?? 0;
 
   /** 账号 id → 掩码。给套餐分组表把「这是哪个号」翻出来；取不到就退回台账自带的那一列。 */
   const identifierOf = useMemo(() => {
@@ -633,6 +676,15 @@ export default function SupplierAccountsPage() {
                 <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.md }}>
                   <SupplierPoolFundsCards funds={funds} upstream={upstream.data ?? null} />
 
+                  <SupplierPoolFilters
+                    filters={poolFilters}
+                    active={poolFilter}
+                    onToggle={togglePoolFilter}
+                    coveredCount={coveredCount}
+                    accountTotal={pool.data?.total ?? 0}
+                    ready={pool.data !== null}
+                  />
+
                   <div
                     style={{
                       display: 'flex',
@@ -644,6 +696,7 @@ export default function SupplierAccountsPage() {
                     <Input.Search
                       size="small"
                       allowClear
+                      disabled={localRows !== null}
                       style={{ width: 220 }}
                       placeholder="搜索账号 / 用户名 / uid"
                       onSearch={(value) => {
@@ -653,6 +706,7 @@ export default function SupplierAccountsPage() {
                     />
                     <Segmented
                       size="small"
+                      disabled={localRows !== null}
                       value={status ?? 'all'}
                       options={[
                         { label: '全部', value: 'all' },
@@ -749,7 +803,7 @@ export default function SupplierAccountsPage() {
                       rowKey="id"
                       size="small"
                       columns={columns}
-                      dataSource={accounts.data?.items ?? []}
+                      dataSource={localRows ?? accounts.data?.items ?? []}
                       loading={accounts.refreshing}
                       scroll={{ x: 1360 }}
                       rowSelection={{
@@ -819,27 +873,39 @@ export default function SupplierAccountsPage() {
                           </div>
                         ),
                       }}
-                      pagination={{
-                        current: page,
-                        pageSize,
-                        total: accounts.data?.total ?? 0,
-                        showSizeChanger: true,
-                        pageSizeOptions: [20, 50, 100, 200],
-                        showTotal: (total) => `共 ${total} 个账号`,
-                        onChange: (nextPage, nextSize) => {
-                          setPage(nextPage);
-                          setPageSize(nextSize);
-                        },
-                      }}
+                      pagination={
+                        localRows !== null
+                          ? {
+                              /* 本地筛：数据已经全在手里，分页交给表格自己做，服务端那一套不再参与。 */
+                              pageSize,
+                              showSizeChanger: true,
+                              pageSizeOptions: [20, 50, 100, 200],
+                              showTotal: (total) => `${formatCount(total)} 个账号（本地筛，范围=取回的 ${formatCount(coveredCount)} 个）`,
+                            }
+                          : {
+                              current: page,
+                              pageSize,
+                              total: accounts.data?.total ?? 0,
+                              showSizeChanger: true,
+                              pageSizeOptions: [20, 50, 100, 200],
+                              showTotal: (total) => `共 ${total} 个账号`,
+                              onChange: (nextPage, nextSize) => {
+                                setPage(nextPage);
+                                setPageSize(nextSize);
+                              },
+                            }
+                      }
                       locale={{
                         emptyText: (
                           <Empty
                             image={Empty.PRESENTED_IMAGE_SIMPLE}
                             description={
-                              q || status !== undefined
-                                ? '当前筛选条件下没有账号。'
-                                : '这个上游还没有账号。用「导入账号」粘贴「手机号,密码」清单开始。'
-                            }
+                          localRows !== null
+                            ? '整池快照里没有命中这一条的账号 —— 上面那条计数是刚才那一刻的，刷新后会变。'
+                            : q || status !== undefined
+                              ? '当前筛选条件下没有账号。'
+                              : '这个上游还没有账号。用「导入账号」粘贴「手机号,密码」清单开始。'
+                        }
                           />
                         ),
                       }}

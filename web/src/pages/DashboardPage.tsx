@@ -30,12 +30,7 @@ import { Suspense, lazy, useEffect, useMemo, useRef, useState } from 'react';
 
 import { observabilityApi, statsApi } from '@/api/endpoints';
 import { useResource } from '@/api/hooks';
-import type {
-  KeyHealth,
-  KeyHealthRow,
-  ObservabilityCategory,
-  StatsWindow,
-} from '@/api/types';
+import type { KeyHealth, KeyHealthRow, StatsWindow } from '@/api/types';
 import { BalanceText } from '@/components/BalanceText';
 import { HealthTag } from '@/components/HealthTag';
 import { PageHeader } from '@/components/PageHeader';
@@ -44,6 +39,7 @@ import { StatCard } from '@/components/StatCard';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { BalanceSyncSection } from '@/pages/stats/BalanceSyncSection';
 import type { HealthMetric } from '@/pages/dashboard/HealthTrendChart';
+import { categoryLabel } from '@/utils/observabilityLabels';
 import { isLiveFresh } from '@/realtime/live';
 import { useLive } from '@/realtime/useLive';
 import { tokens } from '@/theme/tokens';
@@ -77,19 +73,6 @@ function toObservabilityWindow(window: StatsWindow): '60s' | '5m' | '1h' {
  * 240 会被整条请求拒掉，趋势图直接加载失败。
  */
 const SNAPSHOT_PAGE_SIZE = 200;
-
-/** §12.1 九个分型的中文标签。**逐字取自契约分型表**，不自造分类。 */
-const CATEGORY_LABEL: Record<ObservabilityCategory, string> = {
-  CLIENT_REQUEST: '调用方写错',
-  AUTH_FAILED: '鉴权失败',
-  RATE_LIMITED: '限流',
-  QUOTA_EXCEEDED: '配额用尽',
-  NO_AVAILABLE_KEY: '无可用 key',
-  UPSTREAM_ERROR: '上游错误',
-  UPSTREAM_TIMEOUT: '上游超时',
-  CLIENT_ABORTED: '客户端断开',
-  INTERNAL: '网关自身异常',
-};
 
 function healthCounts(rows: readonly KeyHealthRow[]): Record<KeyHealth, number> {
   const counts: Record<KeyHealth, number> = { healthy: 0, cooling: 0, disabled: 0 };
@@ -427,7 +410,7 @@ export default function DashboardPage() {
               {eventBuckets.map((bucket) => (
                 <MetaLine
                   key={bucket.category}
-                  label={CATEGORY_LABEL[bucket.category] ?? bucket.category}
+                  label={categoryLabel(bucket.category)}
                   value={formatCount(bucket.count)}
                   hint={`${bucket.category} · severity=${bucket.severity} · 最近 ${formatIso(bucket.lastAt)}`}
                   tone={bucket.severity === 'error' ? 'error' : 'warning'}

@@ -96,6 +96,22 @@ body {
 }
 
 /*
+ * 助手页右栏「实时错误事件」的新条目滑入（ErrorTicker）。
+ * 只有**本批新到达**的行会带上这个动画（旧行不动），所以它表达的是"这条刚发生"，
+ * 不是"整块在抖"。prefers-reduced-motion 下由下面的全局规则压成单帧（直接落位）。
+ */
+@keyframes assistant-ticker-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/*
  * 页面级栅格（2026-10-12 排版巡检收口）。
  *
  * 为什么放 CSS 而不是各页内联 style：内联写法在站内被复制了 19 份，每份的 gap / minmax
@@ -133,10 +149,27 @@ body {
   margin-bottom: var(--space-lg);
 }
 
+/* 严格两等分（助手页：左聊天 / 右证据面）。与 panel-grid-wide 的区别是**不给一侧偏大**。 */
+.panel-grid-half {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--space-md);
+}
+
 /* 单列堆叠的断点：窄屏（含折叠侧栏 + 小窗）下不硬挤两列。 */
 @media (max-width: 1180px) {
   .panel-grid-wide {
     grid-template-columns: minmax(0, 1fr);
+  }
+  /* 助手页在窄屏堆叠时整栏可滚：等宽两列会把表格挤到不可读。
+     两栏各自给一个可滚的最小高度 —— 堆叠后父容器不再是"一屏高"，
+     子项的 flex 高度会塌成 0，所以这里显式兜住（聊天与证据面同一档）。 */
+  .panel-grid-half {
+    grid-template-columns: minmax(0, 1fr);
+    overflow-y: auto;
+  }
+  .panel-grid-half > * {
+    min-height: 420px;
   }
 }
 

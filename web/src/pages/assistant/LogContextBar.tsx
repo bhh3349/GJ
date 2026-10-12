@@ -22,6 +22,11 @@ export interface LogContextDraft {
   severity: ObservabilitySeverity | null;
   categories: string[];
   model: string;
+  /**
+   * §12.3 的 `requestId` —— **精确匹配的单值过滤参数**，与 `model` 同性质。
+   * 助手页右栏点一条事件就是走这个字段（把「我看到的那一条」交给助手，而不是给一句自由文本）。
+   */
+  requestId: string;
   range: [Dayjs, Dayjs] | null;
 }
 
@@ -30,6 +35,7 @@ export const EMPTY_LOG_CONTEXT: LogContextDraft = {
   severity: null,
   categories: [],
   model: '',
+  requestId: '',
   range: null,
 };
 
@@ -71,6 +77,12 @@ export function toLogContext(draft: LogContextDraft): AssistantLogContext | null
   const model = draft.model.trim();
   if (model !== '') {
     context.model = model;
+    filled = true;
+  }
+
+  const requestId = draft.requestId.trim();
+  if (requestId !== '') {
+    context.requestId = requestId;
     filled = true;
   }
 
@@ -151,6 +163,17 @@ export function LogContextBar({ value, onChange, disabled = false }: LogContextB
           value={value.model}
           disabled={disabled}
           onChange={(event) => onChange({ ...value, model: event.target.value })}
+        />
+
+        {/* 请求号同样是**精确匹配**：值以结构化参数进后端，不会被当成自由文本塞进 prompt。 */}
+        <Input
+          size="small"
+          allowClear
+          placeholder="请求号（精确匹配）"
+          style={{ width: 200 }}
+          value={value.requestId}
+          disabled={disabled}
+          onChange={(event) => onChange({ ...value, requestId: event.target.value })}
         />
 
         <DatePicker.RangePicker

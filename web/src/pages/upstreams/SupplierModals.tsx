@@ -14,13 +14,15 @@
  * 前端不得自造承诺" —— `count` / 账号数是最容易被顺手乘 2 的两个数（§15.5：建 key = 2 次请求/账号），
  * 乘出来的数字不是承诺而是编造，所以这里只回显**选择事实**（选了几个账号、要建几把），不做乘法。
  */
-import { Form, Input, InputNumber, Modal, Select, Space, Switch } from 'antd';
+import { Form, Input, InputNumber, Modal, Select, Space, Switch, Typography } from 'antd';
 import { useEffect } from 'react';
 
 import { supplierAccountsApi } from '@/api/endpoints';
 import { useAction } from '@/api/hooks';
 import type { SupplierKeysRequest } from '@/api/types';
 import { tokens } from '@/theme/tokens';
+
+const { Text } = Typography;
 
 /** 契约 §15.2 `keys`：`count` 1..10，越界**在本次 HTTP 里就 400**（不变成立刻失败的异步任务）。 */
 const KEY_COUNT_MIN = 1;
@@ -237,6 +239,14 @@ export function SupplierCreateKeysModal({
         <Form.Item name="label" label="备注（可选）">
           <Input placeholder="如：客服核对批次" />
         </Form.Item>
+
+        {/*
+          这一句是**刻意的**：用户组那条路径会在浏览器里显示一次明文，账号池这条不会。
+          不写就会有人等一个永远不出现的"一次性明文"浮层，然后以为建 key 失败了。
+        */}
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          建好的 key 明文不经浏览器：服务端取回后当场加密入池，回执浮层里只给掩码。要明文请到上游站点取。
+        </Text>
       </Form>
     </Modal>
   );

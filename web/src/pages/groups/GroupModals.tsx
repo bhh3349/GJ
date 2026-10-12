@@ -6,10 +6,13 @@
  *   的响应里出现**一次**；库内只存 sha256 摘要，之后任何端点都取不回。
  * - 本组件不缓存、不写 localStorage、不进 URL；关闭弹窗即从内存丢弃。
  *   所以它是「只读展示」型弹窗，没有「再次查看」入口——重发只能重新签发。
+ *   这句话**必须写在弹窗上**（不只在注释里）：关掉就取不回，而人不会因为注释里写过而记得。
+ * - 复制是一个**显式按钮**，不只是文本右侧那个小图标：手滑点了关闭就没有第二次机会。
  *
  * 配额口径：`rpm`/`tpm`/`dailyQuota` 为 `null` = **不限**，与 `0`（等于全部拒绝）不同。
  */
-import { Form, Input, InputNumber, Modal, Space, Switch, Typography } from 'antd';
+import { CopyOutlined } from '@ant-design/icons';
+import { Alert, App, Button, Form, Input, InputNumber, Modal, Space, Switch, Typography } from 'antd';
 import { useEffect } from 'react';
 
 import { groupsApi } from '@/api/endpoints';
@@ -38,6 +41,24 @@ export interface GatewayKeyRevealModalProps {
  * 这样明文不会残留在任何组件 state 里。
  */
 export function GatewayKeyRevealModal({ reveal, onClose }: GatewayKeyRevealModalProps) {
+  const { message } = App.useApp();
+
+  /**
+   * 显式复制。明文只在这一次响应里出现，**关掉就取不回**，所以复制这一步不能只靠
+   * 文本右侧那个小图标 —— 手滑点了「关闭」就没有第二次机会了。
+   * 剪贴板写入会被浏览器拒（非安全上下文 / 未授权），失败时必须说清楚并给出兜底动作。
+   */
+  const copy = async (): Promise<void> => {
+    const text = reveal?.gatewayKey ?? '';
+    if (text === '') return;
+    try {
+      await navigator.clipboard.writeText(text);
+      message.success('已复制到剪贴板');
+    } catch {
+      message.error('浏览器不允许写入剪贴板，请手动选中上面这串复制');
+    }
+  };
+
   return (
     <Modal
       open={reveal !== null}
@@ -58,7 +79,7 @@ export function GatewayKeyRevealModal({ reveal, onClose }: GatewayKeyRevealModal
           borderRadius: tokens.radius.md,
           background: tokens.color.bgBase,
           padding: tokens.space.md,
-          marginBottom: tokens.space.md,
+          marginBottom: tokens.space.sm,
         }}
       >
         <Text
@@ -73,9 +94,28 @@ export function GatewayKeyRevealModal({ reveal, onClose }: GatewayKeyRevealModal
           {reveal?.gatewayKey ?? ''}
         </Text>
       </div>
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        掩码：{reveal?.maskedKey ?? '—'}
-      </Text>
+
+      <Space size={tokens.space.sm} align="center" wrap style={{ marginBottom: tokens.space.sm }}>
+        <Button size="small" icon={<CopyOutlined />} onClick={() => { void copy(); }}>
+          复制这串 key
+        </Button>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          掩码：{reveal?.maskedKey ?? '—'}
+        </Text>
+      </Space>
+
+      <Alert
+        type="warning"
+        showIcon
+        style={{ background: tokens.tint.warning, border: 'none' }}
+        message="现在不复制，之后就拿不到了"
+        description={
+          <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
+            库里只存摘要，管理面此后只显示掩码。这串关掉就取不回；要新的只能再签发一把，
+            或重置（重置会让旧 key 立即失效）。
+          </Text>
+        }
+      />
     </Modal>
   );
 }

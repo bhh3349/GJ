@@ -332,6 +332,26 @@ export function SupplierBatchDrawer({
             />
           ) : null}
 
+          {items.some((row) => row.keyMasked !== null) ? (
+            /*
+              与用户组那条路径的**区别**必须写出来：那里的网关 key 会在浏览器里出现一次明文，
+              这里的上游 key 明文**全程不经浏览器**（服务端当场加密入池）。
+              不写就会有人在这里等一个永远不出现的"一次性明文"，等不到就以为建 key 失败了。
+            */
+            <Alert
+              type="info"
+              showIcon
+              style={{ background: tokens.tint.neutral, border: 'none' }}
+              message="这一批只给掩码，没有明文可复制"
+              description={
+                <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
+                  上游 key 由服务端取回后当场加密入池，明文不进浏览器，此后管理面也取不回。
+                  要拿明文只能去上游站点的 key 列表；网关侧发流量不需要它 —— 选用的是池内这把。
+                </Text>
+              }
+            />
+          ) : null}
+
           <BalanceHint hintCode={result.hintCode} hint={result.hint} />
 
           {result.truncated ? (

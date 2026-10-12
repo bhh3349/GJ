@@ -31,6 +31,12 @@
  * - **同上游单飞**：上一轮没结束时本轮由服务端跳过（§14.1）⇒ 连点不等于多刷一遍，
  *   所以这里**不做队列** —— 前端排队就是把一条已经定死的服务端行为再实现一遍。
  *
+ * ## 「状态」与「健康」是两列，不合并
+ *
+ * 「状态」只报上游侧的连接事实（登录失败 / 会话过期 / 未查询过 / 正常），一个字段一个意思；
+ * 「健康」在它之上回答**要不要动手**（`utils/supplierHealth.ts` 是唯一判据）。合并成一列会把「能登录」与「还有钱」两件不同的事挤进同一格，
+ * 而那正是这一页最容易读错的地方。
+ *
  * ## 逐行明细只挂在终态
  *
  * `SupplierBatchDrawer` 拿的是 `useTaskPolling` 的真任务对象，`result` 只在
@@ -80,6 +86,7 @@ import { SupplierCreateKeysModal, SupplierImportModal } from '@/pages/upstreams/
 import { SupplierSubscriptionsTable } from '@/pages/upstreams/SupplierSubscriptionsTable';
 import { tokens } from '@/theme/tokens';
 import { formatCount, formatIso, formatRelative } from '@/utils/format';
+import { accountHealthOf, healthTint } from '@/utils/supplierHealth';
 
 const { Text } = Typography;
 
@@ -343,9 +350,13 @@ export default function SupplierAccountsPage() {
       ),
     },
     {
-      title: '状态',
+      title: (
+        <Tooltip title="上游侧的连接事实：能不能登录、会话是否还在。与右边的「健康」正交 —— 这一列不说钱的事。">
+          <span>状态</span>
+        </Tooltip>
+      ),
       dataIndex: 'status',
-      width: 108,
+      width: 104,
       render: (_: unknown, row) => (
         <Tooltip
           title={
@@ -375,6 +386,38 @@ export default function SupplierAccountsPage() {
           </Tag>
         </Tooltip>
       ),
+    },
+    {
+      title: (
+        <Tooltip title="这一列按「要不要动手」判，判据自上而下：登录失败 / 会话过期 / 未查询过 → 余额未知 → 额度耗尽 → 余额偏低 → 正常。它比左边的「状态」多一层：能登录的号也再分余额够不够。">
+          <span>健康</span>
+        </Tooltip>
+      ),
+      key: 'health',
+      width: 126,
+      render: (_: unknown, row) => {
+        const health = accountHealthOf(row);
+        const tint = healthTint(health.tone);
+        return (
+          <Tooltip title={health.hint}>
+            <Space size={tokens.space.xs} align="center">
+              <span
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  background: tint.color,
+                  boxShadow: `0 0 0 2px ${tint.background}`,
+                  flexShrink: 0,
+                }}
+              />
+              <Text style={{ fontSize: 12, color: tint.color, whiteSpace: 'nowrap' }}>
+                {health.label}
+              </Text>
+            </Space>
+          </Tooltip>
+        );
+      },
     },
     {
       title: (
@@ -678,7 +721,7 @@ export default function SupplierAccountsPage() {
                       columns={columns}
                       dataSource={accounts.data?.items ?? []}
                       loading={accounts.refreshing}
-                      scroll={{ x: 1240 }}
+                      scroll={{ x: 1360 }}
                       rowSelection={{
                         selectedRowKeys: selected,
                         onChange: (keys) => {

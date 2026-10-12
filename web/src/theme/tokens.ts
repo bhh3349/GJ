@@ -22,6 +22,12 @@ export const tokens = {
     primaryHover: '#6DA3FF',
     success: '#34D399',
     warning: '#FBBF24',
+    /**
+     * 第四档语义色（橙）。**不是** `warning` 的别名：`warning` 留给「还行但有风险」，
+     * 橙留给「已经封顶/耗尽」这类比 warning 重、但**不是故障**的状态
+     * （账号额度耗尽、套餐剩余 <10%）。红色只留给真出事（登录失败 / 会话过期）。
+     */
+    orange: '#FB923C',
     error: '#F87171',
     info: '#38BDF8',
   },
@@ -50,6 +56,8 @@ export const tokens = {
   tint: {
     success: 'rgba(52, 211, 153, 0.14)',
     warning: 'rgba(251, 191, 36, 0.14)',
+    /** 与 `color.orange` 配对（`warning` 的 tint 更黄，两者不可互换）。 */
+    orange: 'rgba(251, 146, 60, 0.14)',
     error: 'rgba(248, 113, 113, 0.14)',
     info: 'rgba(56, 189, 248, 0.14)',
     neutral: 'rgba(147, 163, 186, 0.12)',

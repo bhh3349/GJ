@@ -67,6 +67,7 @@ import { useAction, useResource } from '@/api/hooks';
 import { useTaskPolling } from '@/api/useTaskPolling';
 import {
   PAGE_SIZE_DEFAULT,
+  PAGE_SIZE_MAX,
   SUPPLIER_STATUS_TEXT,
   type SupplierAccount,
   type SupplierAccountStatus,
@@ -77,6 +78,7 @@ import {
 } from '@/api/types';
 import { BalanceText } from '@/components/BalanceText';
 import { confirmManualRefresh } from '@/components/ManualRefreshConfirm';
+import { SupplierPoolFundsCards } from '@/pages/upstreams/SupplierPoolFundsCards';
 import { PageHeader } from '@/components/PageHeader';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { EgressPoolCard } from '@/pages/upstreams/EgressPoolCard';
@@ -87,6 +89,7 @@ import { SupplierSubscriptionsTable } from '@/pages/upstreams/SupplierSubscripti
 import { tokens } from '@/theme/tokens';
 import { formatCount, formatIso, formatRelative } from '@/utils/format';
 import { accountHealthOf, healthTint } from '@/utils/supplierHealth';
+import { computePoolFunds } from '@/utils/poolFunds';
 
 const { Text } = Typography;
 
@@ -230,6 +233,30 @@ export default function SupplierAccountsPage() {
     [upstreamId, q, status, page, pageSize],
   );
 
+  /**
+   * **资金池用的全池读面**：与列表同一个端点，只是把 `pageSize` 顶到 §0.3 的上限 200。
+   * 它**不是**为了少点一次翻页 —— 池级合计必须是全池口径，页内累加得到的是「第 1 页的合计」，
+   * 那个数长得像池子的钱却不是，比不显示更坏。超过 200 个账号时 `computePoolFunds` 会
+   * 把 `complete` 判成 `false`，三张卡就**只说取回了多少**、不给合计。
+   * 只读、不发上游请求（账号与套餐都在台账里），所以这一发不占出口预算。
+   */
+  const pool = useResource(
+    () =>
+      upstreamId
+        ? supplierAccountsApi.list({ upstreamId, page: 1, pageSize: PAGE_SIZE_MAX })
+        : Promise.resolve(null),
+    [upstreamId],
+  );
+
+  /** 三个资金池的页内汇总。`null` = 还没取回来（首帧），渲染层不预展示任何数字。 */
+  const funds = useMemo(
+    () =>
+      pool.data
+        ? computePoolFunds({ items: pool.data.items, total: pool.data.total, pageSize: pool.data.pageSize })
+        : null,
+    [pool.data],
+  );
+
   /** 账号 id → 掩码。给套餐分组表把「这是哪个号」翻出来；取不到就退回台账自带的那一列。 */
   const identifierOf = useMemo(() => {
     const map = new Map<string, string>();
@@ -243,6 +270,7 @@ export default function SupplierAccountsPage() {
    */
   const task = useTaskPolling((finished) => {
     accounts.reload();
+    pool.reload();
     if (finished.status === 'succeeded') {
       message.info('批量任务已到终态，逐行结论见明细浮层');
     } else {
@@ -603,6 +631,8 @@ export default function SupplierAccountsPage() {
               label: '账号池',
               children: (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.md }}>
+                  <SupplierPoolFundsCards funds={funds} upstream={upstream.data ?? null} />
+
                   <div
                     style={{
                       display: 'flex',

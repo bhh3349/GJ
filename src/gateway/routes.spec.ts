@@ -24,8 +24,8 @@ import { gatewayRoutes } from './routes.js';
 const GROUP: GroupContext = { groupId: 'grp_1', name: '测试组', enabled: true, rpm: null, tpm: null, dailyQuota: null };
 
 const MODELS: ModelDescriptor[] = [
-  { id: 'gpt-4o', createdAt: '2026-10-06T00:00:00.000Z', ownedBy: 'openai' },
-  { id: 'deepseek-chat', createdAt: '2026-10-01T00:00:00.000Z', ownedBy: 'up1' },
+  { id: 'gpt-4o', createdAt: '2026-10-06T00:00:00.000Z', ownedBy: 'openai', capabilities: ['stream', 'vision'], contextLength: 128_000, endpointTypes: null },
+  { id: 'deepseek-chat', createdAt: '2026-10-01T00:00:00.000Z', ownedBy: 'up1', capabilities: [], contextLength: null, endpointTypes: null },
 ];
 
 function stubEngine(over: Partial<GatewayEngine> = {}): { engine: GatewayEngine; seen: Array<Record<string, unknown>> } {
@@ -419,7 +419,10 @@ describe('GET /v1/models', () => {
     const res = await app.inject({ method: 'GET', url: '/v1/models', headers: { authorization: 'Bearer gk-ok' } });
 
     assert.equal(res.statusCode, 200);
-    const body = res.json() as { object: string; data: Array<{ id: string; object: string; created: number; owned_by: string }> };
+    const body = res.json() as {
+      object: string;
+      data: Array<{ id: string; object: string; created: number; owned_by: string; capabilities: string[]; contextLength: number | null; endpointTypes: string[] | null }>;
+    };
     assert.equal(body.object, 'list');
     assert.equal(body.data.length, MODELS.length);
     assert.deepEqual(
@@ -432,6 +435,29 @@ describe('GET /v1/models', () => {
       assert.equal(typeof m.owned_by, 'string');
     }
     assert.equal(body.data[0]?.created, Math.floor(Date.parse('2026-10-06T00:00:00.000Z') / 1000));
+    await app.close();
+  });
+
+  it('v1.11.0 只加字段：既有四字段零变更，新字段与档案逐项一致（契约 §10 / 验收 4）', async () => {
+    const app = await buildApp();
+    const res = await app.inject({ method: 'GET', url: '/v1/models', headers: { authorization: 'Bearer gk-ok' } });
+
+    assert.equal(res.statusCode, 200);
+    const body = res.json() as { data: Array<Record<string, unknown>> };
+    const first = body.data[0] as Record<string, unknown>;
+    // 既有四字段原样在（新增不许把它们改名或删掉）
+    assert.equal(first.id, 'gpt-4o');
+    assert.equal(first.object, 'model');
+    assert.equal(typeof first.created, 'number');
+    assert.equal(first.owned_by, 'openai');
+    // 新增三字段：值取自 ModelDescriptor（实现侧来自同一份档案行）
+    assert.deepEqual(first.capabilities, ['stream', 'vision']);
+    assert.equal(first.contextLength, 128_000);
+    assert.equal(first.endpointTypes, null, '本期恒 null = 未采集（§10 登记，不写"先加字段后补生产者"）');
+    // [] 是「未探测/上游未给」，不是 null —— 第二条保持 []，不另立第二套空值语义
+    const second = body.data[1] as Record<string, unknown>;
+    assert.deepEqual(second.capabilities, []);
+    assert.equal(second.contextLength, null);
     await app.close();
   });
 

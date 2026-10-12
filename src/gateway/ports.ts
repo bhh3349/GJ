@@ -60,6 +60,21 @@ export interface ModelDescriptor {
   createdAt: string;
   /** 归属，默认取上游名；仅用于 /v1/models 的 owned_by 字段 */
   ownedBy: string;
+  /**
+   * 模型能力（契约 §5 枚举 `stream | function_call | vision | json_mode`）。
+   * 口径（契约 §10 v1.11.0）：`[]` 是「未探测 / 上游未给」，**不另立 null 语义**；
+   * 与模型档案 `capabilities` 逐项 0 差异（验收 4 的字段面延伸）。
+   * 只读透传：网关不判能力、不写档案，写入口只在管理面（probe / PATCH）。
+   */
+  capabilities: string[];
+  /** 上下文长度；上游没给就是 null（契约 §5「缺失是 null 不是 0」，/v1/models 显示口径同款） */
+  contextLength: number | null;
+  /**
+   * 上游 `supported_endpoint_types` 的独立只读字段（契约 §10 v1.11.0 登记）。
+   * **本期恒 null = 未采集**（不并进 capabilities —— 端点类型不是模型能力，ADR-0024 备选 C）；
+   * 采集是另一笔，届时只改实现侧取数，本形状不变。
+   */
+  endpointTypes: string[] | null;
 }
 
 /** 用户组配额（契约 §4 Group 对象；null = 不限） */

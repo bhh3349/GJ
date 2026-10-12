@@ -332,6 +332,13 @@ export interface EnabledGatewayModel {
   createdAt: string;
   priceInputPer1k: number | null;
   priceOutputPer1k: number | null;
+  /**
+   * 档案能力（契约 §10 v1.11.0「只加字段」）。口径与档案 DTO 同源：`[]` = 未探测/上游未给，
+   * 网关只透传、不解释；`listEnabledModels` 据此把能力传给 `/v1/models`（验收 4 的字段面延伸）。
+   */
+  capabilities: string[];
+  /** 上下文长度；上游没给就是 `null`（缺失 != 0） */
+  contextLength: number | null;
 }
 
 /**
@@ -350,14 +357,17 @@ export function listEnabledGatewayModels(db: Db): EnabledGatewayModel[] {
               u.name            AS upstreamName,
               m.created_at      AS createdAt,
               m.price_input_per_1k  AS priceInputPer1k,
-              m.price_output_per_1k AS priceOutputPer1k
+              m.price_output_per_1k AS priceOutputPer1k,
+              m.capabilities    AS capabilitiesRaw,
+              m.context_length  AS contextLength
        FROM models m
        JOIN upstreams u ON u.id = m.upstream_id
        WHERE m.enabled = 1 AND u.enabled = 1
        ORDER BY m.name, m.id`,
     )
-    .all() as EnabledGatewayModel[];
-  return rows;
+    .all() as (Omit<EnabledGatewayModel, 'capabilities'> & { capabilitiesRaw: string })[];
+  // capabilities 列是 JSON 文本，解析复用本文件唯一那份 parseCapabilities（§16.3 禁同语义两处实现）
+  return rows.map(({ capabilitiesRaw, ...rest }) => ({ ...rest, capabilities: parseCapabilities(capabilitiesRaw) }));
 }
 
 /** 供 /v1/models 与「已启用集合」对齐用（验收 4）。 */

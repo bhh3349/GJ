@@ -227,6 +227,10 @@ export function createGatewayStore(options: GatewayStoreOptions): GatewayStore {
           id: m.name,
           createdAt: m.createdAt,
           ownedBy: m.upstreamName,
+          // 契约 §10 v1.11.0 只加字段：能力/上下文随档案行同批带出（逐项 0 差异的字段面延伸）
+          capabilities: m.capabilities,
+          contextLength: m.contextLength,
+          endpointTypes: null,
         }));
       },
 

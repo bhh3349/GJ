@@ -114,7 +114,9 @@ async function setup(options: Options = {}): Promise<Harness> {
   };
 
   const models: ModelCatalog = {
-    listEnabledModels: async () => [{ id: 'gpt-4o', createdAt: '2026-10-06T00:00:00.000Z', ownedBy: 'up1' }],
+    listEnabledModels: async () => [
+      { id: 'gpt-4o', createdAt: '2026-10-06T00:00:00.000Z', ownedBy: 'up1', capabilities: [], contextLength: null, endpointTypes: null },
+    ],
     resolveUpstreamModel: (m) => m,
   };
 

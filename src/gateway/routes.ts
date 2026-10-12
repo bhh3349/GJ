@@ -367,6 +367,11 @@ export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOpt
         object: 'model',
         created: createdSeconds(m.createdAt),
         owned_by: m.ownedBy,
+        // v1.11.0 只加字段（契约 §10）：既有四字段形状与集合口径零变更。
+        // capabilities/contextLength 与档案卡逐项 0 差异；endpointTypes 本期恒 null = 未采集（§10 登记）。
+        capabilities: m.capabilities,
+        contextLength: m.contextLength,
+        endpointTypes: m.endpointTypes,
       })),
     });
   });

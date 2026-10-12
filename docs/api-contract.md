@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.11.1**　｜
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.11.2**　｜
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -63,6 +63,12 @@
 > ④ **裁定 `done.citations` 不加「进页即注入」默认快照**（§13.2 语义一字不动）：自动快照每轮命中 §13.3「50 条」上限 → `truncated` 常驻失真，且面板上线后「复制」痛点已解，价值不抵代价；要翻案走新 ADR。
 > ⑤ **全局视野靠点行注入**（点计数条 = `logContext.category` 多值），不靠自动快照；⑥ 面板（`from`/`to`）与计数条（`window`）允许不同窗口，后端只回显 `range`（§12.3）/ `window`（§12.2），一致性归前端渲染，**不新增字段**。
 > ⑦ **零代码变更**：`src/api/` + `src/gateway/` + `src/db/` 一行未改；`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2、零 DDL、零迁移。
+>
+> **v1.11.2（2026-10-14，sync 选 key 候选修复 + 探测口径三点补充 —— Bo 拍板「停用 `****amMc`」「探测 commit 携带共享凭据选择器」「sync `result` 增加该字段属契约增量，需你补契约一行」）**：新增 **§5 同步与探测的共享凭据选择器**，并把 ADR-0024 的三处落地口径钉死。动机、A/B 取证与备选见 **`docs/adr/0026-sync-credential-rotation.md`**。
+> ① **修法（ADR-0026）**：新增 `src/api/services/credential-rotation.ts` —— 候选 = 该上游已启用 key，按「台账绑定 `status='active'` 账号的优先 → `created_at,id` 稳定序」排序（解密出口/排序键不动）；`tryWithRotation` 逐把尝试，**401/403 记 `reason:"auth"` 换下一把**，装配默认**试 3 把**（常量，不进契约），预算耗尽回**最后一个**错误并带 `credentials` 可观测位。
+> ② **同步接线 + 可观测位**：`syncModels` 候选从「第一把启用 key」改为共享选择器；成功上游的 `SyncSummary` 新增**可选**字段 `credentials: {tried, usedMaskedKeys, switched}`（省略 = 未换过；**只含计数与掩码、不含明文**）。
+> ③ **口径补充三处（正文已并入对应小节）**：来源规则第 3 条条件 `UPDATE` 的 WHERE 补「本轮 `now` 已知」半句；探测端点**同步返回** `200 ModelProbeResult`（不 `202` 不打任务，单上游多模型超时预算时才退任务面）；`MODEL_PROBE_MAX_MODELS` 落**装配侧 env 默认 = 10**（数值不进契约）。
+> **无字段改名、无字段删除；`/v1/*` 零变更；`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增；`SCHEMA_VERSION` 仍为 2（v1.11.0 的两列随本笔实现落 `ALTER`，仍零迁移）。**
 > **补遗 v1.0.2（2026-10-06）**：① §3 `POST /api/keys/:id/balance/refresh` 的响应补成 `202 {taskId}`（原文只写了用途、没写形状，而实现从第一天起就回 `202 {taskId}`，属于文本与实现的既存分歧，本次抹平）；② §5 新增「`POST /api/models/sync` 的字段映射」小节，把「只落能证明的、其余一律未知」写成明文规则；③ §5 补一句「同步不覆盖人工值」。除此之外 v1.0.1 全部内容不变 —— 无字段改名、无类型变更、无端点删除。动机与影响见 ADR-0009。
 >
 > **补遗 v1.0.3（2026-10-06）**：① §3 写明 `health` 等四个运行态字段的**来源与新鲜度**（网关进程 1s 批量镜像落 `key_runtime`，重启后归零），动机见 ADR-0010；② §6 新增「`costCents` 金额口径」小节 —— 契约此前**暴露**了 `costCents`（§4 Group、§6 usage 点）却从未**定义**它，未知单价该记 0 还是 null 无据可依；③ §10 把「无可用 key」与「候选用尽」两个 Terminating 结果拆开登记（`503 NO_AVAILABLE_KEY` ≠ `502 UPSTREAM_ERROR`，原文一句话把两者混在一起，与实现不符），并登记已在使用但未登记的 `504 UPSTREAM_TIMEOUT`。三处都是**文本对齐实现**，无字段改名、无类型变更、无端点增删。
@@ -704,7 +710,7 @@
 | `GET` | `/api/models/:id` | 档案卡详情 |
 | `PATCH` | `/api/models/:id` | `{enabled?, type?, capabilities?, contextLength?, price?, displayName?, revision}` |
 | `POST` | `/api/models/sync` | `{upstreamId?}` 省略则全量 → `202 {taskId}`；v1.11.0 起**尾部自动补探**（可关，见 §5 能力探测） |
-| `POST` | `/api/models/:id/probe` | **v1.11.0 新增**。`{targets?, apply?}` → `200 ModelProbeResult`（打能力专属上游请求、按响应判能力；见本节「能力探测」） |
+| `POST` | `/api/models/:id/probe` | **v1.11.0 新增**。`{targets?, apply?}` → `200 ModelProbeResult`（打能力专属上游请求、按响应判能力；见本节「能力探测」）。**同步返回**（ADR-0024 决策 1 原文：不 `202`、不打任务；仅当单上游多模型超出单轮预算、需跨模型续跑时才退任务面 `result.probe`） |
 
 `POST /api/models/sync` 是**异步任务**（上游拉取可能慢），不阻塞 HTTP。前端轮询 `GET /api/tasks/:id` 拿真实进度——**不许做假进度条**。
 
@@ -810,7 +816,7 @@
 1. `PATCH /api/models/:id` **传了** `capabilities` ⇒ `capabilities_source = 'manual'`；**没传就不动它**（若本来是 `null` 就还是 `null`）。
 2. 探测在 `apply:true` 时**只写 `true` 的项**，且**只在 `capabilities_source` 为 `NULL` 或 `'probe'` 时写** ——
    `'manual'` **永不被探测覆盖**；`false` / `null` 的结果**从不写库**（"不支持"和"判不出"都不该抹掉已知的能力位）。
-3. 落库走**一条条件 `UPDATE`**（`WHERE id=? AND (capabilities_source IS NULL OR capabilities_source <> 'manual')`）**原子完成**，
+3. 落库走**一条条件 `UPDATE`**（`WHERE id=? AND (capabilities_source IS NULL OR capabilities_source <> 'manual' OR last_probed_at IS NULL OR last_probed_at < now)`，`now` = 本轮探测时刻 —— 单语句原子、同表同列零竞态）**原子完成**，
    因此**不需要 `revision` 参数、也不会与并发 `PATCH` 竞态**（并发下 `PATCH` 赢、探测那次丢弃）。
 4. `last_probed_at` **每次都刷**（无论 `apply` 与否、无论这次有没有覆盖 `capabilities`）—— 它回答的是「上次问过没有」。
 5. **三态可分辨**（前端据此渲染，别把三种读成一种）：`capabilities` 非空 = **有**该能力 /
@@ -822,7 +828,7 @@
 
 - **候选 = 本次同步涉及且 `capabilities_source IS NULL` 的模型** —— `manual` / 已 `probe` 的**一律跳过**，不重复烧。
 - **默认开**，两个闸都能关：请求体 `{"probe": false}`（单次调用关）；环境变量 `MODEL_PROBE_ENABLED=false`（装配侧全局关）。
-- **单轮上限 `MODEL_PROBE_MAX_MODELS`**（占位 `10`，超出的模型留在 `capabilities_source IS NULL`，下一轮再补）；
+- **单轮上限 `MODEL_PROBE_MAX_MODELS`**（**装配侧 env 默认 = `10`**，数值不进契约；超出的模型留在 `capabilities_source IS NULL`，下一轮再补）；探测对单个模型**同步返回** `200 ModelProbeResult`，仅当单上游候选模型数超预算、需跨模型续跑时才退任务面（`result.probe` 六计数）；
   **出口预算拒绝（`rate_limited`）即停**本轮，不再往后打。
 - **探测失败不改任务成败**：`syncModels` 成功/失败判据**只用列表拉取结果**；探测的计数进任务 `result.probe`
   （`{candidates, probed, applied, skipped, failed, requests}`），并写审计 `model.probe`。
@@ -3245,3 +3251,5 @@ v1.11.0（**2026-10-14，模型能力探测** —— 新增 **§5 `POST /api/mod
 ⑧ **`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增**（`reason` 是逐端点诊断字段，同 §15.4）、`/v1/*` **只加字段、既有四字段形状与集合口径零变更**、`SCHEMA_VERSION` 仍为 2、**零迁移**。
 
 v1.11.1（**2026-10-14，助手页错误汇总面板的数据口径** —— 新增 **§13.6**，Bo 原话「不是价格错误汇总。是日志的错误日志汇总表，这样方便和助手对话复制」）：**纯前端消费口径登记，零新端点、零字段新增、零 DTO 变更、零代码改动**。① 面板行 = §12.3 `GET /api/observability/errors` 原样响应（默认近 1h、`ts DESC, id DESC`）；② 顶部 9 分型计数条 = §12.2 `events.byCategory`，**不得**用分页响应现算计数；③ 点行注入只走 §13.1 `logContext` 白名单字段（`window` / `from` / `to` / `category` / `severity` / `model` / `requestId`），**禁止把行文本塞进 `messages`**（§13 纪律 3「日志隔离」不接受自由文本查询）；④ **裁定 `done.citations` 不加默认快照** —— 自动快照每轮撞 §13.3「50 条」上限使 `truncated` 常驻失真，且面板上线后「复制」痛点已解、价值不抵代价；全局视野改由点行注入 `category` 多值承担（§13.2 语义一字未动）；⑤ 面板（`from`/`to`）与计数条（`window`）允许不同窗口，后端只回显（§12.3 `range` / §12.2 `window`），一致性归前端渲染，**不新增字段**；⑥ 取证：`observabilityApi.errors()` 自 `56d0dbb` 起零调用点、§12.3 端点活性实测 `200` —— 实现早已就位，缺的是消费侧。**`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2、零 DDL、`src/api/` + `src/gateway/` + `src/db/` 零改动**（`docs/adr/0025-assistant-error-summary-panel.md`）。
+
+v1.11.2（**2026-10-14，sync 选 key 候选修复 + 探测口径三点补充** —— sync 401 根因 = `pickSyncKey` 选中无台账绑定的孤儿 key `****amMc`（`key_232d66a4385d`，上游侧已失效、零观测面），A/B 实测 `****amMc`→401 / 台账绑定 key→200，Bo 拍板停用 + 共享凭据选择器）：① 新增 `src/api/services/credential-rotation.ts` 共享凭据选择器（候选 = 已启用 +（有则）台账绑定 active 账号优先，`created_at,id` 稳定序；`tryWithRotation` 401/403 记 `auth` 换下一把、装配默认试 3 把、预算耗尽回最后一个错误）；② `SyncSummary` 新增可选可观测位 `credentials: {tried, usedMaskedKeys, switched}`（只含计数与掩码、不含明文）；③ 探测口径钉死三处：条件 `UPDATE` 的 WHERE 补 `now` 半句、端点**同步返回** `200 ModelProbeResult`（不 202 不打任务，单上游多模型超时预算才退任务面 `result.probe`）、`MODEL_PROBE_MAX_MODELS` 落装配侧 env 默认（数值不进契约）。**无字段改名、无字段删除、`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2、零迁移**（`docs/adr/0026-sync-credential-rotation.md`）。

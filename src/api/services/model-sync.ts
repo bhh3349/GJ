@@ -14,11 +14,16 @@
 import type { Db } from '../../db/database.js';
 import type { ModelType } from '../dto.js';
 import { isHttpUrl } from '../../db/balance-query.js';
-import { decryptedKeyRefs, listKeys } from '../../db/repo/keys.js';
 import { getUpstreamRow } from '../../db/repo/upstreams.js';
 import { upsertModelFromSync, type SyncedModel } from '../../db/repo/models.js';
 import { ApiError } from '../errors.js';
 import type { TaskReporter } from '../task-runner.js';
+import {
+  CREDENTIAL_ATTEMPT_BUDGET,
+  tryWithRotation,
+  UpstreamCredentialError,
+  type CredentialAttempt,
+} from './credential-rotation.js';
 
 const FETCH_TIMEOUT_MS = 15_000;
 
@@ -31,6 +36,12 @@ export interface SyncSummary {
   /** 本次**建档**时按名字推断出的 type 条数 —— 不是从上游读来的，管理员应当知道 */
   inferredTypeCount: number;
   errors: { upstreamId: string; upstreamName: string; message: string }[];
+  /**
+   * 本轮**发生过换把**时的可观测位（契约 §5 v1.11.2 / ADR-0026）：`switched === 0` 时**省略** ——
+   * 字段出现即代表「第一把 key 的凭据失效、换了下一把」。聚合本次任务全部上游；**只含计数与掩码**、
+   * 不含明文（`DecryptedKeyRef` 不带 `toJSON`，明文出不了序列化）。
+   */
+  credentials?: CredentialAttempt;
 }
 
 interface TargetUpstream {
@@ -100,21 +111,6 @@ export function parseModelNames(body: unknown): string[] {
   return [...new Set(names)];
 }
 
-/** 该上游用哪把 key 去拉列表：第一把已启用的（明文只在本次 fetch 内存在）。 */
-function pickSyncKey(db: Db, upstreamId: string, masterKey: Buffer): string | null {
-  const page = listKeys(db, {
-    upstreamId,
-    enabled: true,
-    includeDeleted: false,
-    page: 1,
-    pageSize: 1,
-  });
-  const keyId = page.items[0]?.id;
-  if (keyId === undefined) return null;
-  const refs = decryptedKeyRefs(db, { keyIds: [keyId] }, masterKey);
-  return refs[0]?.decrypted ?? null;
-}
-
 async function fetchModelNames(
   upstream: TargetUpstream,
   credential: string,
@@ -134,7 +130,10 @@ async function fetchModelNames(
     if (!res.ok) {
       // 只回状态码与主机名：URL 本身没被替换过，但错误信息会被前端和审计看到，
       // 少给它一点内部拓扑总是好的
-      throw new Error(`上游 /v1/models 返回 ${res.status}`);
+      const message = `上游 /v1/models 返回 ${res.status}`;
+      // 401/403 = 凭据失效，交给选择器换下一把（ADR-0026）；其余状态码不是换 key 能解决的
+      if (res.status === 401 || res.status === 403) throw new UpstreamCredentialError(res.status, message);
+      throw new Error(message);
     }
     return parseModelNames((await res.json()) as unknown);
   } catch (err) {
@@ -166,6 +165,8 @@ export async function syncModels(
    * 于是"注入的假 fetch / 闸包装"在这条路上失守（`routes/models.ts` 当时就没传）。
    */
   fetchImpl: typeof fetch,
+  /** 凭据换把预算（ADR-0026）。默认装配常量 `CREDENTIAL_ATTEMPT_BUDGET`，测试可注入更小值。 */
+  rotationBudget: number = CREDENTIAL_ATTEMPT_BUDGET,
 ): Promise<SyncSummary> {
   const targets = resolveSyncTargets(db, upstreamId);
   reporter.setTotal(targets.length);
@@ -180,13 +181,36 @@ export async function syncModels(
     errors: [],
   };
 
+  // 换把可观测位聚合本次任务全部上游（契约 §5 v1.11.2）：`switched === 0` 时整字段省略。
+  const usedMaskedKeys: string[] = [];
+  let credTried = 0;
+  let credSwitched = 0;
+
   for (const upstream of targets) {
     try {
-      const credential = pickSyncKey(db, upstream.id, masterKey);
-      if (credential === null) throw new Error('该上游没有已启用的 key，无法拉取模型列表');
+      const rotation = await tryWithRotation(
+        db,
+        upstream.id,
+        masterKey,
+        rotationBudget,
+        async (ref) => {
+          try {
+            const names = await fetchModelNames(upstream, ref.decrypted, fetchImpl);
+            return { outcome: 'ok' as const, value: names };
+          } catch (err) {
+            // 只有凭据类错误（401/403）才换把；超时/网络/5xx 直接抛，交给下面的 catch 记失败
+            if (err instanceof UpstreamCredentialError) return { outcome: 'retry' as const, error: err };
+            throw err;
+          }
+        },
+        '该上游没有已启用的 key，无法拉取模型列表',
+      );
 
-      const names = await fetchModelNames(upstream, credential, fetchImpl);
-      for (const name of names) {
+      credTried += rotation.attempts.tried;
+      credSwitched += rotation.attempts.switched;
+      usedMaskedKeys.push(...rotation.attempts.usedMaskedKeys);
+
+      for (const name of rotation.result) {
         const type = inferModelType(name);
         const model: SyncedModel = {
           upstreamId: upstream.id,
@@ -216,6 +240,10 @@ export async function syncModels(
       });
     }
     reporter.step();
+  }
+
+  if (credSwitched > 0) {
+    summary.credentials = { tried: credTried, usedMaskedKeys, switched: credSwitched };
   }
 
   if (summary.upstreams > 0 && summary.failedUpstreams === summary.upstreams) {

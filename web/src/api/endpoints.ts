@@ -29,6 +29,8 @@ import type {
   LogListQuery,
   ModelListQuery,
   ModelPatchRequest,
+  ModelProbeRequest,
+  ModelProbeResult,
   ModelProfile,
   Paged,
   SessionInfo,
@@ -150,6 +152,12 @@ export const modelsApi = {
   /** 异步任务：省略 upstreamId 即全量。进度走 `GET /api/tasks/:id`，**不做假进度条**。 */
   sync: (upstreamId?: string) =>
     api.post<TaskAccepted>('/models/sync', upstreamId ? { upstreamId } : {}),
+  /**
+   * §5 能力探测（v1.11.0）：同步返回（不打任务）。`apply:false` 只回结果、零写库。
+   * 计量与请求体全在后端内置 —— 前端只拼路径与 body，不做任何请求体注入。
+   */
+  probe: (id: string, body: ModelProbeRequest = {}) =>
+    api.post<ModelProbeResult>(`/models/${id}/probe`, body),
 };
 
 // ── §5.1 异步任务 ─────────────────────────────────────────────────────────

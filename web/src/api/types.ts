@@ -431,6 +431,12 @@ export interface GroupKeyResetResponse {
 export type ModelType = 'chat' | 'embedding' | 'image' | 'audio' | 'rerank';
 export type ModelCapability = 'stream' | 'function_call' | 'vision' | 'json_mode';
 
+/**
+ * v1.11.0（§5 能力探测）：`capabilities` 的写入来源，**只读**（`PATCH` 不收）。
+ * `manual` = 人手 PATCH 写的（探测永不覆盖）；`probe` = 机器探测写的；`null` = 从没问过。
+ */
+export type ModelCapabilitySource = 'manual' | 'probe' | null;
+
 /** 单价，单位分/1k tokens。整体为 `null` 表示上游没给（≠ 0）。 */
 export interface ModelPrice {
   inputPer1k: Cents;
@@ -444,6 +450,10 @@ export interface ModelProfile {
   upstreamId: string;
   type: ModelType;
   capabilities: ModelCapability[];
+  /** v1.11.0 只读：来源标记。与空数组一起解读 —— `[]`+'probe' = 问过、不支持；`[]`+null = 还没问过。 */
+  capabilitiesSource: ModelCapabilitySource;
+  /** v1.11.0 只读：最近一次能力探测时刻（探测每次都刷，与是否写库无关）；null = 从没探测过。 */
+  lastProbedAt: Iso8601 | null;
   contextLength: number | null;
   price: ModelPrice | null;
   /** 当前**可服务**该模型的 key（启用、非冷却、余额 > 0）。空数组 = 暂不可用。 */
@@ -454,6 +464,59 @@ export interface ModelProfile {
   revision: number;
   createdAt: Iso8601;
   updatedAt: Iso8601;
+}
+
+/**
+ * §5 能力探测单项结论（v1.11.0）。`supported` 是**三态**不是布尔：
+ * `true` = 支持 / `false` = 上游明确拒绝（4xx，模型的性质不是 key 的故障）/
+ * `null` = 判不出（401/403/404/429/5xx/超时/网络）。`false` 与 `null` 都**从不写库**。
+ */
+export interface ModelProbeItem {
+  capability: ModelCapability;
+  supported: boolean | null;
+  /** 上游响应状态码；超时 / 网络失败时为 `null`。 */
+  status: number | null;
+  durationMs: number;
+  /** 逐端点诊断字段（不进 ERROR_CODES）：upstream_4xx / rate_limited / auth / not_found / server_error / timeout / network。 */
+  reason: string | null;
+}
+
+/** `POST /api/models/:id/probe` 请求体（§5）。`targets` 只接受四枚能力名，其余后端 400。 */
+export interface ModelProbeRequest {
+  /** 省略 = 全探四项。 */
+  targets?: ModelCapability[];
+  /** 缺省 `false` = 只回结果、一个字节都不写库；`true` = 把探测到的 `true` 写回档案（人工值永不被覆盖）。 */
+  apply?: boolean;
+}
+
+/** `POST /api/models/:id/probe` 的同步响应（§5，不打任务）。 */
+export interface ModelProbeResult {
+  modelId: string;
+  modelName: string;
+  upstreamId: string;
+  probedAt: Iso8601;
+  /** 本次真打出去的上游请求数。探测永不写 usage_logs，所以响应里没有 token 数。 */
+  requests: number;
+  items: ModelProbeItem[];
+  /** 本次**真写进档案**的项（`apply:false` 时恒 `[]`）。 */
+  applied: ModelCapability[];
+  /** 写后现值（`apply:false` 时也是现值，前端可直接渲染）。 */
+  capabilities: ModelCapability[];
+  capabilitiesSource: ModelCapabilitySource;
+}
+
+/**
+ * 同步任务 `result.probe`（§5 尾部自动补探的六计数）。探测失败不改任务成败，
+ * 所以任务 succeeded / failed 都可能带它。读前必须先认形状（ModelsPage 的 asProbeCounters）。
+ */
+export interface ModelSyncProbeCounters {
+  /** 候选 = 本次同步涉及且从未问过（capabilities_source 为 null）的模型。 */
+  candidates: number;
+  probed: number;
+  applied: number;
+  skipped: number;
+  failed: number;
+  requests: number;
 }
 
 export interface ModelListQuery extends PageQuery {

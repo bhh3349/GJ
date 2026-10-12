@@ -28,8 +28,9 @@ import { useEffect } from 'react';
 import { modelsApi } from '@/api/endpoints';
 import { useAction } from '@/api/hooks';
 import type { ModelCapability, ModelProfile, ModelType } from '@/api/types';
+import { ModelProbePanel } from '@/pages/models/ModelProbePanel';
 import { tokens } from '@/theme/tokens';
-import { formatCents, formatCount, formatIso } from '@/utils/format';
+import { formatCents, formatIso } from '@/utils/format';
 
 const { Text } = Typography;
 
@@ -237,18 +238,23 @@ export function ModelDetailDrawer({
             )}
           </Form>
 
+          {/* §5 能力探测（v1.11.0）：默认只探不写，管理员看清结论再确认写入。 */}
+          <div style={{ marginTop: tokens.space.md }}>
+            <ModelProbePanel model={model} onSaved={onSaved} />
+          </div>
+
           <div
             style={{
               borderTop: `1px solid ${tokens.color.border}`,
               paddingTop: tokens.space.md,
-              marginTop: tokens.space.sm,
+              marginTop: tokens.space.md,
             }}
           >
             <Text type="secondary" style={{ fontSize: 12 }}>
               上游 {model.upstreamId}
-              {model.contextLength !== null ? ` · 上下文 ${formatCount(model.contextLength)} tokens` : ''}
               {` · 最近同步 ${formatIso(model.lastSyncedAt)}`}
               {` · 更新 ${formatIso(model.updatedAt)}`}
+              {model.lastProbedAt === null ? ' · 从未探测' : ` · 最近探测 ${formatIso(model.lastProbedAt)}`}
             </Text>
 
             <div style={{ marginTop: tokens.space.md }}>

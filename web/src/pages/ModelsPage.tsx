@@ -7,6 +7,10 @@
  * - 价格是**分 / 1k tokens**，`null` = 上游没给，**不是 0**：卡片上显示「未知」而非 ¥0.00。
  * - `POST /api/models/sync` 是异步任务，进度只来自 `GET /api/tasks/:id`
  *   的真实 `progress.done/total`；`total` 为 null 时显示不确定进度条，**不做假进度条**。
+ * - 能力那几格是**三态**（§5 / v1.11.0）：非空 = 有 / `[]`+`probe` = 问过不支持 / `[]`+null = 未知。
+ *   渲染统一走 `CapabilityRow`，不在这里各写一套判读。
+ * - 同步任务尾部的自动补探计数只读 `result.probe`（§5），认不出形状就整块不显示，
+ *   不把 `undefined` 渲染成 0；**探测失败不改任务成败**，所以成功任务也可能带 failed>0。
  */
 import { ReloadOutlined, SyncOutlined } from '@ant-design/icons';
 import {
@@ -32,11 +36,13 @@ import {
   PAGE_SIZE_DEFAULT,
   type ModelCapability,
   type ModelProfile,
+  type ModelSyncProbeCounters,
   type ModelType,
   type Upstream,
 } from '@/api/types';
 import { PageHeader } from '@/components/PageHeader';
 import { EmptyState, ErrorState, LoadingState } from '@/components/states/StateBlock';
+import { CapabilityRow, CAPABILITY_LABEL } from '@/pages/models/CapabilityRow';
 import { ModelDetailDrawer } from '@/pages/models/ModelDetailDrawer';
 import { tokens } from '@/theme/tokens';
 import { formatCents, formatCompact, formatCount, formatRelative } from '@/utils/format';
@@ -51,12 +57,21 @@ const TYPE_LABEL: Record<ModelType, string> = {
   rerank: '重排',
 };
 
-const CAPABILITY_LABEL: Record<ModelCapability, string> = {
-  stream: '流式',
-  function_call: '函数调用',
-  vision: '视觉',
-  json_mode: 'JSON 模式',
-};
+/**
+ * 同步任务 `result.probe` 的六个计数（§5 尾部自动补探）。
+ * `Task.result` 是 `unknown`（别的任务类型也走这个字段），所以**必须先认形状再读**：
+ * 少任何一数就整块不显示，绝不把「没这个计数」渲染成 0。
+ */
+function asProbeCounters(value: unknown): ModelSyncProbeCounters | null {
+  if (value === null || typeof value !== 'object') return null;
+  const probe = (value as Record<string, unknown>).probe;
+  if (probe === null || typeof probe !== 'object') return null;
+  const row = probe as Record<string, unknown>;
+  for (const key of ['candidates', 'probed', 'applied', 'skipped', 'failed', 'requests']) {
+    if (typeof row[key] !== 'number') return null;
+  }
+  return probe as ModelSyncProbeCounters;
+}
 
 function PriceLine({ model }: { model: ModelProfile }) {
   if (model.price === null) {
@@ -109,6 +124,15 @@ export default function ModelsPage() {
   const task = useTaskPolling((finished) => {
     if (finished.status === 'succeeded') message.success('模型同步完成');
     else message.error(finished.message ?? '模型同步失败');
+    // 探测失败不改任务成败（§5）：succeeded 的任务尾部也可能有 failed>0 的补探，如实提示。
+    const probe = asProbeCounters(finished.result);
+    if (probe !== null && probe.failed > 0) {
+      message.warning(
+        `能力自动补探：探测 ${probe.probed} 个、失败 ${probe.failed} 个` +
+          (probe.skipped > 0 ? `、跳过 ${probe.skipped} 个` : '') +
+          '，失败不改同步任务成败。',
+      );
+    }
     list.reload();
   });
 
@@ -198,6 +222,17 @@ export default function ModelsPage() {
           {task.task.message ? (
             <Text type={task.task.status === 'failed' ? 'danger' : 'secondary'} style={{ fontSize: 12 }}>
               {task.task.message}
+            </Text>
+          ) : null}
+          {task.task.status === 'succeeded' && asProbeCounters(task.task.result) !== null ? (
+            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 4 }}>
+              {(() => {
+                const probe = asProbeCounters(task.task.result) as ModelSyncProbeCounters;
+                return (
+                  '能力补探 · 候选 ' + probe.candidates + ' / 已探 ' + probe.probed + ' / 写入 ' + probe.applied +
+                  ' / 跳过 ' + probe.skipped + ' / 失败 ' + probe.failed + ' / 上游请求 ' + probe.requests
+                );
+              })()}
             </Text>
           ) : null}
         </div>
@@ -388,27 +423,8 @@ export default function ModelsPage() {
                   </Space>
                 </div>
 
-                <div style={{ marginTop: tokens.space.md, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                  {model.capabilities.length === 0 ? (
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      未声明能力
-                    </Text>
-                  ) : (
-                    model.capabilities.map((item) => (
-                      <Tag
-                        key={item}
-                        bordered={false}
-                        style={{
-                          marginInlineEnd: 0,
-                          fontSize: 11,
-                          background: tokens.tint.info,
-                          color: tokens.color.info,
-                        }}
-                      >
-                        {CAPABILITY_LABEL[item]}
-                      </Tag>
-                    ))
-                  )}
+                <div style={{ marginTop: tokens.space.md }}>
+                  <CapabilityRow model={model} fontSize={12} />
                 </div>
 
                 <div
@@ -448,6 +464,7 @@ export default function ModelsPage() {
                   <Text type="secondary" style={{ fontSize: 11 }}>
                     {upstreamName.get(model.upstreamId) ?? model.upstreamId} · 同步于{' '}
                     {formatRelative(model.lastSyncedAt)}
+                    {model.lastProbedAt === null ? '' : ` · 探测于 ${formatRelative(model.lastProbedAt)}`}
                   </Text>
                 </div>
               </Card>

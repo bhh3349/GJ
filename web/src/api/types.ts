@@ -295,6 +295,11 @@ export interface UpstreamKey {
   balanceSource: BalanceSource | null;
   /** `category="token-plan"` 时非空，此时 `balance` 恒为 `null`。 */
   tokenPlan: TokenPlan | null;
+  /**
+   * `true` = 上游侧给的是**无限额度**（此时 `balance` 恒为 `null`，但语义不是「未知」）。
+   * 两者必须分开呈现：无限额度渲染成徽标，绝不渲染成 `—` / 「未知」 / 任何金额或负数。
+   */
+  unlimited: boolean;
   health: KeyHealth;
   cooldownUntil: Iso8601 | null;
   consecutiveFailures: number;

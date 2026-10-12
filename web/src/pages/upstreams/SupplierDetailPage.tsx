@@ -65,6 +65,7 @@ import { deleteUpstream } from '@/pages/upstreams/deleteUpstream';
 import { SupplierSubscriptionsTable } from '@/pages/upstreams/SupplierSubscriptionsTable';
 import { UpstreamModal } from '@/pages/upstreams/UpstreamModal';
 import { tokens } from '@/theme/tokens';
+import { balanceReadiness } from '@/utils/balanceReadiness';
 import { formatCompact, formatCount, formatIso, formatPercent, formatRelative } from '@/utils/format';
 
 const { Text } = Typography;
@@ -142,6 +143,7 @@ function keyColumns({ onToggle, isPending }: KeyColumnProps): ColumnsType<Upstre
             currency={row.balanceCurrency ?? 'CNY'}
             source={row.balanceSource}
             updatedAt={row.balanceUpdatedAt}
+            unlimited={row.unlimited}
             showMeta
             strong
           />
@@ -262,9 +264,16 @@ export default function SupplierDetailPage() {
    * 可能**挤到数据面**；"几次请求"不预告 —— 那个数只有服务端的 result 说了算。
    */
   const confirmRefreshBalance = (row: Upstream): void => {
+    const ready = balanceReadiness(row);
+    if (!ready.queryable) {
+      // 无可用查询方式时后端当场 422 拒绝，不会产生一个「全部跳过」的任务。
+      // 把一次注定的失败做成一个可点的按钮没有意义，这里直接把原因说清楚。
+      message.warning(ready.reason ?? '这个上游现在查不了余额');
+      return;
+    }
     confirmManualRefresh(modal, {
       title: `查「${row.name}」的余额？`,
-      scope: '打谁：这一条上游名下全部配了余额查询方式的 key（没配的会被跳过）',
+      scope: `打谁：这一条上游名下全部 ${row.keyCount} 把 key，按当前生效的查询方式逐把查`,
       onOk: async () => {
         const accepted = await run('refresh', () => upstreamsApi.refreshBalance(row.id), '已提交余额查询任务');
         if (accepted !== null) task.start(accepted.taskId);
@@ -438,10 +447,11 @@ export default function SupplierDetailPage() {
           </Field>
           <Field label="Key">{`${formatCount(row.enabledKeyCount)} 启用 / 共 ${formatCount(row.keyCount)}`}</Field>
           <Field label="未知余额的 key">{formatCount(row.balanceUnknownKeyCount)}</Field>
+          <Field label="无限额度的 key">{formatCount(row.unlimitedKeyCount)}</Field>
           <Field label="不计金额的套餐类 key">{formatCount(row.tokenPlanKeyCount)}</Field>
         </Space>
         <div style={{ marginTop: tokens.space.sm, fontSize: 11, color: tokens.color.textTertiary }}>
-          账号级与 key 级是合计的拆解，两者不相加；未知余额的 key 不计入合计。
+          账号级与 key 级是合计的拆解，两者不相加；未知余额与无限额度的 key 都不计入合计。
         </div>
       </Card>
 
@@ -451,7 +461,11 @@ export default function SupplierDetailPage() {
         extra={
           <Space size={tokens.space.sm}>
             <Tooltip
-              title={row.balanceQuery?.enabled ? '按模板查该上游全部 key 的余额' : '未配置余额模板，查询会跳过'}
+              title={
+                balanceReadiness(row).queryable
+                  ? '按当前生效的查询方式逐把查该上游全部 key 的余额'
+                  : balanceReadiness(row).reason
+              }
             >
               <Button
                 size="small"

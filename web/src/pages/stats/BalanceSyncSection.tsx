@@ -125,7 +125,7 @@ export function BalanceSyncSection({ upstreamId, showDrift = true }: BalanceSync
                   运行中
                 </Tag>
               ) : (
-                <Tooltip title="BALANCE_SYNC_MINUTES=0 ⇒ 未注册定时器。手动刷新三个端点不受影响。">
+                <Tooltip title="自动同步已关闭，未挂定时器。手动刷新不受影响。">
                   <Tag
                     bordered={false}
                     style={{ marginInlineEnd: 0, background: tokens.tint.neutral, color: tokens.color.textSecondary }}

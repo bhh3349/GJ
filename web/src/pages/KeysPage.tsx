@@ -304,6 +304,7 @@ export default function KeysPage() {
             currency={row.balanceCurrency ?? 'CNY'}
             source={row.balanceSource}
             updatedAt={row.balanceUpdatedAt}
+            unlimited={row.unlimited}
             showMeta
             strong
           />

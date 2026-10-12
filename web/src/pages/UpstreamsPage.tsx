@@ -65,6 +65,7 @@ import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { deleteUpstream } from '@/pages/upstreams/deleteUpstream';
 import { UpstreamModal } from '@/pages/upstreams/UpstreamModal';
 import { tokens } from '@/theme/tokens';
+import { balanceReadiness } from '@/utils/balanceReadiness';
 import { formatCount, formatIso, formatPercent, formatRelative } from '@/utils/format';
 
 const { Text } = Typography;
@@ -156,9 +157,16 @@ export default function UpstreamsPage() {
    * 可能**挤到数据面**；而"几次请求"不在这里预告 —— 那个数只有服务端的 result 说了算。
    */
   const confirmRefreshBalance = (row: Upstream): void => {
+    const ready = balanceReadiness(row);
+    // 没有可用查询方式时后端当场 422 拒绝，不会产生一个「全部跳过」的任务。
+    // 因此这里不弹确认框、也不发请求——把一次注定的失败做成一个可点的按钮没有意义。
+    if (!ready.queryable) {
+      message.warning(ready.reason ?? '这个上游现在查不了余额');
+      return;
+    }
     confirmManualRefresh(modal, {
       title: `查「${row.name}」的余额？`,
-      scope: '打谁：这一条上游名下全部配了余额查询方式的 key（没配的会被跳过）',
+      scope: `打谁：这一条上游名下全部 ${row.keyCount} 把 key，按当前生效的查询方式逐把查`,
       onOk: () => refreshBalance(row),
     });
   };
@@ -244,7 +252,8 @@ export default function UpstreamsPage() {
           <Text type="secondary" style={{ fontSize: 11 }}>
             {row.balanceUnknownKeyCount > 0
               ? `${row.balanceUnknownKeyCount} 个未知未计入合计`
-              : '已全部纳入合计'}
+              : '已知余额全部纳入合计'}
+            {row.unlimitedKeyCount > 0 ? ` · 无限额度 ${row.unlimitedKeyCount} 个不计金额` : ''}
             {row.tokenPlanKeyCount > 0 ? ` · 套餐类 ${row.tokenPlanKeyCount} 个不计金额` : ''}
           </Text>
         </div>
@@ -338,7 +347,7 @@ export default function UpstreamsPage() {
         }
         if (!sync.auto.enabled) {
           return (
-            <Tooltip title="自动同步整体已关闭（BALANCE_SYNC_MINUTES=0）。手动「查余额」不受影响。">
+            <Tooltip title="自动同步整体已关闭。手动「查余额」不受影响。">
               <Tag
                 bordered={false}
                 style={{
@@ -412,7 +421,13 @@ export default function UpstreamsPage() {
           <Button size="small" type="link" style={{ padding: 0 }} onClick={() => openEdit(row)}>
             编辑
           </Button>
-          <Tooltip title={row.balanceQuery?.enabled ? '按模板查该上游全部 key 的余额' : '未配置余额模板，查询会跳过'}>
+          <Tooltip
+            title={
+              balanceReadiness(row).queryable
+                ? '按当前生效的查询方式逐把查该上游全部 key 的余额'
+                : balanceReadiness(row).reason
+            }
+          >
             <Button
               size="small"
               type="link"
@@ -477,7 +492,7 @@ export default function UpstreamsPage() {
       />
       <Text type="secondary" style={{ fontSize: 12 }}>共 {formatCount(list.data?.total ?? 0)} 个</Text>
       {syncStatus.data ? (
-        <Tooltip title="自动同步参数由服务端配置；要改间隔请改部署侧 BALANCE_SYNC_MINUTES，管理面没有写入口。">
+        <Tooltip title="自动同步的间隔与开关由服务端决定，这里只展示。">
           <Text type="secondary" style={{ fontSize: 12 }}>
             {syncStatus.data.auto.enabled
               ? `自动同步：每 ${syncStatus.data.auto.intervalMinutes} 分钟 ±${formatPercent(

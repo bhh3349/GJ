@@ -97,7 +97,12 @@ import {
   matchesPoolFilter,
   type PoolFilterKey,
 } from '@/utils/supplierHealth';
-import { computePoolFunds } from '@/utils/poolFunds';
+import {
+  accountSubscriptionRemaining,
+  computePoolFunds,
+  subscriptionRemainingCents,
+  subscriptionRemainingTail,
+} from '@/utils/poolFunds';
 
 const { Text } = Typography;
 
@@ -161,9 +166,10 @@ const SUBSCRIPTION_COLUMNS: ColumnsType<SupplierSubscription> = [
     align: 'right',
     render: (_: unknown, row) => {
       // 两端都是服务端给的分，相减不涉及量纲换算；**任一端为 null 就是"未知"而不是 0**（§0.2）。
+      // 减法只在 `subscriptionRemainingCents` 里算一次，与账号行的「套餐余额」列同源。
       const total = row.amountTotalCents;
       const used = row.amountUsedCents;
-      const remaining = total === null || used === null ? null : total - used;
+      const remaining = subscriptionRemainingCents(row);
       const ratio = total === null || used === null || total <= 0 ? null : (total - used) / total;
       return (
         <RemainingBar
@@ -561,18 +567,56 @@ export default function SupplierAccountsPage() {
     },
     {
       title: (
-        <Tooltip title="套餐数。套餐不是 key，不进 key 计数与余额合计。">
-          <span>套餐</span>
+        <Tooltip title="套餐余额 = 本账号名下各套餐「总额 − 已用」的合计（¥）。它与左边的「账号余额」是两个口径、不相加：那是账号钱包，这是套餐里的钱。套餐不是 key，也不进 key 的余额合计。">
+          <span>套餐余额</span>
         </Tooltip>
       ),
       dataIndex: 'subscriptions',
-      width: 88,
+      key: 'subscriptionBalance',
+      width: 132,
       align: 'right',
-      render: (_: unknown, row) => (
-        <Text style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>
-          {formatCount(row.subscriptions.length)}
-        </Text>
-      ),
+      render: (_: unknown, row) => {
+        const sums = accountSubscriptionRemaining(row);
+        // 没有套餐 ≠ 余额 0；算不出 ≠ 余额 0。两者都得跟「¥0.00」分开看（§0.2）。
+        if (sums === null) {
+          return (
+            <Tooltip title="这个账号名下没有套餐 —— 它不是「余额为 0」。">
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                —
+              </Text>
+            </Tooltip>
+          );
+        }
+        if (sums.countedCount === 0) {
+          return (
+            <Tooltip
+              title={`${formatCount(row.subscriptions.length)} 个套餐，但上游没给总额或已用 —— 剩余算不出。未知 ≠ 0，不计入任何合计。`}
+            >
+              <Text type="secondary" italic style={{ fontSize: 12 }}>
+                未知
+              </Text>
+            </Tooltip>
+          );
+        }
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 2, alignItems: 'flex-end' }}>
+            <Tooltip
+              title={
+                sums.unknownCount > 0
+                  ? `${formatCount(row.subscriptions.length)} 个套餐里 ${formatCount(sums.unknownCount)} 条上游没给数（不计入），合计只来自其余 ${formatCount(sums.countedCount)} 条。`
+                  : `${formatCount(sums.countedCount)} 个套餐的剩余合计（每条都是 总额 − 已用）。`
+              }
+            >
+              <Text strong style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>
+                {formatCents(sums.total)}
+              </Text>
+            </Tooltip>
+            <Text type="secondary" style={{ fontVariantNumeric: 'tabular-nums', fontSize: 11 }}>
+              {`${formatCount(row.subscriptions.length)} 个套餐`}
+            </Text>
+          </div>
+        );
+      },
     },
     {
       title: (
@@ -819,7 +863,7 @@ export default function SupplierAccountsPage() {
                       columns={columns}
                       dataSource={localRows ?? accounts.data?.items ?? []}
                       loading={accounts.refreshing}
-                      scroll={{ x: 1360 }}
+                      scroll={{ x: 1404 }}
                       rowSelection={{
                         selectedRowKeys: selected,
                         onChange: (keys) => {
@@ -866,9 +910,11 @@ export default function SupplierAccountsPage() {
                               按上游筛。
                             </Text>
                             <div>
-                              <Text style={{ fontSize: 12, fontWeight: 600 }}>
-                                {`套餐 ${formatCount(row.subscriptions.length)} 个`}
-                              </Text>
+                              <Tooltip title="套餐余额 = 本账号名下各套餐「总额 − 已用」的合计（¥）。它不是账号钱包，也不是 key 的余额，三者不相加。">
+                                <Text style={{ fontSize: 12, fontWeight: 600 }}>
+                                  {`套餐 ${formatCount(row.subscriptions.length)} 个${subscriptionRemainingTail(row)}`}
+                                </Text>
+                              </Tooltip>
                             </div>
                             <Table<SupplierSubscription>
                               rowKey="subNo"

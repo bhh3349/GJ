@@ -32,6 +32,7 @@ import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { SubscriptionExpiryTimeline } from '@/pages/upstreams/SubscriptionExpiryTimeline';
 import { tokens } from '@/theme/tokens';
 import { formatCents, formatCount, formatIso, formatRelative, formatTokens } from '@/utils/format';
+import { subscriptionRemainingCents } from '@/utils/poolFunds';
 
 const { Text } = Typography;
 
@@ -165,7 +166,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
       render: (_: unknown, row) => {
         const total = row.amountTotalCents;
         const used = row.amountUsedCents;
-        const remaining = total === null || used === null ? null : total - used;
+        const remaining = subscriptionRemainingCents(row);
         const ratio = total === null || used === null || total <= 0 ? null : (total - used) / total;
         return (
           <RemainingBar

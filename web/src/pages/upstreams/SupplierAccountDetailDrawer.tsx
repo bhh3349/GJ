@@ -45,6 +45,7 @@ import { confirmManualRefresh } from '@/components/ManualRefreshConfirm';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { tokens } from '@/theme/tokens';
 import { formatCents, formatCount, formatIso, formatRelative } from '@/utils/format';
+import { subscriptionRemainingCents, subscriptionRemainingTail } from '@/utils/poolFunds';
 
 const { Text, Paragraph } = Typography;
 
@@ -235,7 +236,7 @@ export function SupplierAccountDetailDrawer({
         // 相减不涉及量纲换算；**任一端为 null 则剩余是"未知"，不是 0**。
         const total = row.amountTotalCents;
         const used = row.amountUsedCents;
-        const remaining = total === null || used === null ? null : total - used;
+        const remaining = subscriptionRemainingCents(row);
         const ratio = total === null || used === null || total <= 0 ? null : (total - used) / total;
         return (
           <RemainingBar
@@ -296,6 +297,13 @@ export function SupplierAccountDetailDrawer({
         ),
     },
   ];
+
+  /**
+   * 「套餐 N 个 · 剩余 ¥X」的尾巴：套餐余额 = 各套餐「总额 − 已用」的**合计**（¥），
+   * 与账号钱包、key 余额是三个口径、不相加。没有套餐就说"没有"，算不出就说"未知"，
+   * 两者都不得渲染成 ¥0.00（§0.2）。判据与措辞住在公共函数，不在这里重算。
+   */
+  const subscriptionSummaryTail = account ? subscriptionRemainingTail(account) : '';
 
   return (
     <Drawer
@@ -452,9 +460,11 @@ export function SupplierAccountDetailDrawer({
                   {`仅掩码 ${formatCount(account.maskedKeyCount)}`}
                 </Text>
               </Tooltip>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                {`套餐 ${formatCount(account.subscriptions.length)} 个`}
-              </Text>
+              <Tooltip title="套餐余额 = 各套餐「总额 − 已用」的合计（¥）。它不是账号钱包，也不是 key 的余额，三者不相加。">
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  {`套餐 ${formatCount(account.subscriptions.length)} 个${subscriptionSummaryTail}`}
+                </Text>
+              </Tooltip>
             </div>
             <Table<SupplierSubscription>
               rowKey="subNo"

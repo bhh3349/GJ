@@ -20,6 +20,7 @@
  *   `accountsBalance`，它是全池口径）。
  */
 import type { SupplierAccount, SupplierSubscription, Upstream } from '@/api/types';
+import { formatCents } from '@/utils/format';
 import { LOW_BALANCE_CENTS } from '@/utils/supplierHealth';
 
 export interface PoolTotals {
@@ -48,11 +49,40 @@ export interface PoolFunds {
   subscriptionCount: number;
 }
 
-/** 套餐剩余（分）：两端任缺即 null（未知），**不是 0**。 */
-function premiumRemainingCents(row: SupplierSubscription): number | null {
+/**
+ * 单条套餐的剩余（分）：`amount_total - amount_used`，两端任缺即 `null`（未知），**不是 0**。
+ * §15.8 第 6 问的口径；表格列、账号行内合计、资金池卡三处同源，都吃这一个函数。
+ */
+export function subscriptionRemainingCents(row: SupplierSubscription): number | null {
   const total = row.amountTotalCents;
   const used = row.amountUsedCents;
   return total === null || used === null ? null : total - used;
+}
+
+/**
+ * 一个账号名下**全部套餐的剩余合计**（分），给账号池那一列与详情抽屉用。
+ *
+ * 三条口径（调用方靠这三种返回值分别渲染「—」/「未知」/金额）：
+ * - `count === 0`（名下没有套餐）→ `null`，调用方按「—」渲染，**不得**渲染成 ¥0.00（那是"有额度且为 0"）。
+ * - 有套餐但**一条都算不出**（两端全缺）→ `countedCount === 0` 的对象（不是 `null`！），调用方按「未知」渲染。
+ * - 部分算得出 → 只合计算得出的那些，并把算不出的条数放进 `unknownCount` 说出去。
+ */
+export function accountSubscriptionRemaining(row: SupplierAccount): PoolTotals | null {
+  const sums = sumKnown(row.subscriptions.map(subscriptionRemainingCents));
+  if (row.subscriptions.length === 0) return null;
+  return sums;
+}
+
+/**
+ * 账号行 / 展开行 / 抽屉副行那句「· 剩余 ¥X」的尾巴。三处共用一个判据与措辞，不许漂移：
+ * 没有套餐 → 空字符串（调用方只渲染套餐数即可）；有套餐但全算不出 → `· 剩余未知`；
+ * 否则 → `· 剩余 ¥X`。
+ */
+export function subscriptionRemainingTail(row: SupplierAccount): string {
+  const sums = accountSubscriptionRemaining(row);
+  if (sums === null) return '';
+  if (sums.countedCount === 0) return ' · 剩余未知';
+  return ` · 剩余 ${formatCents(sums.total)}`;
 }
 
 /** 套餐基础额度剩余（上游原值 = Token 个数，不是钱）：同上，任缺即 null。 */
@@ -101,7 +131,7 @@ export function computePoolFunds({ items, total, pageSize }: ComputePoolFundsInp
   return {
     complete: items.length >= total && items.length <= pageSize,
     wallet: { ...wallet, lowCount, exhaustedCount },
-    premium: sumKnown(subscriptions.map(premiumRemainingCents)),
+    premium: sumKnown(subscriptions.map(subscriptionRemainingCents)),
     basic: sumKnown(subscriptions.map(basicRemaining)),
     accountTotal: total,
     subscriptionCount: subscriptions.length,

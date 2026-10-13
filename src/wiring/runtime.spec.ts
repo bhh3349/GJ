@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import { afterEach, describe, it } from 'vitest';
 
 import type { AppConfig } from '../config.js';
-import { sha256Hex } from '../db/crypto.js';
+import { encryptSecret, sha256Hex } from '../db/crypto.js';
 import { openDatabase, type Db } from '../db/database.js';
 import { createGroup } from '../db/repo/groups.js';
 import { createKey, listKeys } from '../db/repo/keys.js';
@@ -29,6 +29,10 @@ import { createUpstream } from '../db/repo/upstreams.js';
 import { permissiveEgressGate } from '../egress/port.js';
 import type { EgressGate } from '../egress/port.js';
 import type { FetchLike } from '../gateway/engine.js';
+import { appendChange } from '../db/repo/change-log.js';
+import { createEgressProxy } from '../db/repo/egress.js';
+import { createSupplierAccount, linkSupplierAccountKey } from '../db/repo/supplier-accounts.js';
+import { createEgressProxyLifecycle } from './egress-proxy.js';
 import { createGatewayRuntime, mountGatewayRoutes } from './runtime.js';
 import type { GatewayRuntime } from './runtime.js';
 
@@ -641,5 +645,134 @@ describe('出口预算闸的接线', () => {
 
     assert.equal(h.calls.length, 1);
     assert.equal(h.calls[0]?.url, 'https://a.example.com/chat/completions');
+  });
+});
+
+
+/* --------------- 出口代理接线（缺口 A，ADR-0021 决策 4c） --------------- */
+
+describe('出口代理接线：绑出口的 key 真从代理层出去（缺口 A）', () => {
+  /**
+   * 主 harness 的真链路 + 一个**真库驱动**的出口代理。桩 fetch 记录"这一发出站带没带 dispatcher"
+   * —— `dispatcher` 出现 = 走了代理层；不出现 = 宿主直连。
+   *
+   * 绑定用仓储 API（不是裸 INSERT）：`linkSupplierAccountKey` 会自己广播 `key` 变更；
+   * 账号级出口列改完再补一条 `egress` 广播 —— 这正是缺口 C 的写路径该做的事，
+   * 本笔只**消费**那条广播（不实现写入口）。
+   */
+  async function setupWithProxy() {
+    const dir = mkdtempSync(join(tmpdir(), 'wiring-egress-live-'));
+    dirs.push(dir);
+    const dbPath = join(dir, 'gateway.db');
+    const db = openDatabase({ path: dbPath });
+
+    const upstreamId = createUpstream(db, { name: 'up-a', baseUrl: 'https://a.example.com' }).id;
+    // 两把 key 同上游：绑出口的那把给高权重 ⇒ 先被选走，出站路径可判
+    const keyBound = probeSecret('bound');
+    const keyPlain = probeSecret('plain');
+    const keyIdBound = createKey(db, { upstreamId, key: keyBound, category: 'balance', weight: 9, balance: 10_000 }, MASTER_KEY).id;
+    const keyIdPlain = createKey(db, { upstreamId, key: keyPlain, category: 'balance', weight: 1, balance: 10_000 }, MASTER_KEY).id;
+
+    upsertModelFromSync(db, {
+      upstreamId,
+      name: 'gpt-4o',
+      displayName: null,
+      type: 'chat',
+      capabilities: ['stream'],
+      contextLength: 128_000,
+      price: { inputPer1k: 100, outputPer1k: 200 },
+    });
+    const gatewayKey = createGroup(db, { name: '接入组' }).gatewayKey.gatewayKey;
+
+    const calls: Call[] = [];
+    const fetchImpl: FetchLike = async (url, init) => {
+      calls.push({ url, init });
+      return jsonResponse(COMPLETION);
+    };
+
+    // 真出口（带凭据，走同一份 aes-256-gcm）
+    const egressId = createEgressProxy(
+      db,
+      { name: 'hk-1', url: 'https://proxy.example.com:8080', username: 'u', password: 'p' },
+      MASTER_KEY,
+    ).id;
+    // 账号 + 台账绑定（Tier 2 的账号级出口；写入口是缺口 C，这里只造快照输入）
+    const accountId = `acc_spec_${Math.random().toString(36).slice(2, 10)}`;
+    createSupplierAccount(db, accountId, {
+      upstreamId,
+      supplier: 'tierflow',
+      identifier: '138****0101',
+      identifierHash: sha256Hex(`egress-live-${accountId}`),
+      status: 'active',
+      encryptedPassword: encryptSecret(probeSecret('acct'), MASTER_KEY),
+    });
+    linkSupplierAccountKey(db, accountId, keyIdBound, '****0101', null);
+    db.prepare('UPDATE supplier_accounts SET egress_id = ? WHERE id = ?').run(egressId, accountId);
+    appendChange(db, 'egress', egressId, 'update', null);
+
+    const proxy = createEgressProxyLifecycle({ db, masterKey: MASTER_KEY });
+    const runtime = createGatewayRuntime({
+      db,
+      config: makeConfig(dbPath),
+      fetchImpl,
+      egress: permissiveEgressGate,
+      egressProxy: proxy,
+    });
+    await mountGatewayRoutes(runtime);
+    await runtime.app.ready();
+    live.push(async () => {
+      await runtime.stop();
+      await runtime.app.close();
+      db.close();
+    });
+    return { db, runtime, gatewayKey, keyIdBound, keyIdPlain, egressId, calls };
+  }
+
+  const body = { model: 'gpt-4o', messages: [{ role: 'user', content: 'hi' }] };
+
+  it('绑出口的 key 出站带 `dispatcher`；未绑的照旧宿主直连（同一请求流上两条路都能走到）', async () => {
+    const h = await setupWithProxy();
+    h.runtime.refreshNow();
+    const headers = { authorization: `Bearer ${h.gatewayKey}` };
+
+    const r1 = await h.runtime.app.inject({ method: 'POST', url: '/v1/chat/completions', headers, payload: body });
+    assert.equal(r1.statusCode, 200);
+    assert.equal(h.calls.length, 1);
+    assert.notEqual(
+      (h.calls[0]?.init as unknown as Record<string, unknown>).dispatcher,
+      undefined,
+      '绑出口（高权重）那把必须先被选走，且这一出站必须经代理层',
+    );
+
+    // 停用绑定那把 ⇒ 候选只剩未绑的 ⇒ 这一出站不得带 dispatcher
+    h.db.prepare('UPDATE upstream_keys SET enabled = 0 WHERE id = ?').run(h.keyIdBound);
+    appendChange(h.db, 'key', h.keyIdBound, 'update', null);
+    h.runtime.refreshNow();
+
+    const r2 = await h.runtime.app.inject({ method: 'POST', url: '/v1/chat/completions', headers, payload: body });
+    assert.equal(r2.statusCode, 200);
+    assert.equal(h.calls.length, 2);
+    assert.equal(
+      (h.calls[1]?.init as unknown as Record<string, unknown>).dispatcher,
+      undefined,
+      '未绑出口（池外 id）照旧宿主直连，不得凭空挂代理',
+    );
+  });
+
+  it('启动 prime：构造完成、还没走第一个 1s 轮询时，绑出口那把也已进镜像（不回落宿主直连）', async () => {
+    // 这一条盯的是"启动窗口"：镜像若只在第一拍刷新，头一个拍子里绑了出口的账号会被判成
+    // "池外 ⇒ 直连" —— 从宿主 IP 出站、账却记在那个出口头上，且没有任何报错（决策 9(5)）。
+    const h = await setupWithProxy();
+    // **刻意不调 `refreshNow()`**：账号绑定与 `egress` 广播都在构造之前落库，
+    // 该看到它们的只有构造期那次 prime —— 去掉它，这条用例必须变红（否则它没在判任何东西）。
+    const r = await h.runtime.app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      headers: { authorization: `Bearer ${h.gatewayKey}` },
+      payload: body,
+    });
+    assert.equal(r.statusCode, 200);
+    assert.equal(h.calls.length, 1);
+    assert.notEqual((h.calls[0]?.init as unknown as Record<string, unknown>).dispatcher, undefined);
   });
 });

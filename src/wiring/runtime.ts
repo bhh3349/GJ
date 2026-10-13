@@ -34,6 +34,7 @@ import type { BufferedErrorEventSink } from './error-event-sink.js';
 import { createKeyRuntimeFlusher } from './key-runtime-flusher.js';
 import type { KeyRuntimeFlusher } from './key-runtime-flusher.js';
 import { createGatewayStore } from './store.js';
+import type { EgressProxyLifecycle } from './egress-proxy.js';
 import type { GatewayStore } from './store.js';
 import { createUsageLogSink } from './usage-sink.js';
 import type { UsageSink } from './usage-sink.js';
@@ -71,6 +72,20 @@ export interface GatewayRuntimeOptions {
    * 本层逐字转发、不给缺省实现（理由同 `egress` 必填那条：兜底 = 把静默态伪装成故意态）。
    */
   egressSelectable?: (egressId: string) => boolean;
+  /**
+   * **出口代理**（ADR-0021 决策 4c / 契约 §16.7 Tier 2，缺口 A）。**可选**：不传 = 代理面未接线，
+   * 行为与接线前逐字节相同（Tier 1 的 host 型 id 照旧宿主直连）。
+   *
+   * 为什么把**整个对象**交进来、而不是只交一个出站函数：缓存纪律（代理 URL 含凭据，
+   * 解一次就够，**禁每请求解密** —— 验收 6）落在它的 `refresh()` 上，而刷新的节拍就是本层
+   * 那 1s 轮询（与快照同一个拍子）。只交函数的话，装配层忘了挂 `refresh()` 就退化成
+   * "改 IP 要重启进程"，症状是"出口换了、流量还走老代理"，没有任何报错。
+   *
+   * 实现归装配层（`src/wiring/egress-proxy.ts`）：闭包里持 `egress_proxies` 的
+   * `id → ProxyAgent` 缓存。本层只做两件事：把 `outbound` 透传给 `createGatewayStack`、
+   * 把 `refresh()`/`stop()` 挂进既有节拍 —— 本层**不认识** `undici`。
+   */
+  egressProxy?: EgressProxyLifecycle;
 }
 
 export interface GatewayRuntime {
@@ -108,6 +123,12 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions): GatewayRun
   });
 
   const store = createGatewayStore({ db, masterKey: config.masterKey });
+
+  // 出口代理镜像**必须在这里先 prime 一次**（不只是等 1s 后的第一拍）：
+  // `outbound()` 的判据是"这个 id 在不在池里" —— 镜像还是空的时，一个**绑了出口**的账号会被
+  // 判成"池外 ⇒ 宿主直连"，症状是启动后的头一个拍子里它从宿主 IP 出去、账还记在那个出口头上。
+  // 这正是决策 9(5) 明令禁止的静默回落，而且**没有任何报错**。构造期对齐水位 + 建镜像是一步的事。
+  options.egressProxy?.refresh();
 
   // 首次同步建快照：必须在 pool.applySnapshot 之前，否则第一秒内池子是空的，
   // 这段时间进来的请求会全数 503（启动窗口的"假故障"）
@@ -154,6 +175,7 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions): GatewayRun
     },
     ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
     ...(options.egressSelectable === undefined ? {} : { egressSelectable: options.egressSelectable }),
+    ...(options.egressProxy === undefined ? {} : { egressOutbound: options.egressProxy.outbound }),
     // 逐字转发注入的那个实例，**不**在这里 `?? permissiveEgressGate`：兜底写在这一层，
     // 就等于"忘了注入"与"故意不接闸"在运行期同形（都恒放行），而那正是要防的静默态。
     egress: options.egress,
@@ -178,6 +200,10 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions): GatewayRun
   let pollTimer: NodeJS.Timeout | null = null;
 
   function refreshNow(): boolean {
+    // 出口代理配置镜像与快照同一个拍子（缺口 A）：`refresh()` 只在 `change_log` 出现
+    // `egress` 实体时重建 agent 缓存。顺序在 `store.refresh()` **之前** —— 它只读库、不碰池，
+    // 放前面是为了让"这个拍子的出站材料"与"这个拍子的快照"取自同一瞬间的库状态。
+    options.egressProxy?.refresh();
     const rebuilt = store.refresh();
     if (rebuilt) stack.pool.applySnapshot(store.poolSnapshot());
     return rebuilt;
@@ -198,6 +224,9 @@ export function createGatewayRuntime(options: GatewayRuntimeOptions): GatewayRun
     errors.close();
     mirror.close();
     store.secrets.clear();
+    // 出口代理的连接池里躺着代理凭据 ⇒ 与 key 明文同一批丢掉（明文纪律：别让进程带着凭据退出）。
+    // 放在 `secrets.clear()` 之后是因为两者互不依赖，这里只为"凭据类残留一次性清完"读起来是一处。
+    options.egressProxy?.stop();
     return Promise.resolve();
   }
 

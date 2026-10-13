@@ -22,6 +22,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { AppConfig } from '../../config.js';
 import { openDatabase, type Db } from '../../db/database.js';
 import { newId } from '../../db/ids.js';
+import { createEgressProxy, retireEgressProxy } from '../../db/repo/egress.js';
 import { createKey } from '../../db/repo/keys.js';
 import { createUpstream } from '../../db/repo/upstreams.js';
 import { buildApp } from '../app.js';
@@ -661,3 +662,179 @@ describe('删账号（§15.2：`force` 的语义与删上游**不同**）', () =
   });
 });
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function patchAccount(
+  h: Harness,
+  id: string,
+  payload: Record<string, unknown>,
+  headers: Record<string, string> = {},
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const res = await h.app.inject({
+    method: 'PATCH',
+    url: `/api/supplier-accounts/${id}`,
+    headers: { cookie: h.cookie, 'x-requested-with': 'fetch', ...headers },
+    payload,
+  });
+  return { status: res.statusCode, body: res.json() as Record<string, unknown> };
+}
+
+describe('PATCH 账号（§15.2 / §16.7 Tier 2，v1.13.0 / ADR-0029）', () => {
+  const AT = '2026-10-14T00:00:00.000Z';
+
+  function egress(h: Harness, name: string, url: string, retired = false): string {
+    const dto = createEgressProxy(h.db, { name, url }, MASTER_KEY);
+    if (retired) retireEgressProxy(h.db, dto.id, 'manual', AT);
+    return dto.id;
+  }
+
+  it('闸门先于 handler：缺 CSRF 头 → 403；带 CSRF 头但无会话 → 401（§0.5 的固定顺序）', async () => {
+    const h = await setup();
+    const up = createUpstream(h.db, { name: 'up-a', baseUrl: 'https://a.example.com' });
+    const acc = seedAccount(h.db, up.id);
+
+    // CSRF 在鉴权**之前**（§0.5 写死的顺序）：真浏览器一定带这个头，所以这条路径
+    // 描述的是"脚本 / 跨站"，而它的结论必须是 403 —— 报成 401 会让调用方去重新登录，
+    // 换一把令牌回来还是同一个 403。
+    const noCsrf = await h.app.inject({
+      method: 'PATCH',
+      url: `/api/supplier-accounts/${acc}`,
+      payload: { revision: 1 },
+    });
+    expect(noCsrf.statusCode).toBe(403);
+    expect(noCsrf.json()).toMatchObject({ code: 'CSRF_REJECTED' });
+
+    const noSession = await h.app.inject({
+      method: 'PATCH',
+      url: `/api/supplier-accounts/${acc}`,
+      headers: { 'x-requested-with': 'fetch' },
+      payload: { revision: 1 },
+    });
+    expect(noSession.statusCode).toBe(401);
+    expect(noSession.json()).toMatchObject({ code: 'UNAUTHORIZED' });
+  });
+
+  it('绑定 → 200 + 新 egressId + revision 推进；列表与详情**同形状**（同一 SupplierAccount）', async () => {
+    const h = await setup();
+    const up = createUpstream(h.db, { name: 'up-a', baseUrl: 'https://a.example.com' });
+    const acc = seedAccount(h.db, up.id);
+    const eg = egress(h, 'hk-1', 'https://proxy.example:8443');
+
+    const res = await patchAccount(h, acc, { egressId: eg, revision: 1 });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ id: acc, egressId: eg, revision: 2 });
+    // 池的**状态**不进 DTO：响应里不该出现出口的 url / 探活字段
+    expect(JSON.stringify(res.body)).not.toContain('proxy.example');
+
+    const listed = (await getList(h)).body.items[0];
+    expect(listed?.egressId).toBe(eg);
+    const detail = await h.app.inject({
+      method: 'GET',
+      url: `/api/supplier-accounts/${acc}`,
+      headers: { cookie: h.cookie, 'x-requested-with': 'fetch' },
+    });
+    expect(detail.json()).toEqual(listed);
+  });
+
+  it('解绑（`egressId: null`）合法 —— `null` 是值，不是"没传"', async () => {
+    const h = await setup();
+    const up = createUpstream(h.db, { name: 'up-a', baseUrl: 'https://a.example.com' });
+    const acc = seedAccount(h.db, up.id);
+    const eg = egress(h, 'hk-1', 'https://proxy.example:8443');
+    await patchAccount(h, acc, { egressId: eg, revision: 1 });
+
+    const res = await patchAccount(h, acc, { egressId: null, revision: 2 });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ egressId: null, revision: 3 });
+  });
+
+  it('出口不存在 / 已退役 ⇒ 400 INVALID_PARAM，`details.field = egressId`（前端只标红一栏）', async () => {
+    const h = await setup();
+    const up = createUpstream(h.db, { name: 'up-a', baseUrl: 'https://a.example.com' });
+    const acc = seedAccount(h.db, up.id);
+    const retired = egress(h, 'hk-old', 'https://old.example:8443', true);
+
+    for (const bad of ['eg_missing', retired]) {
+      const res = await patchAccount(h, acc, { egressId: bad, revision: 1 });
+      expect(res.status, bad).toBe(400);
+      expect(res.body).toMatchObject({ code: 'INVALID_PARAM', details: { field: 'egressId' } });
+    }
+    // 拦下时零副作用：不写"成功"审计（留一条 ok 会让人以为改成了）
+    const audits = h.db
+      .prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'supplier.account.update'")
+      .get() as { n: number };
+    expect(audits.n).toBe(0);
+  });
+
+  it('`revision` 必填且不符 ⇒ 409 REVISION_MISMATCH（带 expected / actual）', async () => {
+    const h = await setup();
+    const up = createUpstream(h.db, { name: 'up-a', baseUrl: 'https://a.example.com' });
+    const acc = seedAccount(h.db, up.id);
+    const eg = egress(h, 'hk-1', 'https://proxy.example:8443');
+
+    const noRev = await patchAccount(h, acc, { egressId: eg });
+    expect(noRev.status).toBe(400);
+    expect(noRev.body).toMatchObject({ code: 'INVALID_PARAM', details: { field: 'revision' } });
+
+    const badRev = await patchAccount(h, acc, { egressId: eg, revision: 9 });
+    expect(badRev.status).toBe(409);
+    expect(badRev.body).toMatchObject({ code: 'REVISION_MISMATCH', details: { expected: 9, actual: 1 } });
+  });
+
+  it('**值未变 = 空操作**：200 但 revision 不动、change_log 不增（连点两次不该白推快照）', async () => {
+    const h = await setup();
+    const up = createUpstream(h.db, { name: 'up-a', baseUrl: 'https://a.example.com' });
+    const acc = seedAccount(h.db, up.id);
+    const keyId = seedPooledKey(h.db, up.id);
+    bindKey(h.db, acc, keyId);
+    const eg = egress(h, 'hk-1', 'https://proxy.example:8443');
+
+    const first = await patchAccount(h, acc, { egressId: eg, revision: 1 });
+    const mark = countOf(h, "SELECT COUNT(*) AS n FROM change_log WHERE entity = 'key' AND entity_id = ?", keyId);
+    const again = await patchAccount(h, acc, { egressId: eg, revision: first.body['revision'] as number });
+
+    expect(again.status).toBe(200);
+    expect(again.body['revision']).toBe(first.body['revision']);
+    expect(
+      countOf(h, "SELECT COUNT(*) AS n FROM change_log WHERE entity = 'key' AND entity_id = ?", keyId),
+    ).toBe(mark);
+  });
+
+  it('改绑要发 `change_log`：每把已入池 key 各一条（漏发 = 网关那侧出口永远停在旧值）', async () => {
+    const h = await setup();
+    const up = createUpstream(h.db, { name: 'up-a', baseUrl: 'https://a.example.com' });
+    const acc = seedAccount(h.db, up.id);
+    const keyId = seedPooledKey(h.db, up.id);
+    bindKey(h.db, acc, keyId);
+    const eg = egress(h, 'hk-1', 'https://proxy.example:8443');
+    const before = countOf(h, "SELECT COUNT(*) AS n FROM change_log WHERE entity = 'key' AND entity_id = ?", keyId);
+
+    await patchAccount(h, acc, { egressId: eg, revision: 1 });
+
+    expect(
+      countOf(h, "SELECT COUNT(*) AS n FROM change_log WHERE entity = 'key' AND entity_id = ?", keyId),
+    ).toBe(before + 1);
+    const audit = h.db
+      .prepare("SELECT target_id, detail FROM audit_log WHERE action = 'supplier.account.update'")
+      .get() as { target_id: string; detail: string } | undefined;
+    expect(audit).toMatchObject({ target_id: acc, detail: `egress=${eg}` });
+  });
+
+  it('账号不存在 ⇒ 404 NOT_FOUND（details 带 id）', async () => {
+    const h = await setup();
+    const res = await patchAccount(h, 'acc_missing', { egressId: null, revision: 1 });
+    expect(res.status).toBe(404);
+    expect(res.body).toMatchObject({ code: 'NOT_FOUND', details: { id: 'acc_missing' } });
+  });
+
+  it('**只收一个字段**：多塞其它字段（如 status）不生效、也不报错（additionalProperties 默认忽略）', async () => {
+    const h = await setup();
+    const up = createUpstream(h.db, { name: 'up-a', baseUrl: 'https://a.example.com' });
+    const acc = seedAccount(h.db, up.id, { status: 'session_expired' });
+
+    const res = await patchAccount(h, acc, { egressId: null, revision: 1, status: 'active' });
+    expect(res.status).toBe(200);
+    expect(res.body['status']).toBe('session_expired');
+  });
+});

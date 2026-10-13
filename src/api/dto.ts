@@ -634,6 +634,19 @@ export interface SupplierSubscriptionRowDto extends SupplierSubscriptionDto {
   /** 只回答**有无**。会话值永不出后端 */
   hasSession: boolean;
   sessionExpiresAt: string | null;
+  /**
+   * **该账号绑定的出口**（§16.7 Tier 2 的写路径读面；v1.13.0 / ADR-0029）。
+   *
+   * `null` = **未绑定，走宿主出口** —— 那是**配置事实**，不是"未知"、也不是"不可用"
+   * （§16.7 把 `null` 的两种来源分开写死：解析不出出口才是 fail-open 的那种 null）。
+   * 非空时是一个 `eg_…` 不透明 id，**前端不得解析其内容**（§7 同一条纪律）：
+   * Tier 2 之后它换成 `egress_proxies.id` 之外的东西也不必改前端。
+   *
+   * 只在写路径落地后才加这一格（v1.13.0）：在此之前 `egress_id` 写不进、也读不出，
+   * 加字段等于给前端一个永远为 `null` 的假选项。出口**池的状态**（在线 / 冷却 / 出口 IP）
+   * 仍然只有 §7 帧一条读面，不进本 DTO —— 这里只答"这个账号自己绑了谁"。
+   */
+  egressId: string | null;
   revision: number;
   createdAt: string;
   updatedAt: string;

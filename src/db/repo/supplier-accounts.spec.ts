@@ -32,7 +32,9 @@ import {
   getSupplierAccount,
   listSupplierAccounts,
   requireSupplierAccount,
+  setSupplierAccountEgress,
 } from './supplier-accounts.js';
+import { createEgressProxy, retireEgressProxy } from './egress.js';
 import { createUpstream, deleteUpstream } from './upstreams.js';
 
 const MASTER_KEY = Buffer.from('2a'.repeat(32), 'hex');
@@ -454,5 +456,150 @@ describe('判重摘要（§15.9）', () => {
     const up = createUpstream(db, { name: 'up-a', baseUrl: 'https://a.example.com' });
     seedAccount(db, { upstreamId: up.id, identifierHash: 'same' });
     expect(() => seedAccount(db, { upstreamId: up.id, identifierHash: 'same' })).toThrow(/UNIQUE|constraint/i);
+  });
+});
+
+
+describe('账号绑出口（§16.7 Tier 2 写路径，v1.13.0 / ADR-0029）', () => {
+  const AT = '2026-10-14T00:00:00.000Z';
+
+  /** 建一个 active 出口。走仓储正门（`normalizeEgressUrl` 在里面）。 */
+  function seedEgress(db: Db, name: string, url: string): string {
+    return createEgressProxy(db, { name, url }, MASTER_KEY).id;
+  }
+
+  const changeCount = (db: Db, keyId: string): number =>
+    (
+      db
+        .prepare("SELECT COUNT(*) AS n FROM change_log WHERE entity = 'key' AND entity_id = ?")
+        .get(keyId) as { n: number }
+    ).n;
+
+  it('绑定 active 出口：DTO 变、revision +1、**每把已入池 key 各收到一条 change_log**', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-a', baseUrl: 'https://a.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    const egressId = seedEgress(db, 'hk-1', 'https://proxy.example:8443');
+    const k1 = seedPooledKey(db, up.id);
+    const k2 = seedPooledKey(db, up.id);
+    seedAccountKey(db, acc, { pooledKeyId: k1 });
+    seedAccountKey(db, acc, { pooledKeyId: k2 });
+    // 种数据本身就会发 change_log（建 key 时各一条），故判据一律用**差值**。
+    const before = { k1: changeCount(db, k1), k2: changeCount(db, k2) };
+
+    const dto = setSupplierAccountEgress(db, acc, egressId, 1);
+    expect(dto.egressId).toBe(egressId);
+    expect(dto.revision).toBe(2);
+
+    // 池的**状态**不进 DTO（那仍只有 §7 帧）—— 这里只答"这个账号绑了谁"
+    expect(JSON.stringify(dto)).not.toContain('proxy.example');
+
+    // 广播是必需项：`supplier_accounts` 不在 `SNAPSHOT_ENTITIES` 里，漏发不会报错，
+    // 只会让这些 key 的出口永远停在旧值（出口预算按 id 分桶 ⇒ 一根出口两个桶 ⇒ 放行量翻倍）。
+    expect(changeCount(db, k1)).toBe(before.k1 + 1);
+    expect(changeCount(db, k2)).toBe(before.k2 + 1);
+  });
+
+  it('解绑（null）合法：回宿主出口，且**照发广播**（归属也是变了）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-a', baseUrl: 'https://a.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    const egressId = seedEgress(db, 'hk-1', 'https://proxy.example:8443');
+    const k1 = seedPooledKey(db, up.id);
+    seedAccountKey(db, acc, { pooledKeyId: k1 });
+
+    setSupplierAccountEgress(db, acc, egressId, 1);
+    const afterBind = changeCount(db, k1);
+
+    const dto = setSupplierAccountEgress(db, acc, null, 2);
+    expect(dto.egressId).toBeNull();
+    expect(dto.revision).toBe(3);
+    expect(changeCount(db, k1)).toBe(afterBind + 1);
+  });
+
+  it('出口不存在 / 已退役 ⇒ 400 INVALID_PARAM(field=egressId)，**零副作用**', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-a', baseUrl: 'https://a.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    const retired = seedEgress(db, 'hk-old', 'https://old.example:8443');
+    retireEgressProxy(db, retired, 'manual', AT);
+    const before = (
+      db.prepare("SELECT COUNT(*) AS n FROM change_log").get() as { n: number }
+    ).n;
+
+    for (const bad of ['eg_missing', retired]) {
+      try {
+        setSupplierAccountEgress(db, acc, bad, 1);
+        expect.unreachable('应当抛 INVALID_PARAM');
+      } catch (err) {
+        const e = err as { code?: string; details?: { field?: string } };
+        expect(e.code, bad).toBe('INVALID_PARAM');
+        expect(e.details?.field, bad).toBe('egressId');
+      }
+    }
+    // 不留"绑上去了但永远发不出去"的账号：拦下时这一行一个字节没动
+    expect(getSupplierAccount(db, acc)?.egressId).toBeNull();
+    expect(getSupplierAccount(db, acc)?.revision).toBe(1);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM change_log').get() as { n: number }).n).toBe(before);
+  });
+
+  it('revision 不符 ⇒ 409 REVISION_MISMATCH（带 expected / actual），零副作用', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-a', baseUrl: 'https://a.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    const egressId = seedEgress(db, 'hk-1', 'https://proxy.example:8443');
+
+    try {
+      setSupplierAccountEgress(db, acc, egressId, 7);
+      expect.unreachable('应当抛 REVISION_MISMATCH');
+    } catch (err) {
+      const e = err as { code?: string; details?: { expected?: number; actual?: number } };
+      expect(e.code).toBe('REVISION_MISMATCH');
+      expect(e.details).toEqual({ expected: 7, actual: 1 });
+    }
+    expect(getSupplierAccount(db, acc)?.egressId).toBeNull();
+  });
+
+  it('值未变 = **空操作**：不推 revision、不发广播（连点两次不该白推一次快照重建）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-a', baseUrl: 'https://a.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    const egressId = seedEgress(db, 'hk-1', 'https://proxy.example:8443');
+    const k1 = seedPooledKey(db, up.id);
+    seedAccountKey(db, acc, { pooledKeyId: k1 });
+
+    const first = setSupplierAccountEgress(db, acc, egressId, 1);
+    const mark = changeCount(db, k1);
+    const again = setSupplierAccountEgress(db, acc, egressId, first.revision);
+
+    expect(again.revision).toBe(first.revision);
+    expect(changeCount(db, k1)).toBe(mark);
+    // 解绑到同一个 null（本来就 null）同样短路
+    const other = seedAccount(db, { upstreamId: up.id, identifierHash: 'hash-other' });
+    expect(setSupplierAccountEgress(db, other, null, 1).revision).toBe(1);
+  });
+
+  it('名下一把池内 key 都没有 → 写入照常成功、**不发任何广播**（没有受影响的行）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-a', baseUrl: 'https://a.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    const egressId = seedEgress(db, 'hk-1', 'https://proxy.example:8443');
+    // 只有掩码的行不算池内 key（§15.1 `keyCount` 同口径）
+    seedAccountKey(db, acc, { pooledKeyId: null });
+    const before = (db.prepare('SELECT COUNT(*) AS n FROM change_log').get() as { n: number }).n;
+
+    const dto = setSupplierAccountEgress(db, acc, egressId, 1);
+    expect(dto.egressId).toBe(egressId);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM change_log').get() as { n: number }).n).toBe(before);
+  });
+
+  it('账号不存在 ⇒ NOT_FOUND（先于活性校验与乐观锁）', () => {
+    const db = setup();
+    try {
+      setSupplierAccountEgress(db, 'acc_missing', null, 1);
+      expect.unreachable('应当抛 NOT_FOUND');
+    } catch (err) {
+      expect((err as { code?: string }).code).toBe('NOT_FOUND');
+    }
   });
 });

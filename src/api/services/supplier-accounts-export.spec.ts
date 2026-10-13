@@ -58,6 +58,7 @@ function account(over: Partial<SupplierAccountDto> = {}): SupplierAccountDto {
     credentialSource: 'password',
     hasSession: true,
     sessionExpiresAt: null,
+    egressId: null,
     revision: 1,
     createdAt: '2026-10-07T00:00:00.000Z',
     updatedAt: '2026-10-07T00:00:00.000Z',

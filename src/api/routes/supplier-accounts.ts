@@ -29,6 +29,7 @@ import { appendAudit } from '../../db/repo/audit.js';
 import {
   deleteSupplierAccount,
   listAllSupplierAccounts,
+  setSupplierAccountEgress,
   listSupplierAccounts,
   listSupplierSubscriptions,
   requireSupplierAccount,
@@ -36,7 +37,7 @@ import {
 import type { SupplierBatchResult } from '../dto.js';
 import type { ApiContext } from '../app.js';
 import { auditWrite, captureAuditActor } from '../http.js';
-import { idParam, pageProps } from '../schemas.js';
+import { idParam, pageProps, revisionProp } from '../schemas.js';
 import {
   loginSupplierAccount,
   startSupplierImport,
@@ -81,6 +82,18 @@ const SUPPLIER_ACCOUNT_STATUSES = ['active', 'login_failed', 'session_expired', 
 interface ImportBody {
   upstreamId?: string;
   text?: string;
+}
+
+/**
+ * §15.2 `PATCH /api/supplier-accounts/:id` 的请求体（v1.13.0 / ADR-0029）。
+ *
+ * `egressId` 用 `['string','null']`：`null` 是**有语义的值**（解绑 = 回宿主出口），
+ * 只声明 `string` 会把合法的 `null` 拒掉 —— 那样"解绑"就成了做不到的动作。
+ * `revision` 必填（§0.2 乐观锁）。
+ */
+interface PatchAccountBody {
+  egressId?: string | null;
+  revision: number;
 }
 
 interface BatchBody {
@@ -461,6 +474,53 @@ export function registerSupplierAccountRoutes(app: FastifyInstance, ctx: ApiCont
       });
       // 显式 200：诊断结论走正常响应体，不走错误分支
       return reply.code(200).send(result);
+    },
+  );
+
+  /**
+   * 改账号（契约 §15.2，v1.13.0 起本路由**只收一个字段** `egressId` / ADR-0029）。
+   *
+   * **为什么是 PATCH 而不是新开一个 `/egress` 子资源**：要写的只有一格值，而"账号 ↔ 出口"
+   * 是 `supplier_accounts` 这一行自己的属性（§16.7 绑定粒度 = 账号级，不是 key 级）。
+   * 单开子资源等于把同一行的两个字段拆到两条路径上，将来加第二个可改字段时又要在两处挑。
+   *
+   * **为什么不复用 `POST /api/supplier-accounts`**（§16.7 裁定 6 那句"账号侧对称一条"写在
+   * `POST/PATCH` 两边）：建账号走的是批量 `import`（§15.2），它一次收一行文本、不是 REST 建行；
+   * 这里落 PATCH 一支，把"传不存在或已退役的 egressId ⇒ 400"这条判据接到真正存在的写路径上。
+   *
+   * 审计：`supplier.account.update`，`detail` 只放**绑没绑**（`egress=<id>` / `egress=null`），
+   * 不放任何凭据（本路由也收不到凭据）。这是 §6「所有写操作」的下限覆盖 ——
+   * "谁把这个号挪到了哪个出口"是这条链上最该留痕的一类动作。
+   */
+  app.patch<{ Params: { id: string }; Body: PatchAccountBody }>(
+    '/api/supplier-accounts/:id',
+    {
+      schema: {
+        params: idParam,
+        body: {
+          type: 'object',
+          required: ['revision'],
+          properties: {
+            egressId: { type: ['string', 'null'], maxLength: 64 },
+            revision: revisionProp,
+          },
+        },
+      },
+    },
+    (req) => {
+      const updated = setSupplierAccountEgress(
+        db,
+        req.params.id,
+        req.body.egressId ?? null,
+        req.body.revision,
+      );
+      auditWrite(db, req, config, {
+        action: 'supplier.account.update',
+        targetType: 'supplier_account',
+        targetId: req.params.id,
+        detail: `egress=${updated.egressId ?? 'null'}`,
+      });
+      return updated;
     },
   );
 

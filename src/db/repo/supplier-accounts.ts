@@ -52,6 +52,8 @@ interface AccountRow {
   status_message: string | null;
   balance_cents: number | null;
   balance_updated_at: string | null;
+  /** §16.7 Tier 2 的账号级出口绑定；`NULL` = 走宿主出口（配置事实，不是未知） */
+  egress_id: string | null;
   revision: number;
   created_at: string;
   updated_at: string;
@@ -94,7 +96,7 @@ interface SubscriptionRow {
  */
 const ACCOUNT_COLS = `
   id, upstream_id, supplier, identifier, username, uid, status, status_message,
-  balance_cents, balance_updated_at, session_expires_at, revision, created_at, updated_at,
+  balance_cents, balance_updated_at, session_expires_at, egress_id, revision, created_at, updated_at,
   (encrypted_password IS NOT NULL) AS has_password,
   (encrypted_session  IS NOT NULL) AS has_session
 `;
@@ -211,6 +213,9 @@ function toDto(
     unlimitedKeyCount: counts.unlimitedKeyCount,
     maskedKeyCount: counts.maskedKeyCount,
     subscriptions,
+    // §16.7 Tier 2 写路径的读面（v1.13.0）：这一列此前只被快照读（`src/wiring/store.ts`），
+    // 管理面从不 SELECT 它 —— 于是「能写却看不见」。`NULL` 原样透出（= 走宿主出口）。
+    egressId: row.egress_id,
     // 有存档密码就是 password（密码是超集能力：有密码就一定能登，§15.9）。
     // 两列全空的行被 DDL 的 CHECK 挡住，所以这里不必再有第三个分支 ——
     // 真要有了，那是约束被绕过，不是这里该兜的情况。
@@ -683,6 +688,88 @@ export function updateSupplierAccount(db: Db, id: string, patch: UpdateSupplierA
   params.push(nowIso(), id);
 
   db.prepare(`UPDATE supplier_accounts SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+}
+
+/**
+ * 契约 §15.2 `PATCH /api/supplier-accounts/:id` —— **账号绑出口**（§16.7 Tier 2 写路径，v1.13.0 / ADR-0029）。
+ *
+ * 本函数是 `supplier_accounts.egress_id` 的**唯一**写入口。它之前一个都没有：DDL 与快照读
+ * 早在 §16.7 批次就落了（`src/wiring/store.ts` 的 `account_egress_id`、ADR-0021 决策 5 的 E 接缝），
+ * 而管理面 12 条路由里没有一条能写它 —— 于是「建得出出口、却绑不上账号」，
+ * 出口池这半边功能整条悬空。
+ *
+ * 三件必须一起做的事（漏哪件都是静默的）：
+ *   1. **活性校验**（§16.7 裁定 6 账号侧对称条）：`egressId` 指向**不存在或已 `retired`** 的出口
+ *      ⇒ `400 INVALID_PARAM`（`details.field = 'egressId'`）。不留"绑上去了但永远发不出去"的账号 ——
+ *      那种行不报错、不告警，只在某天有人问"为什么这个号没走代理"时才被发现。
+ *      `null` 是**合法值**：解绑 = 回到宿主出口（§16.7「`egress_id IS NULL` 的账号照常走宿主出口」）。
+ *   2. **`change_log` 广播**（ADR-0021 决策 5 / `src/db/schema.ts` 那段 ⚠ 约定）：
+ *      改这一列改的是网关快照里**每把 key 的出口归属**，而 `supplier_accounts` **不在**
+ *      `SNAPSHOT_ENTITIES` 里（快照只认 `upstream` / `key` / `model` / `balance`）。所以必须按
+ *      **受影响的那几把 `pooled_key_id`** 各发一条 `entity='key'` 的变更。
+ *      漏发的表现不是报错，是那把 key 的出口**永远停在旧值**上 —— 出口预算按 id 分桶，
+ *      于是同一根出口被算成两根、放行量翻倍（§16.7 点名的第一条洞）。
+ *      广播与写入**同一事务**：崩在中间会让"库里有、网关看不见"成为永久状态。
+ *   3. **乐观锁**（§0.2）：`revision` 不符 ⇒ `409 REVISION_MISMATCH`（带 `expected` / `actual`，
+ *      与 `keys.ts` / `upstreams.ts` 同款）。两个运维同时在页面上改同一个号的出口时，
+ *      后提交的人必须知道自己覆盖了前一个人，而不是静默取胜。
+ *
+ * **值未变 = 空操作**：`egressId` 与库里相同 ⇒ 直接回当前 DTO，**不推进 `revision`、不发广播**
+ * （同 `updateSupplierAccount` 的空 patch 口径）。否则"点两次同一个出口"会白推一次快照重建，
+ * 而 `applySnapshot` 会把 token-plan key 的乐观扣减清零 —— 一次无意义的点击不该有那个副作用。
+ *
+ * 与 `updateSupplierAccount` **不合并**：那个函数的入参里有三个密文列，而本函数一个凭据都不碰。
+ * 合在一起会让"绑出口"这条路径的签名里出现 `encrypted_password`，那正是 §15.9 纪律 4
+ * 要避免的形状（凭据只出现在真正需要它的路径上）。
+ */
+export function setSupplierAccountEgress(
+  db: Db,
+  id: string,
+  egressId: string | null,
+  revision: number,
+): SupplierAccountDto {
+  const current = db
+    .prepare('SELECT egress_id, revision FROM supplier_accounts WHERE id = ?')
+    .get(id) as { egress_id: string | null; revision: number } | undefined;
+  if (current === undefined) throw ApiError.notFound('供应商账号', id);
+
+  // 活性校验在乐观锁**之前**：先答"这个值本身合不合法"，再答"你要改的那一行还是不是你以为的那一行"。
+  // 反过来的话，一个填错的出口 id 会在并发场景下被报成 REVISION_MISMATCH，前端会去刷新页面重试，
+  // 而真正的问题（这个出口根本不能用）永远显示不出来。
+  if (egressId !== null) {
+    const egress = db
+      .prepare('SELECT status FROM egress_proxies WHERE id = ?')
+      .get(egressId) as { status: string } | undefined;
+    if (egress === undefined) {
+      throw ApiError.invalidParam('egressId', '指定的出口不存在');
+    }
+    if (egress.status !== 'active') {
+      throw ApiError.invalidParam('egressId', '该出口已退役，请改用 active 出口或回池复用原条目');
+    }
+  }
+
+  if (current.revision !== revision) {
+    throw new ApiError('REVISION_MISMATCH', '该账号已被他人修改，请刷新后重试', {
+      expected: revision,
+      actual: current.revision,
+    });
+  }
+
+  // 值未变 ⇒ 空操作（连 revision 都不推）。放在乐观锁之后：并发场景下"值没变"本身也可能是
+  // 别人刚改成的结果，那种情况下上面那条 409 已经先响过了，走不到这里。
+  if (current.egress_id === egressId) return requireSupplierAccount(db, id);
+
+  // 受影响的那几把 key 先取下来：`change_log` 要按它们逐条广播（见上面的理由 2）。
+  const affected = listLinkedPooledKeyIds(db, id);
+
+  db.transaction(() => {
+    db.prepare(
+      'UPDATE supplier_accounts SET egress_id = ?, revision = revision + 1, updated_at = ? WHERE id = ?',
+    ).run(egressId, nowIso(), id);
+    for (const pooled of affected) appendChange(db, 'key', pooled, 'update', null);
+  })();
+
+  return requireSupplierAccount(db, id);
 }
 
 /** 一个账号在库里的两路凭据（**已解密**）。只在调用方栈内存在，不得进 DTO（§15.9 纪律 4）。 */

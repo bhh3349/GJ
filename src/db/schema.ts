@@ -309,7 +309,10 @@ CREATE INDEX IF NOT EXISTS idx_balance_snapshots_upstream_ts ON balance_snapshot
 --   （entity 'key'，entity_id = 受影响的每把 pooled_key_id）。网关快照只认 change_log，
 --   而 supplier_accounts 不在它的实体清单里 —— 漏发的表现不是报错，是那把 key 的出口
 --   永远停在旧值上（出口预算按 id 分桶，于是同一根出口被算成两根、放行量翻倍）。
---   本期没落这条写路径，所以这里只登记，不发明入口。
+--   **v1.13.0 已落这条写路径**：唯一入口 = PATCH /api/supplier-accounts/:id
+--   （仓储 setSupplierAccountEgress()，与写入同一事务逐把广播；契约 §15.2 / ADR-0029）。
+--   读面同批补上（SupplierAccount.egressId）—— 写得了看不见等于没写。
+--   ⚠ 本段在 DDL 模板串里，**不许出现反引号**（会提前闭合模板串，typecheck 当场红）。
 CREATE TABLE IF NOT EXISTS supplier_accounts (
   id                 TEXT PRIMARY KEY,
   upstream_id        TEXT NOT NULL,                 -- 抹名引用，刻意不设外键（见上）

@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.12.2**　｜
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.13.0**　｜
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -87,6 +87,17 @@
 > ② **`publicHost` 覆盖值落 `.env`（新可选 `PUBLIC_HOST`，默认空 = `null`），不落库**：host 属部署环境属性，归 `.env` 口径，免 DB / 免 schema / 免审计面；设置后即为接入页对外展示的权威基址（不带 scheme）。
 > ③ **组 key 不进本响应**：网关 key 明文只在签发响应出现一次（§4：`POST /api/groups` / `POST /api/groups/:id/keys`），掩码列表走既有 `GET /api/groups`（`gatewayKeyMasked` + `keyCount`）——接入页「复制 key」指向用户组发 key 流程，无状态只读面不得变成第二个 key 读面。
 > ④ **零行为面变更**：`/api/*` / `/v1/*` 既有响应零字节变更；`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增（本端点无错误分支，鉴权失败同 §1 既有 401/403）；`SCHEMA_VERSION` 仍为 2、零 DDL、零迁移；`src/gateway/` 零改动。
+> **v1.13.0（2026-10-14，账号绑出口写路径 + 读面 —— 交付链缺口 1/2 的地基，PM 派单 / 画师「接口先行」点单）**：新增 **§15.2 `PATCH /api/supplier-accounts/:id`（收 `egressId` + `revision`）**，并**非破坏**给 **§15.1 `SupplierAccount` 加一格 `egressId`**。动机与影响见 **`docs/adr/0029-supplier-account-egress-binding.md`**。
+> ① **修的是"能建出口、绑不上账号"这条断链**：`supplier_accounts.egress_id` 的 DDL 与快照读早落（§16.7 / ADR-0021 决策 5 的 E 接缝，`src/wiring/store.ts` 的 `account_egress_id`），而管理面 12 条路由里**一条都写不了它** —— 出口池的配置面（§16.7.2 七条）建得出条目，账号却永远绑不上去。本版补上唯一写入口。
+> ② **读面同批补（这是画师点单的核心）**：`SupplierAccount.egressId`（`string | null`，`null` = **未绑定、走宿主出口**，是配置事实不是未知）。此前三条纪律把读面写死为"没有"（§15.12 第 3 行"穷尽、不加 `egressId`"、§16.7 绑定纪律之三"`egress_id` 不进任何 DTO"、§7 帧本期不发射）—— 结果就是**盲写**：用户点完在界面上看不见结果。**本版把它们逐条改口并给出理由**（不是悄悄推翻）：那三条的动机是"建表 ≠ 前端要处理它"（防的是提前造一个无数据的读面），而写路径一旦存在，缺读面就从"不做多余的事"变成"做了一半"。**出口池的状态**（在线 / 冷却 / 出口 IP）**仍然只有 §7 帧一条读面**，本格只答"这个账号自己绑了谁"。
+> ③ **活性校验（§16.7 裁定 6 账号侧对称条落地）**：`egressId` 指向**不存在或已 `retired`** 的出口 ⇒ `400 INVALID_PARAM`（`details.field = 'egressId'`）；`null` 合法（解绑 = 回宿主出口）。判据先于乐观锁："填错了"必须报成填错，不能伪装成并发冲突。
+> ④ **`change_log` 广播（ADR-0021 决策 5 / `schema.ts` 那段 ⚠ 约定）**：改这一列 = 改网关快照里**每把 key 的出口归属**，而 `supplier_accounts` **不在** `SNAPSHOT_ENTITIES` 里 ⇒ 按**受影响的每把 `pooled_key_id`** 各发一条 `entity='key'` 变更，**与写入同一事务**。漏发的表现不是报错，是那把 key 的出口永远停在旧值（出口预算按 id 分桶 ⇒ 一根出口两个桶 ⇒ 放行量翻倍）。
+> ⑤ **乐观锁 `revision` 必填**（§0.2）：不符 ⇒ `409 REVISION_MISMATCH`（带 `expected` / `actual`，同 `keys.ts` / `upstreams.ts`）。**值未变 = 空操作**（不推 `revision`、不发广播）：否则连点两次同一个出口会白推一次快照重建，而 `applySnapshot` 会把 token-plan key 的乐观扣减清零。
+> ⑥ **审计**：`supplier.account.update`，`detail` 只放 `egress=<id>` / `egress=null`（**不含凭据**，本路由也收不到凭据）。
+> ⑦ **`export` CSV 列清单本版不动**（登记理由）：对账表的列口径属 §15.2 另一条正文；为一个新格单开一次列变更，会把"本笔只做绑定链"的面撑大，要加走下一笔显式决定。
+> ⑧ **零行为面变更**：`/v1/*` 零变更（`src/gateway/` **零改动**）；`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` **零新增**（本笔新码一个都不需要：`400 INVALID_PARAM` / `409 REVISION_MISMATCH` / `404 NOT_FOUND` 全是既有的）；`SCHEMA_VERSION` 仍为 2、**零 DDL、零迁移**（列早在 §16.7 批次就建好了）。
+> **无既有字段改名、无字段删除（纯加一格可空字段）、无端点删除。**
+>
 > **补遗 v1.0.2（2026-10-06）**：① §3 `POST /api/keys/:id/balance/refresh` 的响应补成 `202 {taskId}`（原文只写了用途、没写形状，而实现从第一天起就回 `202 {taskId}`，属于文本与实现的既存分歧，本次抹平）；② §5 新增「`POST /api/models/sync` 的字段映射」小节，把「只落能证明的、其余一律未知」写成明文规则；③ §5 补一句「同步不覆盖人工值」。除此之外 v1.0.1 全部内容不变 —— 无字段改名、无类型变更、无端点删除。动机与影响见 ADR-0009。
 >
 > **补遗 v1.0.3（2026-10-06）**：① §3 写明 `health` 等四个运行态字段的**来源与新鲜度**（网关进程 1s 批量镜像落 `key_runtime`，重启后归零），动机见 ADR-0010；② §6 新增「`costCents` 金额口径」小节 —— 契约此前**暴露**了 `costCents`（§4 Group、§6 usage 点）却从未**定义**它，未知单价该记 0 还是 null 无据可依；③ §10 把「无可用 key」与「候选用尽」两个 Terminating 结果拆开登记（`503 NO_AVAILABLE_KEY` ≠ `502 UPSTREAM_ERROR`，原文一句话把两者混在一起，与实现不符），并登记已在使用但未登记的 `504 UPSTREAM_TIMEOUT`。三处都是**文本对齐实现**，无字段改名、无类型变更、无端点增删。
@@ -1955,6 +1966,7 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
   "credentialSource": "password",
   "hasSession": true,
   "sessionExpiresAt": "2026-11-06T02:15:03.114Z",
+  "egressId": null,
   "revision": 3,
   "createdAt": "2026-10-07T01:00:00.000Z",
   "updatedAt": "2026-10-07T02:15:03.114Z"
@@ -1975,6 +1987,7 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 | `credentialSource` | `"password"` \| `"session"` | 该账号**当前持有的凭据形态**。`password` = 库里有存档密码，**会话过期可自动重登**；`session` = 只有会话、无密码，**过期即不可自动恢复**（§15.9）。**由这一个字段回答"能不能自动重登"**，前端不自行推断 |
 | `hasSession` | bool | 会话是否在手。**只回答有无**，会话值永不出后端。与 `credentialSource` **正交**：`credentialSource="password"` 且 `hasSession=false` 是合法态（密码在手、当前无有效会话，等下一次重登） |
 | `sessionExpiresAt` | ISO8601 \| `null` | 会话到期时刻，供前端提示"需重登" |
+| `egressId` | string \| `null` | **v1.13.0 新增，非破坏**。该账号绑定的出口（§16.7 Tier 2，`eg_` 前缀**不透明 id**，前端不得解析其内容）。**`null` = 未绑定，走宿主出口** —— 那是**配置事实**，不是"未知"、不是"不可用"（§16.7「`null` 的两种来源必须分开」）。**答的是"这个账号自己绑了谁"，不是"这个出口现在活着吗"** —— 池的在线 / 冷却 / 出口 IP 仍然只有 §7 帧一条读面（§7 三条硬约束不变）。写入口 = `PATCH /api/supplier-accounts/:id` |
 | `revision` | int | 乐观锁，写请求带 `revision`，不符 → `409 REVISION_MISMATCH` |
 
 **金额口径**：TierFlow 内部单位为 `quota`（`1 元 = 500000 quota`，换算基准 = `GET /api/user/self → data.quota_per_unit`）。**v1.8.2 实测订正**：该键在信封 `data` 层、**无 `config` 子层**（原文 `/api/status → config.quota_per_unit` 属手册 §1.4 同源错抄）。
@@ -2006,6 +2019,7 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 | `POST` | `/api/supplier-accounts/rotate-key` | 轮换 / 重置**套餐专属 key** → `202 {taskId}`（§15.13，v1.9.0） |
 | `GET` | `/api/supplier-accounts/subscriptions?upstreamId=&page=&pageSize=` | 套餐列表 |
 | `GET` | `/api/supplier-accounts/export?upstreamId=` | CSV 导出（**对账表，见下**） → `text/csv` |
+| `PATCH` | `/api/supplier-accounts/:id` | 改账号（**本版只收 `egressId` + `revision`**，见下） → `200 SupplierAccount`（§16.7 Tier 2 / v1.13.0） |
 | `DELETE` | `/api/supplier-accounts/:id?force=false` | 删除账号（见下） |
 
 #### `POST /api/supplier-accounts/import`
@@ -2160,6 +2174,34 @@ createdAt, updatedAt`。
 命中的掩码只更新 `maskedKeyCount` 与账号状态；未命中的掩码**只记数** ——
 **不创建可用凭据**（掩码不可逆，见 ADR-0018 决策 2）。
 
+#### `PATCH /api/supplier-accounts/:id`（v1.13.0，账号绑出口）
+
+```json
+{ "egressId": "eg_9f31c2a0b4d5", "revision": 3 }
+```
+
+| 字段 | 说明 |
+|---|---|
+| `egressId` | 目标出口 id（`eg_…`）。**`null` = 解绑、回宿主出口**（合法值，不是"清空成未知"）。省略字段 = 同 `null` |
+| `revision` | **必填**（§0.2 乐观锁）。不符 ⇒ `409 REVISION_MISMATCH`，`details: {expected, actual}` |
+
+- **响应**：`200 SupplierAccount`（改完的那一行，含新 `egressId` 与推进后的 `revision`）。
+- **活性校验**：`egressId` 指向不存在或已 `retired` 的出口 ⇒ `400 INVALID_PARAM`（`details.field = "egressId"`）。
+  **不提供 `force`**（同 §16.7 裁定 6 的取向）：绑一个退役出口只有"填错了"一种解释，
+  而它让这个号**永远发不出去**，且不报错。`null` 不走这条校验 —— 宿主出口不是"一个出口条目"。
+- **判据顺序**：活性校验 → 乐观锁 → 值未变短路。把乐观锁放前面，会让"填错出口"在并发场景下
+  被报成 `REVISION_MISMATCH`（前端于是去刷新重试，而真因永远不显示）。
+- **值未变 = 空操作**：`egressId` 与库里相同 ⇒ 直接回当前行，**不推 `revision`、不发 `change_log`**。
+  连点两次同一个出口不该白推一次网关快照重建（重建会清 token-plan 的乐观扣减，代价见 §9）。
+- **`change_log`（必需，不是可选）**：改这一列改的是网关快照里**每把 key 的出口归属**，
+  而 `supplier_accounts` **不在** `SNAPSHOT_ENTITIES`（快照只认 `upstream` / `key` / `model` / `balance`）
+  ⇒ 按**受影响的每把 `pooled_key_id`** 各发一条 `entity = "key"`、`op = "update"`。
+  与写入**同一事务**：崩在中间会让"库里有、网关看不见"成为永久状态。
+  **漏发的症状不是报错**：那批 key 的出口永远停在旧值，出口预算按 id 分桶 ⇒ 一根出口两个桶 ⇒ **放行量翻倍**。
+- **审计**：`supplier.account.update`，`detail = "egress=<id>"` / `"egress=null"`。
+- **不改的东西**：不改 `status` / `statusMessage`（那是"最近一次查询"的结论，改出口不是查询）、
+  不碰任何凭据列、不动 key 台账、不动 `upstream_keys`（网关侧零改动）。
+
 #### `DELETE /api/supplier-accounts/:id?force=`
 
 | `force` | 行为 |
@@ -2269,6 +2311,9 @@ createdAt, updatedAt`。
 
 其余复用既有码：`INVALID_PARAM`(400)、`UNAUTHORIZED`(401)、`NOT_FOUND`(404)、
 `REVISION_MISMATCH`(409)、`UNPROCESSABLE`(422，上游不是账号型 / 无可用账号)。
+**v1.13.0 补一句**：`PATCH /api/supplier-accounts/:id` 的三种失败也全落在上面这几枚 ——
+出口不存在 / 已 `retired` ⇒ `400 INVALID_PARAM`（`details.field = 'egressId'`）、
+`revision` 不符 ⇒ `409 REVISION_MISMATCH`、账号不存在 ⇒ `404 NOT_FOUND`。**本笔零新增码。**
 `KEY_MASK_AMBIGUOUS`（§15.2）与 `LOGIN_INVALID_CREDENTIALS` 等供应商错误码**不进** `ERROR_CODES`，
 只出现在 `items[].code` 与 `statusMessage` —— 它们是**上游的话**，不是我们的错误分类。
 
@@ -2395,6 +2440,9 @@ createdAt, updatedAt`。
     `login` 失败**不写 `result: 'fail'`**：请求本身是成功的，结论已如实写在响应的 `status` 上；
     写成 `fail` 会让审计读起来像"这个请求出错了"。`:id/test` 与 §2 的 `balance-template/test`
     同款：**不写业务状态、但仍写一条审计**。
+  - **v1.13.0 补登一个动作**：`supplier.account.update`（`detail = "egress=<id>"` / `"egress=null"`）。
+     就是 `PATCH /api/supplier-accounts/:id`；`detail` **只放绑定结果**，不含凭据（该路由也收不到凭据）。
+     "谁把这个号挪到了哪个出口"是这条链上最该留痕的一类动作（取向同下一条 `export`）。
   - **`export` 是 GET 却写审计，这是刻意的**：§6 的"登录 / 登出 / 所有写操作"是**下限不是上限**，
     而批量导出是账号面上唯一一次"把全部账号清单一次性带出后端"的动作 —— 不留痕的话，
     "谁在什么时候导过名单"事后完全不可查，而这是最该可查的那一件事。
@@ -2576,11 +2624,16 @@ createdAt, updatedAt`。
 |---|---|---|---|
 | 1 | 一个上游走不走**账号面** | **`upstream.supplier === "tierflow"`** —— **不解析 `baseUrl` 猜**（"域名里带 tierflow"**不是**判据） | §2 `supplier` 行；§15.6 末段（**一个事实一个字段**） |
 | 2 | 批量任务的**逐行明细** | **`result.items`** —— **终态才出现**，**上限 500 行**；超出保留**前 500 行** + `truncated: true` + `itemsTotal` 给**真实行数**；**本期不分页** | §15.3 |
-| 3 | **账号对象形状** | **`SupplierAccount` DTO（§15.1 全字段）** —— **穷尽**，**不加** `egressId` / 出口字段 | §15.1；§16.7 绑定纪律之三 |
+| 3 | **账号对象形状** | **`SupplierAccount` DTO（§15.1 全字段）** —— **穷尽**（**v1.13.0 起这一格里多了 `egressId`**，见下注） | §15.1；§16.7 绑定纪律之三（**已按 v1.13.0 改口**） |
 
 - **三条全是读面，没有一条要前端自算**：`supplier` 是字段、`items` / `truncated` / `itemsTotal` 是服务端给的、DTO 是穷尽的。
-- **出口状态没有 REST 读面**（§16.7 三条绑定纪律之三）：`egress_id` **不进任何 DTO**；出口的读面**只有 §7 帧**
-  （`egress_cooldown` + v1.6.4 的池级 `egress_pool`）。**建表 ≠ 前端要处理它。**
+- **出口状态没有 REST 读面**（§16.7 三条绑定纪律之三，**v1.13.0 起重新表述**）：**出口池的"状态"**
+  （在线 / 冷却 / 出口 IP / 心跳）读面**只有 §7 帧**（`egress_cooldown` + v1.6.4 的池级 `egress_pool`）；
+  而**"这个账号自己绑了哪个出口"**是 `supplier_accounts` 这一行的属性，自 v1.13.0 起**进 DTO**
+  （`SupplierAccount.egressId`）。两者不是一件事：前者是**池的实时健康**，后者是**账号的配置**。
+  **v1.13.0 改口的理由**：原来那条纪律的动机是"建表 ≠ 前端要处理它"（防的是**提前**造一个无数据的读面）；
+  而写路径（`PATCH /api/supplier-accounts/:id`）一旦落地，缺读面就从"不做多余的事"变成"做了一半"——
+  用户能点、点了看不见结果。**纪律的目的是不造没人用的字段，不是禁止字段存在。**
 
 ---
 
@@ -2999,6 +3052,10 @@ PROBE 预算 9 次出网、凭据零落地）。抓到三处**静默**偏差 + �
 - **`egress_id` 不进任何 DTO**（`SupplierAccount` 不加字段、§14 端点不加字段）：出口状态的读面**只有 §7**
   （`egress_cooldown` 帧 + v1.6.4 登记的池级 `egress_pool` 帧），**没有 REST 读面**。
   **建表 ≠ 前端要处理它** —— 前者是存储预留，后者才是行为变更。
+  > **v1.13.0 改口（本节纪律之三的适用范围收窄）**：以上管的是**出口池的状态**（在线 / 冷却 / 出口 IP）——
+  > 那一条**完全不变**，仍然只有 §7 帧。**账号自己绑了哪个出口**是另一件事（`supplier_accounts` 的配置列），
+  > 自 v1.13.0 起进 `SupplierAccount.egressId`（§15.1），写入口 = `PATCH /api/supplier-accounts/:id`（§15.2）。
+  > 改口的理由与边界见 §15.12 注。
 
 **v1.7.0 裁定：出口的生命周期 —— 状态单轴、`url` 唯一、池空是显式终态**（ADR-0021 决策 9，Bo 2026-10-07 拍）
 
@@ -3040,6 +3097,8 @@ PROBE 预算 9 次出网、凭据零落地）。抓到三处**静默**偏差 + �
    （把账号 `egressId` 改到另一个 `active` 出口）。同族：`UPSTREAM_HAS_KEYS` / `ACCOUNT_HAS_KEYS`（"删之前先把依赖摆出来"）。
    **账号侧对称一条**：`POST/PATCH /api/supplier-accounts` 传**不存在或已 `retired`** 的 `egressId` ⇒
    `400 INVALID_PARAM`（`details.field = 'egressId'`），不留"绑上去了但永远发不出去"的账号。
+   **v1.13.0 已落地**：建账号走批量 `import`（非 REST 建行），故这支判据落在
+   **`PATCH /api/supplier-accounts/:id`**（§15.2，唯一写入口）上 —— 见 ADR-0029。
 
 **两条落笔边界**：① 本裁定**只登记列清单与生命周期口径** —— 出口池的 REST 端点（资源根 `/api/egress`，
 **已被 `deploy/vps-egress/README.md` 与 `pool-probe.sh` 引用为"事实源"**，README 台账里写明"S2 落 `/api/egress` 时同批改"）
@@ -3300,3 +3359,5 @@ v1.11.2（**2026-10-14，sync 选 key 候选修复 + 探测口径三点补充** 
 | `adminWebDistEnabled` | boolean，`ADMIN_WEB_DIST` 非空即 `true`（§17 root 口径）；前端据此提示「生产直开 :4001」还是「先起 Vite」 |
 | URL 拼接责任 | 前端：`(publicHost ?? window.location.hostname)` + 端口；本端点**不回**任何完整 URL |
 | 边界 | 零新存储、零 DDL、零迁移、零审计（纯只读）；`src/gateway/` 零改动 |
+
+v1.13.0（**2026-10-14，账号绑出口写路径 + 读面** —— 新增 **§15.2 `PATCH /api/supplier-accounts/:id`**（收 `egressId` + `revision`；活性校验 = 不存在 / 已 `retired` ⇒ `400 INVALID_PARAM`、值未变短路、与写入同事务按受影响的每把 `pooled_key_id` 发 `change_log`），并**非破坏**给 **§15.1 `SupplierAccount` 加一格 `egressId`**（`null` = 未绑定、走宿主出口）；**§15.12 第 3 行 / §16.7 绑定纪律之三按本版改口**（收窄为"出口池的**状态**仍只有 §7 帧；账号**自己的绑定**进 DTO），§16.7 裁定 6 账号侧对称条落地指向本端点；新增审计动作 `supplier.account.update`；**`export` CSV 列清单本版不动并登记理由**；**无字段改名 / 删除、`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增（三种失败全是既有码）、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2、零 DDL、零迁移、`src/gateway/` 零改动**。见 `docs/adr/0029-supplier-account-egress-binding.md`）*

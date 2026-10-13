@@ -103,6 +103,20 @@ export interface AppConfig {
    * （`@fastify/static` `wildcard:false` 在 root 缺失时安全退化，实测不炸 ready）。
    */
   adminWebDist: string | null;
+  /**
+   * 对外 host 覆盖值（契约 §18 / ADR-0028）。env `PUBLIC_HOST`，**默认空 = `null`**。
+   *
+   * 服务端只知道端口与**绑定地址**（`0.0.0.0` 是监听语义、`127.0.0.1` 只是回环），
+   * 都不知道公网 host —— 所以本项是唯一能告诉前端"对外基址长什么样"的来源
+   * （ADR-0028 决策 2：刻意不设完整 URL 字段，拼 URL 的责任在前端）。
+   * 落 `.env` **不落库**：host 是部署环境属性，免 DB / 免 schema / 免审计面。
+   * 不带 scheme（如 `gw.example.com`）；前端拼接 = `(publicHost ?? location.hostname)` + 端口。
+   *
+   * 空串按"未配置"处理（与 `ADMIN_TOKEN` / `ASSISTANT_MODEL` / `ADMIN_WEB_DIST` 同一条纪律：
+   * `PUBLIC_HOST=` 是部署脚本里常见的"这行先留着"写法，把它当成一个叫空串的主机名
+   * 会让接入页把用户导向一个不存在的地址）。
+   */
+  publicHost: string | null;
 }
 
 /**
@@ -275,5 +289,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     // （`src/api/app.ts` 的 `resolveWebDist`），配置层只负责"取出来"—— 与 resolveEgressGate 同一条纪律：
     // 默认值的解释只有一处，否则"关托管"会有两种写法各自为政。
     adminWebDist: (env['ADMIN_WEB_DIST'] ?? '').trim() === '' ? null : (env['ADMIN_WEB_DIST'] ?? '').trim(),
+    // 对外 host 覆盖值（契约 §18 / ADR-0028）。空串 = 未配置，与上面几项同款写法。
+    publicHost: (env['PUBLIC_HOST'] ?? '').trim() === '' ? null : (env['PUBLIC_HOST'] ?? '').trim(),
   };
 }

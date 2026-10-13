@@ -726,3 +726,41 @@ export interface SupplierBatchResult {
   hintCode: HintCode | null;
   hint: string | null;
 }
+
+
+/**
+ * 契约 §18 `GET /api/access-info`（v1.12.2 / ADR-0028）—— 部署自报口径。
+ *
+ * 只读、无副作用、**零新存储**：全部从 config 现读，不落库、不写审计。
+ * 刻意**不含组 key**（明文只在签发响应出现一次；掩码走 §4 `GET /api/groups`），
+ * 也**不含任何完整 URL**（服务端猜 host 必然猜错 —— 拼接责任在前端：
+ * `(publicHost ?? window.location.hostname)` + 端口）。
+ */
+export interface AccessInfoDto {
+  /** 网关面（OpenAI 兼容，对外服务）的监听信息 */
+  gateway: {
+    /** 恒 `"http"`：TLS 终结在反代，服务端不感知（§17 同口径） */
+    scheme: 'http';
+    /** config `PORT_GATEWAY`（默认 4000），**不写死** */
+    portGateway: number;
+    /** **绑定地址**（config `HOST_GATEWAY`，如 `0.0.0.0`）—— 是监听语义，**不是可访问地址** */
+    hostGateway: string;
+  };
+  /** 管理面（REST + WS）的监听信息 */
+  admin: {
+    scheme: 'http';
+    /** config `PORT_ADMIN`（默认 4001） */
+    portAdmin: number;
+    /** 绑定地址（config `HOST_ADMIN`，如 `127.0.0.1`）—— 同 `hostGateway`，不是可访问地址 */
+    hostAdmin: string;
+  };
+  /** env `PUBLIC_HOST`（默认空 = `null`）。对外基址覆盖值，不带 scheme */
+  publicHost: string | null;
+  /**
+   * 是否**配置了**管理面同源托管前端产物（§17 root 口径）：`ADMIN_WEB_DIST` 非空即 `true`。
+   *
+   * 这是**配置事实**，不是"此刻真的在托管" —— 目录缺失时运行期会退化为 404（不 fail-fast，
+   * 见 `resolveWebDist`），那一条属启动日志的可诊断面；本字段不额外做一次 `stat` 去改口径。
+   */
+  adminWebDistEnabled: boolean;
+}

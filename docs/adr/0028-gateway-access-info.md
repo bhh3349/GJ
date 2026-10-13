@@ -27,3 +27,11 @@ PM 派单缺口 B：需要一页「接入信息」，让运营者直接看到网
 
 - 画师拿到契约即可写页面；实现带用例过四闸后合流，PM 活体验证「接入页能直接复制 base url + key」。
 - 后续若需更多自报字段（如出口池状态摘要）按「只加字段」演进，不改既有形状。
+
+## 实现锚（2026-10-14）
+
+- 路由：`src/api/routes/access-info.ts`，在 `src/api/app.ts` 装配注册（顺序在 `registerMiscRoutes` 之后，仍在静态托管之前 —— 它是 `/api/*`，与 §17 的静态路由不冲突）。
+- 取值：`AppConfig.publicHost`（`src/config.ts`，env `PUBLIC_HOST`，空串 = `null`）。本字段**只被这一条只读面消费**。
+- `adminWebDistEnabled` 口径 = `config.adminWebDist !== null`：**配置事实**，不是「此刻在托管」。配了不存在的目录仍为 `true`。
+- 用例：`src/api/routes/access-info.spec.ts`（6 条：形状 / config 现读权威性 / 配置事实而非运行期探测 / 零审计副作用 / 会话缺失 401 / 机器令牌可读）。
+- 零 DDL、零迁移、`SCHEMA_VERSION` 仍为 2、`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增、`/v1/*` 零变更、`src/gateway/` 零改动。

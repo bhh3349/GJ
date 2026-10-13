@@ -3360,4 +3360,6 @@ v1.11.2（**2026-10-14，sync 选 key 候选修复 + 探测口径三点补充** 
 | URL 拼接责任 | 前端：`(publicHost ?? window.location.hostname)` + 端口；本端点**不回**任何完整 URL |
 | 边界 | 零新存储、零 DDL、零迁移、零审计（纯只读）；`src/gateway/` 零改动 |
 
+**实现锚（2026-10-14）**：路由落在 `src/api/routes/access-info.ts`（装配注册于 `src/api/app.ts`）；`publicHost` 取值源 = `AppConfig.publicHost`（`src/config.ts`，env `PUBLIC_HOST`）。用例 `src/api/routes/access-info.spec.ts` 钉三条：形状口径、值全来自 config 现读（无第二份事实源）、只读（GET 不写审计）；`adminWebDistEnabled` 的口径 = **配置了 `ADMIN_WEB_DIST` 吗**（配了不存在的目录仍为 `true`，不做运行期 `stat` 探测 —— 目录缺失是启动期 warn + 404 的退化，不改这个配置事实）。本笔**零 DDL、零迁移、`SCHEMA_VERSION` 仍为 2、`ERROR_CODES`/`GATEWAY_ERROR_CODES`/`hintCode` 零新增、`/v1/*` 零变更、`src/gateway/` 零改动**。
+
 v1.13.0（**2026-10-14，账号绑出口写路径 + 读面** —— 新增 **§15.2 `PATCH /api/supplier-accounts/:id`**（收 `egressId` + `revision`；活性校验 = 不存在 / 已 `retired` ⇒ `400 INVALID_PARAM`、值未变短路、与写入同事务按受影响的每把 `pooled_key_id` 发 `change_log`），并**非破坏**给 **§15.1 `SupplierAccount` 加一格 `egressId`**（`null` = 未绑定、走宿主出口）；**§15.12 第 3 行 / §16.7 绑定纪律之三按本版改口**（收窄为"出口池的**状态**仍只有 §7 帧；账号**自己的绑定**进 DTO），§16.7 裁定 6 账号侧对称条落地指向本端点；新增审计动作 `supplier.account.update`；**`export` CSV 列清单本版不动并登记理由**；**无字段改名 / 删除、`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增（三种失败全是既有码）、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2、零 DDL、零迁移、`src/gateway/` 零改动**。见 `docs/adr/0029-supplier-account-egress-binding.md`）*

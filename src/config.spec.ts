@@ -167,6 +167,18 @@ describe('其余项仍然 fail-fast', () => {
     assert.equal(loadConfig(env({ ADMIN_WEB_DIST: ' none ' })).adminWebDist, 'none');
   });
 
+  /**
+   * PUBLIC_HOST（契约 §18 / ADR-0028）：对外 host 覆盖值，落 `.env` 不落库。
+   * 空串按"未配置"处理（同 ADMIN_WEB_DIST / ASSISTANT_MODEL）—— `PUBLIC_HOST=` 是部署
+   * 脚本里最常见的"这行先留着"写法，把它当成一个叫空串的主机名会把接入页导向不存在的地址。
+   */
+  it('PUBLIC_HOST：空串 / 空白是 null（未配置），其余原样透出（trim）', () => {
+    assert.equal(loadConfig(env()).publicHost, null);
+    assert.equal(loadConfig(env({ PUBLIC_HOST: '' })).publicHost, null);
+    assert.equal(loadConfig(env({ PUBLIC_HOST: '   ' })).publicHost, null);
+    assert.equal(loadConfig(env({ PUBLIC_HOST: ' gw.example.com ' })).publicHost, 'gw.example.com');
+  });
+
   it('十进制整数照旧生效（收紧不误伤正常写法，两侧空白仍去）', () => {
     assert.equal(loadConfig(env({ PORT_GATEWAY: '8080' })).portGateway, 8080);
     assert.equal(loadConfig(env({ PORT_ADMIN: ' 4002 ' })).portAdmin, 4002);

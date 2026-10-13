@@ -102,6 +102,7 @@ function makeConfig(dbPath: string, over: Partial<AppConfig> = {}): AppConfig {
     modelProbeMaxModels: 10,
     // 托管默认关（契约 §17）：本套用例不挂前端，`GET /` 维持既有 JSON 404
     adminWebDist: null,
+    publicHost: null,
     ...over,
   };
 }

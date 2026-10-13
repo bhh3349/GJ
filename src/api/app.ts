@@ -32,6 +32,7 @@ import type { AssistantMetricsDto } from './dto.js';
 import { ApiError } from './errors.js';
 import { createHealthSnapshotWriter } from './health-snapshot-writer.js';
 import { isWriteMethod, sessionCookieValue, verifyCsrf } from './http.js';
+import { registerAccessInfoRoutes } from './routes/access-info.js';
 import { registerAssistantRoutes } from './routes/assistant.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerGroupRoutes } from './routes/groups.js';
@@ -497,6 +498,7 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   registerStatsRoutes(app, ctx);
   registerSupplierAccountRoutes(app, ctx);
   registerMiscRoutes(app, ctx);
+  registerAccessInfoRoutes(app, ctx);
   registerObservabilityRoutes(app, ctx);
   registerAssistantRoutes(app, ctx);
 

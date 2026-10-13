@@ -693,6 +693,57 @@ describe('用户组与网关 key（契约 §4，C1）', () => {
     expect(kept.n).toBe(1);
     await closeHarness(h);
   });
+
+  /**
+   * 删一个**没有任何网关 key** 的组（先吊销唯一那把，组就空了）。
+   *
+   * 修法的方向是「子行先删、父行后删」；这一条钉的是相反方向的回归：
+   * 组里一把 key 都没有时，删组仍必须 204 —— 不能被改造成「要求先有 key 才删」
+   * 那类错误实现（例如把子行删除写成先 SELECT 计数再判空）。
+   */
+  it('删空组（零网关 key）也 204，组真消失', async () => {
+    const h = await setup();
+    const { groupId } = await groupWithTwoKeys(h, 'probe-group-del-empty');
+
+    // 吊销两把 key，把组清空（吊销是硬删，删完就真的零子行）
+    const keysRes = await h.app.inject({ method: 'GET', url: `/api/groups/${groupId}/keys`, headers: auth(h) });
+    const ids = (keysRes.json() as { items: { id: string }[] }).items.map((k) => k.id);
+    for (const id of ids) {
+      const rev = await h.app.inject({ method: 'DELETE', url: `/api/groups/${groupId}/keys/${id}`, headers: auth(h) });
+      expect(rev.statusCode, rev.body).toBe(204);
+    }
+    const left = h.db.prepare('SELECT COUNT(*) AS n FROM gateway_keys WHERE group_id = ?').get(groupId) as { n: number };
+    expect(left.n).toBe(0);
+
+    const del = await h.app.inject({ method: 'DELETE', url: `/api/groups/${groupId}`, headers: auth(h) });
+    expect(del.statusCode, del.body).toBe(204);
+    const gone = await h.app.inject({ method: 'GET', url: `/api/groups/${groupId}`, headers: auth(h) });
+    expect(gone.statusCode).toBe(404);
+    await closeHarness(h);
+  });
+
+  /**
+   * 删组必须在 change_log 留一条 `('group', id, 'delete')` 广播（契约 §9）。
+   *
+   * 网关快照按 entity 增量重建；虽然 `group` 被排除在 SNAPSHOT_ENTITIES 之外
+   * （只影响鉴权、与 key 池无关），但广播本身是审计面：一条 delete 都没有，
+   * 事后无法从 change_log 还原「这个组被谁在什么时候删掉」。
+   */
+  it('删组在 change_log 留一条 group delete 广播', async () => {
+    const h = await setup();
+    const { groupId } = await groupWithTwoKeys(h, 'probe-group-del-logrow');
+
+    const del = await h.app.inject({ method: 'DELETE', url: `/api/groups/${groupId}`, headers: auth(h) });
+    expect(del.statusCode, del.body).toBe(204);
+
+    const rows = h.db
+      .prepare('SELECT entity, entity_id AS entityId, op FROM change_log')
+      .all() as { entity: string; entityId: string; op: string }[];
+    expect(rows).toContainEqual({ entity: 'group', entityId: groupId, op: 'delete' });
+    // 建组那条 insert 广播也在，说明本用例的锚点组确实是这条 id（不是撞空表）
+    expect(rows).toContainEqual({ entity: 'group', entityId: groupId, op: 'insert' });
+    await closeHarness(h);
+  });
 });
 
 /* -------------------------------------------------------------------------- */

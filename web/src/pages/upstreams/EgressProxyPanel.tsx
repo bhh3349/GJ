@@ -31,7 +31,7 @@
  * `SupplierAccount.egressId` 已进 DTO（写入口 = `PATCH /api/supplier-accounts/:id`，绑定操作住在
  * 账号池行内），本表据此显示每条出口当前被多少个账号绑定 —— 判据与 `retire` 的
  * `409 EGRESS_HAS_ACCOUNTS` 同源（同一列 `supplier_accounts.egress_id`）。它仍然**不是**运行态：
- * 绑定 ≠ 流量从那里出去（数据面出站尚未接出口代理），也 ≠ 出口健康（那只有 §7 帧一条读面）。
+ * 绑定 ≠ 出口健康：绑定只是指派关系；数据面已接出口代理，绑定的账号出站真走这条代理，出口是否健康看「探活」。
  * 账号清单按**全局**取（不带 upstreamId）：出口池是全局资源，按上游页过滤会静默少算别的号的绑定。
  */
 import {
@@ -541,12 +541,12 @@ export function EgressProxyPanel({ refreshSignal }: EgressProxyPanelProps) {
         type="warning"
         showIcon
         style={{ background: tokens.tint.warning, border: 'none', marginBottom: tokens.space.md }}
-        message="出口只支持 HTTP(S) CONNECT 代理（undici 不支持 SOCKS5）"
+        message="出口只支持 HTTP(S) CONNECT 代理 —— socks5:// 这类地址提交时就会被 400 拒下"
         description={
           <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-            填 socks5:// 一类地址不会被拒绝，但更危险：数据面出站走的是裸 fetch、根本不经过这个代理
-            —— 请求从宿主 IP **静默直连**，全程无报错，出口形同虚设。绑定成功 ≠ 流量换路：
-            出口代理进转发链路是装配层接线（另开一笔），在此之前请把本面当「登记与预算分桶」用。
+            只收 http:// 或 https:// 开头的地址；socks5:// 等其他协议不会被静默放行，创建 / 保存
+            那一刻就会被服务端以 400 拒下，表单校验也会当场拦截。绑定了出口的账号，数据面出站
+            会真的经由这条代理、从它的 IP 出去；出口通不通看「探活」列的结果。
           </Text>
         }
       />

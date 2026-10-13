@@ -17,6 +17,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { AppConfig } from '../config.js';
 import { openDatabase, type Db } from '../db/database.js';
 import { sha256Hex } from '../db/crypto.js';
+import { findGroupByGatewayKeyHash } from '../db/repo/groups.js';
 import { upsertKeyRuntimeStates } from '../db/repo/key-runtime.js';
 import { upsertModelFromSync } from '../db/repo/models.js';
 import { buildApp } from './app.js';
@@ -624,6 +625,73 @@ describe('用户组与网关 key（契约 §4，C1）', () => {
     expect(containsPlaintext(raw, first.gatewayKey)).toBe(false);
     expect(containsPlaintext(raw, second.gatewayKey)).toBe(false);
     expect(containsPlaintext(Buffer.concat([raw, Buffer.from(second.gatewayKey, 'utf8')]), second.gatewayKey)).toBe(true);
+  });
+
+  /**
+   * 删组必须真能删掉（契约 §4：`DELETE /api/groups/:id → 204`）。
+   *
+   * 曾经的实现先删 `groups` 再删 `gateway_keys`，而 `gateway_keys.group_id` 有外键
+   * 指向 groups 且没有 ON DELETE CASCADE —— 库里只要有一把 live 网关 key，
+   * 这条端点就恒 500（`SQLITE_CONSTRAINT_FOREIGNKEY`）。转发面不受影响，
+   * 断的是用户组生命周期管理：建了组就删不掉。所以判据不是"返回 204"，
+   * 而是**组与它的 key 一起真消失，且 key 摘要再也查不回组**（没有幽灵凭据留下）。
+   */
+  it('删组 204：组与它的全部网关 key 一起消失，且 key 摘要再也查不回组', async () => {
+    const h = await setup();
+    const { groupId, first, second } = await groupWithTwoKeys(h, 'probe-group-del');
+
+    const del = await h.app.inject({
+      method: 'DELETE',
+      url: `/api/groups/${groupId}`,
+      headers: auth(h),
+    });
+    expect(del.statusCode, del.body).toBe(204);
+
+    // 组没了
+    const gone = await h.app.inject({ method: 'GET', url: `/api/groups/${groupId}`, headers: auth(h) });
+    expect(gone.statusCode).toBe(404);
+    // 列表里也没有它
+    const list = await h.app.inject({ method: 'GET', url: '/api/groups', headers: auth(h) });
+    expect((list.json() as { items: { id: string }[] }).items.some((g) => g.id === groupId)).toBe(false);
+
+    // 子行必须一起走：任何一把 key 的摘要都不该再解析出组，
+    // 否则就是"能过鉴权但找不到组"的幽灵凭据（正是 deleteGroup 注释要防的那件事）
+    const keyRows = h.db
+      .prepare('SELECT COUNT(*) AS n FROM gateway_keys WHERE group_id = ?')
+      .get(groupId) as { n: number };
+    expect(keyRows.n).toBe(0);
+    expect(findGroupByGatewayKeyHash(h.db, sha256Hex(first.gatewayKey))).toBeNull();
+    expect(findGroupByGatewayKeyHash(h.db, sha256Hex(second.gatewayKey))).toBeNull();
+    await closeHarness(h);
+  });
+
+  /**
+   * 有调用日志时删组——`usage_logs.group_id` **刻意不设外键**（历史可读性不靠外键保，
+   * 见 schema.ts 设计取舍）。所以删组既不能被既有日志挡住（挡 = 又一次 500），
+   * 也不能顺手把日志删了（那等于删组篡改历史）。两条一起钉。
+   */
+  it('有该组调用日志时删组仍 204，且日志行保留（删组不动历史）', async () => {
+    const h = await setup();
+    const { groupId } = await groupWithTwoKeys(h, 'probe-group-del-log');
+    h.db
+      .prepare(
+        `INSERT INTO usage_logs (id, ts, group_id, key_masked, status, total_tokens, cost_cents)
+         VALUES ('log_del_probe', '2026-10-12T00:00:00.000Z', ?, '****probe', 200, 5, 1)`,
+      )
+      .run(groupId);
+
+    const del = await h.app.inject({
+      method: 'DELETE',
+      url: `/api/groups/${groupId}`,
+      headers: auth(h),
+    });
+    expect(del.statusCode, del.body).toBe(204);
+
+    const kept = h.db.prepare('SELECT COUNT(*) AS n FROM usage_logs WHERE id = ?').get('log_del_probe') as {
+      n: number;
+    };
+    expect(kept.n).toBe(1);
+    await closeHarness(h);
   });
 });
 

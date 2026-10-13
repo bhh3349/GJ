@@ -259,9 +259,14 @@ export function updateGroup(db: Db, id: string, patch: UpdateGroupInput): GroupD
 export function deleteGroup(db: Db, id: string): void {
   if (!getGroupRow(db, id)) throw ApiError.notFound('用户组', id);
   db.transaction(() => {
-    db.prepare('DELETE FROM groups WHERE id = ?').run(id);
+    // **子行必须比父行先删**。`gateway_keys.group_id` 有外键指向 groups，而开库时
+    // `PRAGMA foreign_keys = ON`（见 database.ts），该外键又没有 ON DELETE CASCADE ——
+    // 先删 groups 会立刻违反约束、整条端点恒 500（组里只要有一把 live key 就必现）。
+    // 曾经的顺序是反的，且没有任何 spec 覆盖"删组"，所以它静默坏了很久：
+    // 转发面不受影响，断的是用户组生命周期管理。回归用例见 api.spec.ts 的删组一组。
     // 组没了，它的网关 key 也必须失效 —— 留着就是一把能通过鉴权但找不到组的凭据。
     db.prepare('DELETE FROM gateway_keys WHERE group_id = ?').run(id);
+    db.prepare('DELETE FROM groups WHERE id = ?').run(id);
     appendChange(db, 'group', id, 'delete', null);
   })();
 }

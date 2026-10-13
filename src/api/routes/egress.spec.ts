@@ -178,6 +178,21 @@ describe('/api/egress 校验', () => {
     expect((second.body as { details?: { field?: string } }).details?.field).toBe('url');
   });
 
+  it('非 HTTP(S) 协议入口即拒 → 400 INVALID_PARAM url 且零行落库', async () => {
+    // 出口只支持 HTTP(S) CONNECT：`normalizeEgressUrl` 只收 `http:` / `https:`（契约 v1.13.1 / §16.7.2）。
+    // 判据意义在于「被拒 = 零行落库」—— 而不是「忽略协议、改从宿主 IP 出去」（不得静默回落）。
+    // `undici` 的 ProxyAgent 不支持 SOCKS，换 fetch 栈与「stream 透传不缓冲」冲突。
+    const h = await setup();
+    for (const url of ['socks5://proxy.example:1080', 'socks4://proxy.example:1080', 'ftp://proxy.example:21']) {
+      const res = await post(h, '/api/egress', { name: `bad-${url}`, url });
+      expect(res.status, url).toBe(400);
+      expect(res.body).toMatchObject({ code: 'INVALID_PARAM', details: { field: 'url' } });
+      expect((res.body as { message?: string }).message).toContain('协议');
+    }
+    const rows = h.db.prepare('SELECT COUNT(*) AS n FROM egress_proxies').get() as { n: number };
+    expect(rows.n).toBe(0);
+  });
+
   it('同名判重 → 409 CONFLICT name', async () => {
     const h = await setup();
     await post(h, '/api/egress', { name: 'same', url: 'https://a.example:8080' });

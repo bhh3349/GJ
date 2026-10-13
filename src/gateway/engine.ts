@@ -75,15 +75,21 @@ export interface EngineOptions {
    */
   egress?: EgressGate;
   /**
-   * 出口池判据缝（ADR-0021 决策 9(5) / 装配层注入方案 A）：「这个出口此刻在不在活集」，
-   * 装配层**请求期现查**（判据 = `egress_proxies` 行数与各行 `status`；引擎**不认识库**，
-   * AGENTS.md §8）。返回 `false` 的候选按**死绑定**跳过；全部候选都死 ⇒ 503
-   * `NO_AVAILABLE_EGRESS`（不带 `Retry-After`、不回落宿主直连）；与冷却/饱和混现 ⇒
-   * 429 优先（那边有确定性恢复时刻）。
+   * 出口池判据缝（ADR-0021 决策 9(5) / 装配层注入方案 A）：「**绑定到某个出口的账号**此刻还能不能从这个出口出去」；
+   * 装配层**请求期现查**（实现收在 `src/wiring/egress-select.ts`；引擎**不认识库**，AGENTS.md §8）。
+   * 判据三支：① 池空（0 行）= 池未启用 ⇒ 恒活；② 池内条目按单轴 `status`（`active` 活绑定 /
+   * `retired` 死绑定）；③ **查无此行** = 未绑账号的 Tier-1 host id ⇒ 配置事实、照常走宿主出口。
+   * 返回 `false` 的候选按**死绑定**跳过；全部候选都死 ⇒ 503 `NO_AVAILABLE_EGRESS`
+   * （不带 `Retry-After`、不回落宿主直连）；与冷却/饱和混现 ⇒ 429 优先（那边有确定性恢复时刻）。
    *
    * **缺省不注入 = 恒活**：回调根本不被调用，行为与未接池时逐字节相同（决策 7「接缝 ≠ 修」）。
    * 判据抛异常**不捕获**：判据炸了还放行 = 决策 9(5) 点名的「静默回落」，宁炸勿瞒。
-   * `egress_id IS NULL`（账号级未绑）是配置事实，**不经过本缝**、照常走宿主出口。
+   *
+   * ⚠️ 「账号级未绑」**确实会经过本缝**，别被名字骗了：未绑账号的 `egressId` 不是 `null`，
+   * 是 `secrets.ts` 归一化算出的 **Tier-1 host id**（`account_egress_id ?? egressIdOfUrl(baseUrl)`）。
+   * 所以本缝对它的正确读法是第 ③ 支「查无此行 ⇒ 照常宿主出口」，**不是**「查无此行 ⇒ 死绑定」——
+   * 后者会让用户建第一个出口的那一瞬冻结全池未绑账号（P0）。`null` 只发生在连 base URL 都解析不出 host 时，
+   * 而那一路在引擎里更早被 `target.egressId !== null` 挡在本缝之外。
    */
   egressSelectable?: (egressId: string) => boolean;
   /**

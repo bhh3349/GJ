@@ -34,6 +34,7 @@ import {
   createAssistantInvoker,
   createAssistantMetrics,
   createEgressProxyLifecycle,
+  createEgressSelectable,
   createGatewayRuntime,
   createShutdownHandler,
   mountGatewayRoutes,
@@ -74,18 +75,15 @@ async function main(): Promise<void> {
   // key 运行态镜像（ADR-0010）与清明文 —— 都在 db.close() 之前，否则 flush 会写到已关的连接上
   // 503 出口选择器判据缝（ADR-0021 决策 9(5)，装配层方案 A）：**请求期现查** `egress_proxies`，
   // 不缓存 —— retire/reactivate 立即生效（零失步窗口）；表是个位数行，一条同步 SELECT 微秒级。
-  // 「启用 = 行数 > 0」：0 行 = 池未启用 ⇒ 恒真（fail-open 宿主直连、不判 503；与决策 9(5)
-  // 「`egress_id IS NULL` 是配置事实照常走宿主出口」同一条纪律）。有行时逐 id 查单轴 `status`：
-  // `active` = 活绑定；`retired` / 查无此行 = 死绑定 ⇒ 全部候选都死时引擎回
-  // 503 NO_AVAILABLE_EGRESS（不带 Retry-After、不回落直连，分型见 engine.ts 收尾段）。
+  // 三支判据收在 `src/wiring/egress-select.ts`（唯一实现处，与出站缝 `egress-proxy.ts` 同形）：
+  //   ① 池空（0 行）= 池未启用 ⇒ 恒活；② 池内条目按单轴 `status`（active 活绑定 / retired 死绑定）；
+  //   ③ **查无此行** = 未绑账号的 Tier-1 host id ⇒ 配置事实、照常走宿主出口（契约 §10 逐字
+  //   「不含『账号级未绑』」）。上一版把判据写在本层且只覆盖 ①②：池一旦非空，未绑账号的
+  //   Tier-1 host id 全落进「查无此行 = 死绑定」⇒ **建第一个出口那一瞬全池未绑账号一起 503**（P0）。
   // 刻意提成命名常量、保持下方调用对象扁平：egress.spec 的生产装配锁用
   // `createGatewayRuntime\(\{[^}]*\begress\b[^}]*\}\)` 钉「数据面拿到同一个 egress 实例」，
   // 对象里嵌函数体会让该正则失配 —— 装配锁不为此放宽，改的是装配写法。
-  const egressSelectable = (egressId: string): boolean => {
-    const rows = listEgressProxies(db);
-    if (rows.length === 0) return true;
-    return rows.some((row) => row.id === egressId && row.status === 'active');
-  };
+  const egressSelectable = createEgressSelectable(db);
 
   // 出口代理出站（ADR-0021 决策 4c / 契约 §16.7 Tier 2，缺口 A）：让"绑了出口的账号"真的从
   // 那个 IP 出去。此前 `ProxyAgent` 全仓只有管理面 `POST /api/egress/:id/test` 一个落点，

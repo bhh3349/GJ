@@ -1140,13 +1140,17 @@ describe('引擎：503 出口选择器（egressSelectable 判据缝，装配层�
     await assert.rejects(() => run(h), /ledger boom/);
   });
 
-  it('防回退钉：判据缝必须被装配层接线 —— server.ts 注入 egressSelectable 且请求期现查行数+status', () => {
+  it('防回退钉：判据缝必须被装配层接线 —— server.ts 注入 egressSelectable 且判据三支齐备', () => {
     const source = readFileSync(fileURLToPath(new URL('../server.ts', import.meta.url)), 'utf8');
     assert.match(source, /createGatewayRuntime\(\{[^}]*egressSelectable[^}]*\}\)/, '生产装配必须把判据注入数据面（方案 A 的「判据缝」）');
-    assert.match(source, /const egressSelectable = \(egressId/, '判据是装配层命名闭包');
-    assert.match(source, /listEgressProxies\(db\)/, '判据 = egress_proxies 行，请求期现查（不缓存：retire/reactivate 立即生效）');
-    assert.match(source, /if \(rows\.length === 0\) return true;/, '0 行 = 池未启用 = 恒活（fail-open 直连，不判 503）');
-    assert.match(source, /row\.status === 'active'/, '活绑定判据 = 单轴 status（决策 9(1)：retired 退出候选）');
+    // 判据的唯一实现处（与出站缝 egress-proxy.ts 同款分工）：实现收进 src/wiring/egress-select.ts，
+    // 装配层只造一次注入。三支判据由 egress-select.spec.ts 用真库逐支钉死。
+    assert.match(source, /createEgressSelectable\(db\)/, '判据 = 装配层调用 createEgressSelectable(db)（命名常量保持装配锁形状）');
+    const impl = readFileSync(fileURLToPath(new URL('../wiring/egress-select.ts', import.meta.url)), 'utf8');
+    assert.match(impl, /listEgressProxies\(db\)/, '判据 = egress_proxies 行，请求期现查（不缓存：retire/reactivate 立即生效）');
+    assert.match(impl, /if \(rows\.length === 0\) return true;/, '0 行 = 池未启用 = 恒活（fail-open 直连，不判 503）');
+    assert.match(impl, /if \(row === undefined\) return true;/, '查无此行 = 未绑账号的 Tier-1 host id ⇒ 配置事实照常宿主出口（契约 §10：不含账号级未绑；P0 修复）');
+    assert.match(impl, /row\.status === 'active'/, '活绑定判据 = 单轴 status（决策 9(1)：retired 退出候选）');
     // 缝不进闸端口冻结面：「本轮不新增端口方法」（决策 9(5) 末条）照旧管着 EgressGate
     const gateSource = readFileSync(fileURLToPath(new URL('../egress/port.ts', import.meta.url)), 'utf8');
     assert.ok(!gateSource.includes('egressSelectable'), '判据缝是独立装配缝，不进 EgressGate 冻结面');
@@ -1160,8 +1164,8 @@ describe('引擎：503 出口选择器（egressSelectable 判据缝，装配层�
       engineSource.includes('egressSelectable = options.egressSelectable ?? (() => true)'),
       '引擎缺省恒活 —— 未注入 = 未启用判据，行为逐字节零漂移',
     );
-    const serverSource = readFileSync(fileURLToPath(new URL('../server.ts', import.meta.url)), 'utf8');
-    assert.match(serverSource, /if \(rows\.length === 0\) return true;/, '0 行 fail-open 是装配层显式分支，不是漏判');
+    const implSource = readFileSync(fileURLToPath(new URL('../wiring/egress-select.ts', import.meta.url)), 'utf8');
+    assert.match(implSource, /if \(rows\.length === 0\) return true;/, '0 行 fail-open 是实现层显式分支，不是漏判');
   });
 });
 

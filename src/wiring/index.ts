@@ -7,6 +7,7 @@ export { createDbGatewayAuth } from './auth.js';
 export { createGatewayStore } from './store.js';
 export { createEgressProxyLifecycle } from './egress-proxy.js';
 export type { EgressProxyLifecycle, EgressProxyLifecycleOptions } from './egress-proxy.js';
+export { createEgressSelectable } from './egress-select.js';
 export type { GatewayStore, GatewayStoreOptions } from './store.js';
 export { createSecretResolver } from './secrets.js';
 export type { DbSecretResolver, SecretRow, SecretResolverOptions } from './secrets.js';

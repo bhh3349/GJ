@@ -33,6 +33,7 @@ import type { EgressShadowRecord } from './egress/port.js';
 import {
   createAssistantInvoker,
   createAssistantMetrics,
+  createEgressProxyLifecycle,
   createGatewayRuntime,
   createShutdownHandler,
   mountGatewayRoutes,
@@ -85,7 +86,18 @@ async function main(): Promise<void> {
     if (rows.length === 0) return true;
     return rows.some((row) => row.id === egressId && row.status === 'active');
   };
-  const gateway = createGatewayRuntime({ db, config, logger: true, egress, egressSelectable });
+
+  // 出口代理出站（ADR-0021 决策 4c / 契约 §16.7 Tier 2，缺口 A）：让"绑了出口的账号"真的从
+  // 那个 IP 出去。此前 `ProxyAgent` 全仓只有管理面 `POST /api/egress/:id/test` 一个落点，
+  // 数据面出站走裸 fetch ⇒ 出口池建了、绑了却不生效（流量照样从宿主 IP 直出）。
+  //
+  // 造在这里、只给数据面：管理面那七类出站的代理包装是**批二**（另一笔），本笔范围 = 数据面
+  // （派工令铁律⑤）。`masterKey` 只在装配层解密代理凭据，解密结果只进 `ProxyAgent` 构造参数。
+  // `refresh()` / `stop()` 由网关 runtime 挂进它既有那 1s 节拍与关停链（见 runtime.ts）——
+  // 于是缓存刷新与快照同一个拍子、凭据随 key 明文同批丢弃，装配层不用另记两处。
+  const egressProxy = createEgressProxyLifecycle({ db, masterKey: config.masterKey });
+
+  const gateway = createGatewayRuntime({ db, config, logger: true, egress, egressSelectable, egressProxy });
 
   // 晚绑（上面先给了个空实现）：`onShadow` 的消费者是日志，而闸必须**先于** app 存在
   // （它要注入进 runtime，runtime 才建 app）。标定吃的就是这条输出（决策 10(6)「shadow 输出

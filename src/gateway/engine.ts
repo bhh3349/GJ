@@ -86,6 +86,30 @@ export interface EngineOptions {
    * `egress_id IS NULL`（账号级未绑）是配置事实，**不经过本缝**、照常走宿主出口。
    */
   egressSelectable?: (egressId: string) => boolean;
+  /**
+   * 出口代理**出站包装**缝（ADR-0021 决策 4c / 契约 §16.7 Tier 2；**装配层注入**）。
+   *
+   * 为什么缝收下一个 `gated` 而不是回一个代理 URL：内核**不认识 `undici` / `ProxyAgent`**
+   * （AGENTS.md §8），也不许在数据面热路径上现造 agent —— `new ProxyAgent` 要解析 URL、建连接池，
+   * 逐请求做就是把 TTFB 吃掉（验收 6）。所以「这个出口怎么出去」整件事归装配层：装配层在闭包里持
+   * **已缓存的 agent**（代理 URL 与凭据只在装配层解密/构造一次，禁每请求解密），这里只交一个
+   * `egressId → 出站 fetch` 的**单参回调**（与 `egressSelectable` 同形、同一个注入点）。
+   *
+   * **组合次序是冻结点**：入参是**已经被预算闸包好的** `gated`，装配层必须把 `dispatcher` 注进
+   * `init` **后再调它** —— `(input, init) => gated(input, { ...init, dispatcher })`。
+   * 于是预算闸永远在最外层：本地拒绝（合成 429）照旧**一个字节都不落网络**，代理也绕不过预算。
+   *
+   * 两条硬契约（由装配层的 spec 守，不在本文件判）：
+   *   1. 该 id **在出口池里（`egress_proxies` 有行且 `status='active'`）却取不到代理材料**时
+   *      **必须抛、绝不裸转发** —— 静默回落宿主直连是决策 9(5) 明令禁止的（一个"绑了出口"的账号
+   *      偷偷从宿主 IP 出去，账却记在那个出口头上）；不在出口池里的 id（Tier 1 的 host、
+   *      账号未绑出口）返回 `gated` 原样 = 宿主直连，这正是配置事实、不是回落。
+   *   2. 本缝**只**接管代理出口；Tier 1 的 host 型 id 由装配层原样放回。
+   *
+   * 缺省不注入 = 一次都不调用（`egressId === null` 时也不调用）⇒ 行为与接线前**逐字节相同**
+   * （决策 7「接缝 ≠ 修」）。真正的接线在 `src/wiring/`，`src/server.ts` 造一次注入。
+   */
+  egressOutbound?: (egressId: string, gated: typeof fetch) => typeof fetch;
   /** 逐次尝试的观测钩子（指标/日志用，抛异常会被吞掉） */
   onAttempt?: (event: AttemptEvent) => void;
   /**
@@ -180,6 +204,9 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
   const egress = options.egress ?? permissiveEgressGate;
   // 池判据缺省 = 恒活（未注入时回调不被调用，零漂移；见 EngineOptions.egressSelectable）
   const egressSelectable = options.egressSelectable ?? (() => true);
+  // 出口代理出站包装缝（缺省 undefined = 装配层未接管：`egressId === null` 时一次都不调用，
+  // Tier 1 的 host 型 id 也照旧直连 —— 与接线前逐字节相同）
+  const egressOutbound = options.egressOutbound;
 
   /**
    * 数据面出站取件（ADR-0021 决策 4c）：`egressId → 绑定了预算闸的 fetch`。
@@ -413,7 +440,27 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
       // 出站取件走闸（ADR-0021 决策 4c）：`dataFetchFor` 在 `egressId === null` 时原样回裸 fetch
       // （**0 次裁决**，决策 2 的 fail-open），否则每次调用先 `reserve` 一次 —— 拒绝则回合成 429、
       // **一个字节都不落网络**。这是数据面唯一的出站口，写第二处就有人绕过预算。
-      const outbound = dataFetchFor(egressId, 'data');
+      //
+      // 出口代理（Tier 2，缺口 A 接线）：闸**仍是最外层**（`gated` 先裁决），代理只挂在
+      // "闸放行之后"那一层 —— 装配层注入的 `egressOutbound` 收下已被闸包好的 fetch、
+      // 把 `dispatcher` 注进 init 再调它（见 EngineOptions.egressOutbound 的次序说明）。
+      // `egressId === null` ⇒ **不调用该缝**（0 次），照旧宿主直连（决策 2 的 fail-open）。
+      //
+      // 缝抛异常（装配层判定「该出口挂不出去」：材料缺失 / 已退役 / 凭据解不开）：
+      //   · **不吞**（决策 9(5)：静默回落宿主直连 = 一个"绑了出口"的账号偷偷从宿主 IP 出去，
+      //     账却记在那个出口头上）—— 与 `egressSelectable` 抛异常同处置：宁炸勿瞒；
+      //   · 但**必须先归还并发位**：`beginAttempt` 已经占了一位，漏这行会让这把 key 在几次之后
+      //     静默钉死在满并发（症状是"池里还有 key 但选不出来"，与 ADR-0011 点名的那个坑同形）；
+      //   · 也不 `reportFailure`：这是配置侧故障，不是这把 key 的过错。
+      const gated = dataFetchFor(egressId, 'data');
+      let outbound: typeof fetch;
+      try {
+        outbound = egressId === null || egressOutbound === undefined ? gated : egressOutbound(egressId, gated);
+      } catch (err) {
+        link.dispose();
+        pool.endAttempt(candidate.keyId);
+        throw err;
+      }
       let response: Response;
       try {
         response = await outbound(joinUrl(target.baseUrl, req.upstreamPath), {

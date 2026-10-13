@@ -56,6 +56,12 @@ export interface GatewayStackOptions {
    * 本层**不**给缺省实现 —— 兜底写在这里会把「忘了接」伪装成「故意不接」。
    */
   egressSelectable?: (egressId: string) => boolean;
+  /**
+   * 出口代理出站包装缝（ADR-0021 决策 4c，装配层注入）。逐字透传 `EngineOptions.egressOutbound`。
+   * 本层**不**给缺省实现（同 `egressSelectable` 那条理由）：兜底写在这里，就把
+   * 「装配层没接管代理」伪装成「这个出口本来就走宿主直连」。
+   */
+  egressOutbound?: (egressId: string, gated: typeof fetch) => typeof fetch;
 }
 
 export interface GatewayStack {
@@ -87,6 +93,7 @@ export function createGatewayStack(options: GatewayStackOptions): GatewayStack {
   if (options.upstreamTimeoutMs !== undefined) built.upstreamTimeoutMs = options.upstreamTimeoutMs;
   if (options.egress !== undefined) built.egress = options.egress;
   if (options.egressSelectable !== undefined) built.egressSelectable = options.egressSelectable;
+  if (options.egressOutbound !== undefined) built.egressOutbound = options.egressOutbound;
 
   const engine = createGatewayEngine(built);
 

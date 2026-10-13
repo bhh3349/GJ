@@ -104,6 +104,8 @@ interface HarnessOptions {
   attempts?: AttemptEvent[];
   /** 503 选择器判据缝（ADR-0021 决策 9(5) 方案 A）：装配层注入的活集判定，缺省不注入 = 零漂移 */
   selectable?: (egressId: string) => boolean;
+  /** 出口代理出站包装缝（决策 4c，缺口 A）：装配层注入的 `egressId → 出站 fetch`，缺省不注入 = 零漂移 */
+  outbound?: (egressId: string, gated: typeof fetch) => typeof fetch;
 }
 
 function makeHarness(options: HarnessOptions) {
@@ -148,6 +150,7 @@ function makeHarness(options: HarnessOptions) {
     now,
     egress: gate,
     ...(options.selectable === undefined ? {} : { egressSelectable: options.selectable }),
+    ...(options.outbound === undefined ? {} : { egressOutbound: options.outbound }),
     ...(options.attempts === undefined ? {} : { onAttempt: (e) => options.attempts?.push(e) }),
   });
 
@@ -1159,5 +1162,118 @@ describe('引擎：503 出口选择器（egressSelectable 判据缝，装配层�
     );
     const serverSource = readFileSync(fileURLToPath(new URL('../server.ts', import.meta.url)), 'utf8');
     assert.match(serverSource, /if \(rows\.length === 0\) return true;/, '0 行 fail-open 是装配层显式分支，不是漏判');
+  });
+});
+
+
+/* ---------------- 引擎：出口代理出站包装缝（缺口 A，决策 4c） ---------------- */
+
+/**
+ * 缝的三态与**次序**都不许漂移：
+ *   1. **不注入**（缺省）⇒ 缝一次都不调用、`init` 里不得出现 `dispatcher`（零漂移）；
+ *   2. **注入** ⇒ 代理只挂在"闸放行之后"那一层：本地拒绝时**代理一次都没被碰到**；
+ *   3. **`egressId === null`** ⇒ 不调用该缝（0 次），照旧宿主直连（决策 2 的 fail-open）。
+ */
+describe('引擎：出口代理出站包装缝（egressOutbound，缺口 A）', () => {
+  /** 只包一层 `dispatcher` 的假装配层：与 `src/wiring/egress-proxy.ts` 同形（闸先跑） */
+  function stubProxy(marker: string, seen: string[]) {
+    return (egressId: string, gated: typeof fetch): typeof fetch => {
+      seen.push(egressId);
+      return (input, init) =>
+        gated(input, { ...(init ?? {}), dispatcher: { marker } } as unknown as RequestInit);
+    };
+  }
+
+  it('注入后：出站请求带上了 dispatcher，且 egressId 原样交给装配层（台账给的稳定 id）', async () => {
+    const seen: string[] = [];
+    let sent: Record<string, unknown> = {};
+    const h = makeHarness({
+      keys: [keyConfig('k1')],
+      steps: [
+        (_url, init) => {
+          sent = { ...(init as unknown as Record<string, unknown>) };
+          return OK();
+        },
+      ],
+      egressIds: { up1: 'egr_9f2c1a' },
+      outbound: stubProxy('proxy-a', seen),
+    });
+
+    const result = await run(h);
+
+    assert.equal(result.kind, 'json');
+    assert.deepEqual(seen, ['egr_9f2c1a'], '装配层拿到的是台账给的稳定 id，不是 host');
+    assert.deepEqual(sent.dispatcher, { marker: 'proxy-a' }, 'dispatcher 被注进了本次出站 init');
+    // 原有字段不得被缝吃掉（method/headers/body/signal 逐项还在）
+    assert.equal(sent.method, 'POST');
+    assert.ok(sent.body !== undefined);
+    assert.ok(sent.signal !== undefined);
+  });
+
+  it('闸**仍罩着代理**：本地预算拒绝时零出站、仍回 429（不是 502），dispatcher 到不了线上', async () => {
+    // 次序冻结点说不清的部分用行为钉死：缝是"**造**一个 fetch"时被调用的（它要返回 `typeof fetch`），
+    // 闸是"**发**请求"时裁决的。若写成"先注 dispatcher、再在外面包闸"，预算就会被绕过；
+    // 本用例把稳态钉死 —— 出口桶已空 ⇒ 仍是那个被拒绝的形状：**零出站** + 429（不是 502）。
+    const seen: string[] = [];
+    const gate = createEgressGate({ now, budget: { capacity: 1, windowMs: 60_000, reserveForData: 0 } });
+    assert.deepEqual(gate.reserve('egr_9f2c1a', 'data'), { allowed: true });
+    const h = makeHarness({
+      keys: [keyConfig('k1')],
+      steps: [],
+      egressIds: { up1: 'egr_9f2c1a' },
+      gate,
+      outbound: stubProxy('proxy-a', seen),
+    });
+
+    const result = await call(h);
+
+    assert.deepEqual(seen, ['egr_9f2c1a'], '缝按出口 id 被调用（包的是闸已包好的 fetch）');
+    assert.equal(h.calls.length, 0, '一个字节都没发 —— dispatcher 到不了线上');
+    assert.equal(result.error.httpStatus, 429);
+    assert.equal(result.error.body.error.code, 'RATE_LIMITED');
+    assert.equal(result.attempts, 0, '0 次真实尝试（决策 4b 的终态形状未因接代理而漂移）');
+  });
+
+  it('`egressId === null`（未绑出口）⇒ 不调用该缝，照旧宿主直连（决策 2 的 fail-open）', async () => {
+    const seen: string[] = [];
+    let sent: Record<string, unknown> = {};
+    const h = makeHarness({
+      keys: [keyConfig('k1')],
+      steps: [
+        (_url, init) => {
+          sent = { ...(init as unknown as Record<string, unknown>) };
+          return OK();
+        },
+      ],
+      egressIds: { up1: null },
+      outbound: stubProxy('proxy-a', seen),
+    });
+
+    const result = await run(h);
+
+    assert.equal(result.kind, 'json');
+    assert.deepEqual(seen, [], '没有出口 id 可交 —— 一次都不调用');
+    assert.equal(sent.dispatcher, undefined, '宿主直连：不得凭空挂一个代理');
+  });
+
+  it('缺省不注入 = 零漂移：不传该缝时 `init` 里不出现 `dispatcher`，行为与接线前一致', async () => {
+    const h = makeHarness({ keys: [keyConfig('k1')], steps: [OK], egressIds: { up1: 'egr_9f2c1a' } });
+    const result = await run(h);
+    assert.equal(result.kind, 'json');
+  });
+
+  it('缝抛异常**不被吞**：装配层判定"该出口不可出站"时必须让请求失败，不许静默回落宿主直连', async () => {
+    // 决策 9(5)：静默回落 = 一个"绑了出口"的账号偷偷从宿主 IP 出去，账却记在那个出口头上。
+    const h = makeHarness({
+      keys: [keyConfig('k1')],
+      steps: [OK],
+      egressIds: { up1: 'egr_9f2c1a' },
+      outbound: () => {
+        throw new Error('egress material unavailable');
+      },
+    });
+
+    await assert.rejects(() => run(h), /egress material unavailable/);
+    assert.equal(h.calls.length, 0, '抛之前不得先发一个裸请求出去');
   });
 });

@@ -25,6 +25,14 @@
  * 2. **退役被引用要先把依赖摆出来**：`409 EGRESS_HAS_ACCOUNTS` **无 `force`**，
  *    提示里点明 `accountCount` 并指路去账号池改绑，而不是假装能强删。
  * 3. **`lastTestOk === null` 是「未测」**，不是「失败」—— 未知 ≠ 失败（§0.2）。
+ *
+ * ## v1.13.0 起（ADR-0029）：本面新增「已绑账号数」读面
+ *
+ * `SupplierAccount.egressId` 已进 DTO（写入口 = `PATCH /api/supplier-accounts/:id`，绑定操作住在
+ * 账号池行内），本表据此显示每条出口当前被多少个账号绑定 —— 判据与 `retire` 的
+ * `409 EGRESS_HAS_ACCOUNTS` 同源（同一列 `supplier_accounts.egress_id`）。它仍然**不是**运行态：
+ * 绑定 ≠ 流量从那里出去（数据面出站尚未接出口代理），也 ≠ 出口健康（那只有 §7 帧一条读面）。
+ * 账号清单按**全局**取（不带 upstreamId）：出口池是全局资源，按上游页过滤会静默少算别的号的绑定。
  */
 import {
   ApiOutlined,
@@ -35,6 +43,7 @@ import {
   UndoOutlined,
 } from '@ant-design/icons';
 import {
+  Alert,
   App,
   Button,
   Empty,
@@ -50,19 +59,20 @@ import {
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
-import { egressApi } from '@/api/endpoints';
+import { egressApi, supplierAccountsApi } from '@/api/endpoints';
 import { useAction, useResource } from '@/api/hooks';
-import type {
-  EgressProxy,
-  EgressProxyCreateRequest,
-  EgressProxyPatchRequest,
-  EgressRetiredReason,
+import {
+  PAGE_SIZE_MAX,
+  type EgressProxy,
+  type EgressProxyCreateRequest,
+  type EgressProxyPatchRequest,
+  type EgressRetiredReason,
 } from '@/api/types';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { tokens } from '@/theme/tokens';
-import { formatIso, formatRelative } from '@/utils/format';
+import { formatCount, formatIso, formatRelative } from '@/utils/format';
 
 const { Text } = Typography;
 
@@ -137,11 +147,44 @@ function testTag(row: EgressProxy) {
   );
 }
 
-export function EgressProxyPanel() {
+export interface EgressProxyPanelProps {
+  /**
+   * 父层的「账号快照已变」信号（传对象引用即可，只比身份不比内容）：账号池那边的绑 / 解绑
+   * 落地后引用会换，本面板据此重取全局账号清单 —— 出口池面板在 Tabs 里常驻不卸载，
+   * 不接信号的话「已绑账号数」会停在旧值。
+   */
+  refreshSignal?: unknown;
+}
+
+export function EgressProxyPanel({ refreshSignal }: EgressProxyPanelProps) {
   const { message, modal } = App.useApp();
   const { run, isPending } = useAction();
 
   const list = useResource(() => egressApi.list(), []);
+
+  /**
+   * 「已绑账号数」的数据源：**全局**账号清单（不带 `upstreamId`，pageSize 顶到上限）。
+   * 只读、零上游请求。取不满（total > items.length）时计数显示为「≥N」—— 少报比不报更坏，
+   * 但把「只取到了前 200 个」说成精确值更坏。
+   */
+  const accounts = useResource(() => supplierAccountsApi.list({ pageSize: PAGE_SIZE_MAX }), []);
+
+  /** 父层信号变化 → 重取全局账号清单（绑定动作不经过本面板，只能靠信号追平）。 */
+  const reloadAccounts = accounts.reload;
+  const lastSignalRef = useRef(refreshSignal);
+  useEffect(() => {
+    if (refreshSignal !== lastSignalRef.current) {
+      lastSignalRef.current = refreshSignal;
+      reloadAccounts();
+    }
+  }, [refreshSignal, reloadAccounts]);
+
+  const accountCountOf = (egressId: string): number | null => {
+    const data = accounts.data;
+    if (data === null) return null;
+    return data.items.reduce((n, row) => (row.egressId === egressId ? n + 1 : n), 0);
+  };
+  const accountsPartial = accounts.data !== null && accounts.data.total > accounts.data.items.length;
 
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<EgressProxy | null>(null);
@@ -250,6 +293,9 @@ export function EgressProxyPanel() {
           />
           <Text type="secondary" style={{ fontSize: 12 }}>
             若这个出口已被账号绑定，服务端会拒绝（无强制退役）—— 需先把账号改到别的在池出口。
+            {accountCountOf(row.id) !== null && (accountCountOf(row.id) ?? 0) > 0
+              ? `当前已绑 ${formatCount(accountCountOf(row.id) ?? 0)} 个账号。`
+              : ''}
           </Text>
         </div>
       ),
@@ -339,6 +385,44 @@ export function EgressProxyPanel() {
           {value ? '已认证' : '免认证'}
         </Tag>
       ),
+    },
+    {
+      title: (
+        <Tooltip title="当前绑定到这条出口的供应商账号数（SupplierAccount.egressId，v1.13.0 / ADR-0029）。判据与退役拦截 409 EGRESS_HAS_ACCOUNTS 同源。绑定 ≠ 流量从这里出去（数据面尚未接出口代理），也 ≠ 出口健康（那只有 §7 帧一条读面，本期不发射）。改绑入口在账号池每行。">
+          <span>已绑账号</span>
+        </Tooltip>
+      ),
+      key: 'boundAccounts',
+      width: 92,
+      align: 'right',
+      render: (_: unknown, row: EgressProxy) => {
+        const n = accountCountOf(row.id);
+        return (
+          <Tooltip
+            title={
+              n === null
+                ? '账号清单还没加载完 —— 不显示 0，别把「没读到」当成「没人绑」。'
+                : n === 0
+                  ? '还没有账号绑定这条出口。要固定某个号的出口，去账号池那一行的「绑出口」。'
+                  : `${accountsPartial ? '至少 ' : ''}${formatCount(n)} 个账号绑定这条出口（${accountsPartial ? '账号总数超过单页上限，这是下界' : '解绑请到账号池该账号行'}）。`
+            }
+          >
+            {n === null ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>—</Text>
+            ) : (
+              <Text
+                style={{
+                  fontSize: 12,
+                  fontVariantNumeric: 'tabular-nums',
+                  color: n === 0 ? tokens.color.textSecondary : tokens.color.textPrimary,
+                }}
+              >
+                {n === 0 ? '0' : `${accountsPartial ? '≥' : ''}${formatCount(n)}`}
+              </Text>
+            )}
+          </Tooltip>
+        );
+      },
     },
     { title: '状态', key: 'status', width: 88, render: (_, row) => statusTag(row) },
     { title: '探活', key: 'test', width: 76, render: (_, row) => testTag(row) },
@@ -452,6 +536,20 @@ export function EgressProxyPanel() {
           新增出口
         </Button>
       </Space>
+
+      <Alert
+        type="warning"
+        showIcon
+        style={{ background: tokens.tint.warning, border: 'none', marginBottom: tokens.space.md }}
+        message="出口只支持 HTTP(S) CONNECT 代理（undici 不支持 SOCKS5）"
+        description={
+          <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
+            填 socks5:// 一类地址不会被拒绝，但更危险：数据面出站走的是裸 fetch、根本不经过这个代理
+            —— 请求从宿主 IP **静默直连**，全程无报错，出口形同虚设。绑定成功 ≠ 流量换路：
+            出口代理进转发链路是装配层接线（另开一笔），在此之前请把本面当「登记与预算分桶」用。
+          </Text>
+        }
+      />
 
       {list.error && list.data ? (
         <ErrorState

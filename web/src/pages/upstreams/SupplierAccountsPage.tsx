@@ -10,7 +10,10 @@
  * 1. **账号池**（`GET /api/supplier-accounts?upstreamId=`）—— 账号是**主语**，套餐与 key 都挂在它下面。
  * 2. **套餐台账**（`GET /api/supplier-accounts/subscriptions`）—— 服务端那条扁平列表**自己没有主语**，
  *    所以它在那一格里按 `accountId` 分组后才可读（§15.8 第 6 问）。
- * 3. **出口池** —— 无 REST 读面（`egress_id` 不进任何 DTO）；数据源是 §7 池级帧 `egress_pool`，三态纪律写在 `EgressPoolCard` 顶部。
+ * 3. **出口池** —— **两个面别混**：配置面走 REST（`/api/egress` 五条，见 `EgressProxyPanel`），
+ *    而**实时状态**（在线 / 冷却 / 出口 IP）没有 REST 读面、只有 §7 池级帧 `egress_pool`（本期不发射，
+ *    三态纪律写在 `EgressPoolCard` 顶部）。账号**自己的绑定**（`egressId`）自 v1.13.0 起进 DTO，
+ *    但它答的是配置、不是这座池此刻的健康 —— 合并渲染是这一页最容易犯的错。
  *
  * ## 批量动作：五个入口，两条纪律
  *
@@ -31,6 +34,17 @@
  * - **同上游单飞**：上一轮没结束时本轮由服务端跳过（§14.1）⇒ 连点不等于多刷一遍，
  *   所以这里**不做队列** —— 前端排队就是把一条已经定死的服务端行为再实现一遍。
  *
+ * ## 逐行「绑出口」（v1.13.0 §15.2 / ADR-0029）
+ *
+ * 账号绑出口的**唯一写入口**是 `PATCH /api/supplier-accounts/:id`（收 `egressId` + `revision`），
+ * 它是**同步**端点（200 回改完的那一行）—— 不是任务、不需要轮询。四条纪律写在服务端，这里只对齐：
+ * ① `egressId: null` = **解绑回宿主出口**（合法值，不是「清空成未知」），下拉里对应「宿主出口」那一项；
+ * ② 判据顺序 **活性校验 → 乐观锁 → 值未变短路** ⇒ `400 INVALID_PARAM` 是「填错出口」、
+ *    `409 REVISION_MISMATCH` 是「表格里的版本过期了」，两种反馈必须分开（前者不该让用户去刷新重试）；
+ * ③ 同一出口重选 = **空操作**（服务端不推版本）⇒ 前端就地拦掉，不发这次白请求；
+ * ④ 改这一列会让网关**按受影响的每把 key 重建快照**（重建清 token-plan 的乐观扣减，§9）⇒
+ *    确认文案里说清代价，成功后重取账号列表 + 把信号递给出口池面板追平「已绑账号数」。
+ *
  * ## 「状态」与「健康」是两列，不合并
  *
  * 「状态」只报上游侧的连接事实（登录失败 / 会话过期 / 未查询过 / 正常），一个字段一个意思；
@@ -50,7 +64,9 @@ import {
   Button,
   Empty,
   Input,
+  Modal,
   Segmented,
+  Select,
   Space,
   Table,
   Tabs,
@@ -62,13 +78,15 @@ import type { ColumnsType } from 'antd/es/table';
 import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
-import { supplierAccountsApi, upstreamsApi } from '@/api/endpoints';
+import { egressApi, supplierAccountsApi, upstreamsApi } from '@/api/endpoints';
+import { describeError, isApiError } from '@/api/http';
 import { useAction, useResource } from '@/api/hooks';
 import { useTaskPolling } from '@/api/useTaskPolling';
 import {
   PAGE_SIZE_DEFAULT,
   PAGE_SIZE_MAX,
   SUPPLIER_STATUS_TEXT,
+  type EgressProxy,
   type SupplierAccount,
   type SupplierAccountStatus,
   type SupplierBatchRequest,
@@ -113,6 +131,13 @@ const CREDENTIAL_SHORT: Record<SupplierCredentialSource, string> = {
   password: '密码型',
   session: '会话型',
 };
+
+/**
+ * 下拉里「宿主出口」那一项的**哨兵值**。不能直接用 `null` 当 option value：antd 把 `null`/`undefined`
+ * 当成"未选"，`value={null}` 会渲染成 placeholder 而不是那个标签 —— 用户选了宿主出口却看不出选了它。
+ * 真值在提交前映射回 `null`（`egressId: null` = 解绑，是契约里的**合法值**）。
+ */
+const HOST_EGRESS_VALUE = '__host__';
 
 /** 一个「打上游」的批量动作：确认标题 / 真正的提交函数 / 确认框末句（有代价语义的动作给）。 */
 interface BatchActionSpec {
@@ -248,6 +273,17 @@ export default function SupplierAccountsPage() {
   const [keysOpen, setKeysOpen] = useState(false);
   const [batchTitle, setBatchTitle] = useState('');
   const [batchOpen, setBatchOpen] = useState(false);
+  /** 正在绑出口的那一行（`null` = 弹窗关闭）。 */
+  const [bindTarget, setBindTarget] = useState<SupplierAccount | null>(null);
+  /**
+   * 出口池 → 账号池的追平信号：绑 / 解绑落地后换一个新引用，出口池面板据此重取全局账号清单。
+   * 面板在 Tabs 里常驻不卸载，不递信号的话「已绑账号数」会停在旧值上。
+   */
+  const [egressSignal, setEgressSignal] = useState(0);
+  /** 绑出口弹窗里的当前选择：`HOST_EGRESS_VALUE` = 宿主出口（提交时映射回 `null` = 解绑）。 */
+  const [bindValue, setBindValue] = useState<string>(HOST_EGRESS_VALUE);
+  /** 绑出口在途。端点虽是同步的，按钮仍要有 loading（契约要求所有操作有反馈）。 */
+  const [bindSaving, setBindSaving] = useState(false);
 
   const upstream = useResource(
     () => (upstreamId ? upstreamsApi.get(upstreamId) : Promise.resolve(null)),
@@ -266,6 +302,26 @@ export default function SupplierAccountsPage() {
           })
         : Promise.resolve(null),
     [upstreamId, q, status, page, pageSize],
+  );
+
+  /**
+   * 出口清单（**只读、零上游请求**）：只为了把 `SupplierAccount.egressId` 这种不透明 id
+   * 翻成出口名 —— 契约明写「前端不得解析 id 的内容」，所以展示必须走这张表，不能截 id 当名字。
+   * 默认全量（含 `retired`）：历史绑定过的退役出口也要认得出，否则那一行会显示成一串裸 id。
+   */
+  const egress = useResource(() => egressApi.list(), []);
+
+  /** id → 出口。取不到（列表未到 / 出口被别的窗口删了）返回 `null`，调用方退回渲染裸 id。 */
+  const egressById = useMemo(() => {
+    const map = new Map<string, EgressProxy>();
+    for (const item of egress.data?.items ?? []) map.set(item.id, item);
+    return (id: string): EgressProxy | null => map.get(id) ?? null;
+  }, [egress.data]);
+
+  /** 绑出口弹窗的下拉数据源：只列 `active` 的（退役的选了必 400，不如不给选）。 */
+  const bindableEgress = useMemo(
+    () => (egress.data?.items ?? []).filter((item) => item.status === 'active'),
+    [egress.data],
   );
 
   /**
@@ -416,6 +472,50 @@ export default function SupplierAccountsPage() {
     }));
     if (result === null) return;
     message.success(result.name ? `已导出 ${result.name}` : '已导出（服务端未给文件名）');
+  };
+
+  /**
+   * 绑 / 解绑出口（§15.2 v1.13.0 / ADR-0029）。**同步端点**：200 回改完的那一行，没有任务可轮询。
+   *
+   * 为什么这里**不用 `useAction.run`**：`run` 把一切失败压成一条 `message.error` 并返回 `null`，
+   * 而本端点三种失败的**处置完全不同**（契约把它们分得很清楚），压平就等于把「填错出口」和
+   * 「版本过期」渲染成同一句话：
+   * - `400`（`details.field='egressId'`，出口不存在 / 已退休）⇒ **填错了**：留在弹窗上让用户改选，
+   *   **不刷新**（刷新会冲掉他刚做的选择）；服务端把活性校验放在乐观锁之前，正是为了不改判成版本冲突。
+   * - `409 REVISION_MISMATCH` ⇒ **版本过期**：刷新列表 + 关弹窗，让用户基于新数据重来。
+   * - 同一出口重选 = **空操作**（服务端连 `revision` 都不推）⇒ 前端就地拦掉，不发这次白请求。
+   */
+  const submitBind = async (target: SupplierAccount, egressId: string | null): Promise<void> => {
+    if (target.egressId === egressId) {
+      message.info('绑定没有变化');
+      setBindTarget(null);
+      return;
+    }
+    setBindSaving(true);
+    try {
+      await supplierAccountsApi.setEgress(target.id, { egressId, revision: target.revision });
+      message.success('绑定已保存（网关会据此重建这批 key 的出口归属；流量真换路仍待装配层接线）');
+      setBindTarget(null);
+      accounts.reload();
+      pool.reload();
+      setEgressSignal((n) => n + 1);
+    } catch (error) {
+      const { code, message: text } = describeError(error);
+      if (isApiError(error) && error.status === 400) {
+        message.error(`${text} [${code}]`);
+        return;
+      }
+      if (isApiError(error) && code === 'REVISION_MISMATCH') {
+        message.warning('这个账号在你操作期间被改过（版本不一致），列表已刷新，请重新点一次。');
+        setBindTarget(null);
+        accounts.reload();
+        pool.reload();
+        return;
+      }
+      message.error(`${text} [${code}]`);
+    } finally {
+      setBindSaving(false);
+    }
   };
 
   const closeBatch = (): void => {
@@ -621,6 +721,49 @@ export default function SupplierAccountsPage() {
     },
     {
       title: (
+        <Tooltip title="这个账号当前绑定的出口（SupplierAccount.egressId，v1.13.0 / ADR-0029）。它答的是「这个号自己绑了谁」，**不是**「这个出口活着吗」—— 池的在线 / 冷却仍只有 §7 帧一条读面（本期不发射）。「宿主出口」= 未绑定，是配置事实，不是「未知」也不是「不可用」。绑定 ≠ 流量从这里出去：出口代理尚未接进数据面。">
+          <span>出口</span>
+        </Tooltip>
+      ),
+      key: 'egress',
+      width: 150,
+      render: (_: unknown, row) => {
+        if (row.egressId === null) {
+          return (
+            <Tooltip title="未绑定出口，走宿主 IP 出站。这是配置事实 —— 不是「未知」，也不是「不可用」。">
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                宿主出口
+              </Text>
+            </Tooltip>
+          );
+        }
+        const item = egressById(row.egressId);
+        return (
+          <Space size={tokens.space.xs} align="center" wrap>
+            <Text style={{ fontSize: 12 }}>
+              {item ? item.name : '（不在出口清单里）'}
+            </Text>
+            {item && item.status === 'retired' ? (
+              <Tooltip title="这个出口已退役。已绑定的关系仍然成立（历史可读），但新绑定只允许选在池出口。">
+                <Tag
+                  bordered={false}
+                  style={{
+                    marginInlineEnd: 0,
+                    fontSize: 10,
+                    background: tokens.tint.neutral,
+                    color: tokens.color.textSecondary,
+                  }}
+                >
+                  已退役
+                </Tag>
+              </Tooltip>
+            ) : null}
+          </Space>
+        );
+      },
+    },
+    {
+      title: (
         <Tooltip title="凭据来源决定会话过期后能否自动重登；有会话但没有存档密码的号，过期后只能人工重导凭据。">
           <span>凭据</span>
         </Tooltip>
@@ -651,18 +794,31 @@ export default function SupplierAccountsPage() {
     {
       title: '操作',
       key: 'actions',
-      width: 92,
+      width: 132,
       render: (_: unknown, row) => (
-        <Button
-          size="small"
-          type="link"
-          style={{ padding: 0 }}
-          onClick={() => {
-            setDetailId(row.id);
-          }}
-        >
-          详情
-        </Button>
+        <Space size={tokens.space.sm}>
+          <Button
+            size="small"
+            type="link"
+            style={{ padding: 0 }}
+            onClick={() => {
+              setBindValue(row.egressId ?? HOST_EGRESS_VALUE);
+              setBindTarget(row);
+            }}
+          >
+            绑出口
+          </Button>
+          <Button
+            size="small"
+            type="link"
+            style={{ padding: 0 }}
+            onClick={() => {
+              setDetailId(row.id);
+            }}
+          >
+            详情
+          </Button>
+        </Space>
       ),
     },
   ];
@@ -872,7 +1028,7 @@ export default function SupplierAccountsPage() {
                       columns={columns}
                       dataSource={localRows ?? accounts.data?.items ?? []}
                       loading={accounts.refreshing}
-                      scroll={{ x: 1404 }}
+                      scroll={{ x: 1686 }}
                       rowSelection={{
                         selectedRowKeys: selected,
                         onChange: (keys) => {
@@ -993,7 +1149,7 @@ export default function SupplierAccountsPage() {
               label: '出口池',
               children: (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.md }}>
-                  <EgressProxyPanel />
+                  <EgressProxyPanel refreshSignal={egressSignal} />
                   <EgressPoolCard />
                 </div>
               ),
@@ -1001,6 +1157,74 @@ export default function SupplierAccountsPage() {
           ]}
         />
       )}
+
+      <Modal
+        open={bindTarget !== null}
+        title="绑定出口"
+        okText="保存绑定"
+        cancelText="取消"
+        width={560}
+        destroyOnClose
+        confirmLoading={bindSaving}
+        maskClosable={!bindSaving}
+        onOk={() => {
+          if (bindTarget) {
+            void submitBind(bindTarget, bindValue === HOST_EGRESS_VALUE ? null : bindValue);
+          }
+        }}
+        onCancel={() => {
+          if (!bindSaving) setBindTarget(null);
+        }}
+      >
+        {bindTarget ? (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.md }}>
+            <Text style={{ fontSize: 12 }}>
+              账号
+              <Text code style={{ marginInlineStart: tokens.space.xs }}>
+                {bindTarget.identifier}
+              </Text>
+              {bindTarget.egressId === null ? '当前走宿主出口。' : '当前已绑一条出口。'}
+            </Text>
+            <Select<string>
+              style={{ width: '100%' }}
+              value={bindValue}
+              onChange={(next) => {
+                setBindValue(next);
+              }}
+              options={[
+                { value: HOST_EGRESS_VALUE, label: '宿主出口（不绑定 = 解绑）' },
+                ...bindableEgress.map((item) => ({
+                  value: item.id,
+                  label: `${item.name} · ${item.url}`,
+                })),
+              ]}
+              notFoundContent={
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  还没有在池出口。到「出口池」标签页新增一个，或保持宿主出口。
+                </Text>
+              }
+            />
+            <Alert
+              type="info"
+              showIcon
+              style={{ background: tokens.tint.info, border: 'none' }}
+              message="保存后会发生什么"
+              description={
+                <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
+                  ① 网关会按这个账号名下**每一把 key** 重建出口归属（重建会清掉 token-plan key 的
+                  乐观扣减，直到下次同步回填）；② 绑定只决定「用哪个出口的预算桶」，**流量真从那个 IP
+                  出去需要装配层接线**，尚未落地；③ 选同一个出口再保存 = 空操作，服务端不会推版本。
+                </Text>
+              }
+            />
+            {egress.error && egress.data === null ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                出口清单没取回来（{describeError(egress.error).message}），下拉里可能只有宿主出口。
+              </Text>
+            ) : null}
+          </div>
+        ) : null}
+      </Modal>
 
       <SupplierImportModal
         open={importOpen}

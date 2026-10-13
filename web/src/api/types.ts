@@ -1218,8 +1218,10 @@ export type AssistantFrame =
 // 2. 批量任务的逐行结论**只读 `result.items`**，且只在**终态**读（`succeeded` / `failed`）。
 //    它最多 500 行，`itemsTotal` 是截断前的真实行数、`truncated` 说明明细被截。
 //    本期**没有**分页，前端不得自己造一个"下一页"。
-// 3. `SupplierAccount` DTO 是**穷尽**的：**不存在** `egressId` 或任何出口字段。
-//    出口的读面只有 §7 的 `egress_*` 帧，而本期那两帧**不发射** ⇒ 出口池在管理面上**无数据可读**。
+// 3. `SupplierAccount` DTO 是**穷尽**的：自 v1.13.0 起这一格里多了 `egressId` —— 它答的是
+//    「这个账号**自己绑了谁**」（配置事实，`supplier_accounts` 的列）。**出口池的实时状态**
+//    （在线 / 冷却 / 出口 IP）仍然只有 §7 的 `egress_*` 帧一条读面，而本期那两帧**不发射**
+//    ⇒ 池的健康在管理面上仍无数据可读。两者不是一件事，**别合并渲染**。
 //
 // **凭据纪律**：本文件里所有 `identifier` / `keyMasked` 都是**掩码**；
 // 唯一进入系统的明文密码走 `POST /api/supplier-accounts/import` 的请求体，且**只进不出**。
@@ -1263,6 +1265,16 @@ export interface SupplierAccount {
   /** 只回答**有无**，会话值永不出后端。 */
   hasSession: boolean;
   sessionExpiresAt: Iso8601 | null;
+  /**
+   * §15.1 v1.13.0 新增（**非破坏**）：该账号绑定的出口。`eg_` 前缀**不透明 id** —— 只当键用，
+   * 前端**不得解析它的内容**（Tier 2 换形状时不该变成一次前端改造）。
+   *
+   * **`null` = 未绑定、走宿主出口** —— 这是**配置事实**，不是「未知」、不是「不可用」（§16.7）。
+   * 它答的是「这个账号自己绑了谁」，**不是**「这个出口现在活着吗」（池的健康只有 §7 帧一条读面）。
+   *
+   * 写入口 = `PATCH /api/supplier-accounts/:id`（`egressId` + `revision`，乐观锁）。
+   */
+  egressId: string | null;
   revision: number;
   createdAt: Iso8601;
   updatedAt: Iso8601;
@@ -1315,6 +1327,20 @@ export interface SupplierAccountListQuery extends PageQuery {
   upstreamId?: string;
   status?: SupplierAccountStatus;
   q?: string;
+}
+
+/**
+ * §15.2 `PATCH /api/supplier-accounts/:id`（v1.13.0，账号绑出口 / ADR-0029）。
+ *
+ * `egressId` 是**目标出口**：**`null` = 解绑、回宿主出口**（合法值，不是「清空成未知」）；
+ * `revision` **必填**（§0.2 乐观锁）。判据顺序由服务端定死：**活性校验 → 乐观锁 → 值未变短路**
+ * —— 出口不存在 / 已 `retired` ⇒ `400 INVALID_PARAM`（`details.field = 'egressId'`），
+ * `revision` 不符 ⇒ `409 REVISION_MISMATCH`（带 `expected` / `actual`）；
+ * 值未变 = **空操作**（不推 `revision`、不发 `change_log`）。
+ */
+export interface SupplierAccountSetEgressRequest {
+  egressId: string | null;
+  revision: number;
 }
 
 /** §15.2 `POST /api/supplier-accounts/import`。**本端点只收密码型凭据**；会话型不走 HTTP（§15.9）。 */
@@ -1428,8 +1454,8 @@ export const SUPPLIER_STATUS_TEXT: Record<SupplierAccountStatus, string> = {
 //
 // 这是「Upstream 之外的第 10 类资源对象」，与供应商账号面**完全独立**：账号面回答
 // 「这些号能不能登录」；出口面回答「流量从哪个 IP 出去」。两者唯一的交集是
-// `supplier_accounts.egress_id` 那一列（**不进任何 DTO**，只在这两处出现：
-// POST/PATCH /api/supplier-accounts 的请求体 `egressId`）。
+// `supplier_accounts.egress_id` 那一列（v1.13.0 起**已进 `SupplierAccount.egressId` 读面**，
+// 写入口 = `PATCH /api/supplier-accounts/:id` 的请求体 `egressId`）。
 //
 // 三条与账号面同源、但**必须分开写**的纪律：
 // 1. 明文凭据**只进不回**：`username` / `password` 只在 POST/PATCH 请求体里出现一次，

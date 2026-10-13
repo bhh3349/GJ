@@ -51,6 +51,7 @@ import type {
   StatsWindow,
   SupplierAccount,
   SupplierAccountListQuery,
+  SupplierAccountSetEgressRequest,
   SupplierBatchRequest,
   SupplierImportRequest,
   SupplierKeysRequest,
@@ -262,6 +263,17 @@ export const supplierAccountsApi = {
   relogin: (id: string) => api.post<SupplierAccount>(`/supplier-accounts/${id}/login`),
   /** 连接自测。**永不写库**，业务性失败一律 `200 + ok:false`（诊断结论走响应体）。 */
   test: (id: string) => api.post<SupplierTestResult>(`/supplier-accounts/${id}/test`),
+  /**
+   * 绑 / 解绑出口（§15.2 v1.13.0 / ADR-0029）。`egressId: null` = 解绑回宿主出口。
+   * 失败三种全是既有码：出口不存在 / 已退役 ⇒ `400 INVALID_PARAM`（`details.field='egressId'`）、
+   * `revision` 不符 ⇒ `409 REVISION_MISMATCH`、账号不存在 ⇒ `404`。**值未变是空操作**。
+   *
+   * 为什么调用方要提示「会触发一次快照重建」：改这一列会按受影响的每把 key 发 `change_log`，
+   * 网关据此重建快照 —— 而重建会清掉 token-plan key 的乐观扣减（§9 / §3 已知副作用），
+   * 故契约把「值未变」定成空操作正是为了不白推一次重建。UI 侧据此在写前说清代价。
+   */
+  setEgress: (id: string, body: SupplierAccountSetEgressRequest) =>
+    api.patch<SupplierAccount>(`/supplier-accounts/${id}`, body),
   /**
    * 删账号。名下还有已入池 key 且 `force !== true` → `409 ACCOUNT_HAS_KEYS`。
    * 与删上游（ADR-0016 物理删子树）关键差别：**这里一把 key 都不删，只解绑** ——

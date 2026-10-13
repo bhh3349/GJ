@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.12.1**　｜
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.12.2**　｜
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -82,6 +82,11 @@
 > ① **缓存判据按 content-type，不按 URL**：首版 onSend 按 URL 含 `/assets/` 判缓存，而 404 兜底回的 `index.html` 也落在 `/assets/` 路径上 —— 实测 `GET /assets/<不存在文件>` 与 `GET /assets/` 均回 200 HTML 且带 `immutable`，入口壳被长缓存 30 天。收口：content-type 含 `html` 一律 `no-cache`，`immutable` 只挂真正命中的静态资源。
 > ② **机器面判据收紧为段边界**：裸 `/api`、`/v1`（无尾斜杠）首版漏进 SPA 支回 200 HTML（实测）；收口为 `p === '/api' || p.startsWith('/api/')`（`/v1` 同）—— 裸前缀归 JSON 404，`/apifoo` 类同前缀不同段仍回 SPA（不是路由，浏览器深链语义不变）。
 > ③ **零行为面变更**：`/api/*` / `/v1/*` 既有响应零字节变更；`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增；`SCHEMA_VERSION` 仍为 2、零 DDL、零迁移；`src/gateway/` 零改动。测试 +4 判据（静态未命中回落 no-cache ×2、裸前缀 404 ×2、`/apifoo` SPA 正控、缺失目录三路径 404）。
+> **v1.12.2（2026-10-14，接入信息只读面 —— PM 交付链探查缺口 2 / 画师「接口先行」点单）**：新增 **§18 `GET /api/access-info`（只读、无副作用、零新存储）**。动机与影响见 **`docs/adr/0028-gateway-access-info.md`**。
+> ① **回什么**：`{gateway:{scheme,portGateway,hostGateway}, admin:{scheme,portAdmin,hostAdmin}, publicHost, adminWebDistEnabled}` —— **`gatewayUrl` / `adminUrl` 两个完整 URL 字段刻意不设**：服务端只知道端口与绑定地址，不知道公网 host；`0.0.0.0` / `127.0.0.1` 都不是对外可访问地址，服务端拼 URL 必然猜错。URL 拼接责任在前端：`publicHost || window.location.hostname` + 端口。
+> ② **`publicHost` 覆盖值落 `.env`（新可选 `PUBLIC_HOST`，默认空 = `null`），不落库**：host 属部署环境属性，归 `.env` 口径，免 DB / 免 schema / 免审计面；设置后即为接入页对外展示的权威基址（不带 scheme）。
+> ③ **组 key 不进本响应**：网关 key 明文只在签发响应出现一次（§4：`POST /api/groups` / `POST /api/groups/:id/keys`），掩码列表走既有 `GET /api/groups`（`gatewayKeyMasked` + `keyCount`）——接入页「复制 key」指向用户组发 key 流程，无状态只读面不得变成第二个 key 读面。
+> ④ **零行为面变更**：`/api/*` / `/v1/*` 既有响应零字节变更；`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增（本端点无错误分支，鉴权失败同 §1 既有 401/403）；`SCHEMA_VERSION` 仍为 2、零 DDL、零迁移；`src/gateway/` 零改动。
 > **补遗 v1.0.2（2026-10-06）**：① §3 `POST /api/keys/:id/balance/refresh` 的响应补成 `202 {taskId}`（原文只写了用途、没写形状，而实现从第一天起就回 `202 {taskId}`，属于文本与实现的既存分歧，本次抹平）；② §5 新增「`POST /api/models/sync` 的字段映射」小节，把「只落能证明的、其余一律未知」写成明文规则；③ §5 补一句「同步不覆盖人工值」。除此之外 v1.0.1 全部内容不变 —— 无字段改名、无类型变更、无端点删除。动机与影响见 ADR-0009。
 >
 > **补遗 v1.0.3（2026-10-06）**：① §3 写明 `health` 等四个运行态字段的**来源与新鲜度**（网关进程 1s 批量镜像落 `key_runtime`，重启后归零），动机见 ADR-0010；② §6 新增「`costCents` 金额口径」小节 —— 契约此前**暴露**了 `costCents`（§4 Group、§6 usage 点）却从未**定义**它，未知单价该记 0 还是 null 无据可依；③ §10 把「无可用 key」与「候选用尽」两个 Terminating 结果拆开登记（`503 NO_AVAILABLE_KEY` ≠ `502 UPSTREAM_ERROR`，原文一句话把两者混在一起，与实现不符），并登记已在使用但未登记的 `504 UPSTREAM_TIMEOUT`。三处都是**文本对齐实现**，无字段改名、无类型变更、无端点增删。
@@ -3280,3 +3285,18 @@ v1.11.2（**2026-10-14，sync 选 key 候选修复 + 探测口径三点补充** 
 | 顺序 | `/api/*` 路由全部先注册，静态最后；`wildcard:false`，不注册 `/*` catch-all |
 | 鉴权 | 静态资源不经会话闸门（onRequest 只判 `/api/*`）；`/api/*` / `/v1/*` 行为零变更 |
 | 目录缺失 | 不 fail-fast：启动 warn，托管退化（0 条静态路由 + 兜底退化为 404） |
+
+## 18. 接入信息 `GET /api/access-info`（v1.12.2；只读、无副作用）
+
+| 项 | 口径 |
+|---|---|
+| 定位 | 给「接入信息」页一次取齐**自报口径**：网关 / 管理面的端口与绑定地址、对外 host 覆盖值、前端托管开关。**不含组 key** —— 掩码走 §4 `GET /api/groups`（`gatewayKeyMasked`），明文只在签发响应出现一次 |
+| 方法 / 鉴权 | `GET`；会话或 `ADMIN_TOKEN`（§1）。无错误分支 —— 本资源永远存在，字段值可能为 `null`，不存在 404 语义 |
+| 响应 | `200 {gateway:{scheme,portGateway,hostGateway}, admin:{scheme,portAdmin,hostAdmin}, publicHost, adminWebDistEnabled}` |
+| `scheme` | 恒 `"http"`（TLS 终结在反代，服务端不感知，§17 同口径） |
+| `portGateway` / `portAdmin` | int，config `PORT_GATEWAY`（默认 4000）/ `PORT_ADMIN`（默认 4001），**不写死** |
+| `hostGateway` / `hostAdmin` | **绑定地址**（config `HOST_GATEWAY` / `HOST_ADMIN`，如 `0.0.0.0` / `127.0.0.1`）——是监听语义，**不是可访问地址**；前端展示时禁止把绑定地址直接拼给用户 |
+| `publicHost` | env `PUBLIC_HOST`（默认空 = `null`）。对外基址覆盖值（如 `gw.example.com`，不带 scheme），落 `.env` 不落库；设置后 = 接入页展示的权威 host |
+| `adminWebDistEnabled` | boolean，`ADMIN_WEB_DIST` 非空即 `true`（§17 root 口径）；前端据此提示「生产直开 :4001」还是「先起 Vite」 |
+| URL 拼接责任 | 前端：`(publicHost ?? window.location.hostname)` + 端口；本端点**不回**任何完整 URL |
+| 边界 | 零新存储、零 DDL、零迁移、零审计（纯只读）；`src/gateway/` 零改动 |

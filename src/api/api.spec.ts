@@ -1301,6 +1301,17 @@ describe('§17 管理面静态托管（v1.12.0）', () => {
     expect(String(asset.headers['cache-control'])).toContain('immutable');
     expect(asset.body).toContain('console.log(1)');
 
+    // 静态未命中回落入口壳时**不得**带 immutable（v1.12.1 勘误）：
+    // 按 URL 里的 '/assets/' 判缓存会把兜底回的 index.html 也挂上 30 天 immutable 缓存，
+    // 于是入口壳发不出去。判据必须是 content-type。
+    for (const url of ['/assets/does-not-exist-abc.js', '/assets/']) {
+      const miss = await h.app.inject({ method: 'GET', url });
+      expect(miss.statusCode, `${url}: ${miss.body}`).toBe(200);
+      expect(miss.headers['content-type']).toContain('text/html');
+      expect(String(miss.headers['cache-control']), url).toContain('no-cache');
+      expect(String(miss.headers['cache-control']), url).not.toContain('immutable');
+    }
+
     // SPA 深链：未命中的非 /api 非 /v1 GET 回落 index.html（200）
     const deep = await h.app.inject({ method: 'GET', url: '/keys' });
     expect(deep.statusCode, deep.body).toBe(200);
@@ -1321,18 +1332,31 @@ describe('§17 管理面静态托管（v1.12.0）', () => {
     const v1Miss = await h.app.inject({ method: 'GET', url: '/v1/not-a-real-endpoint' });
     expect(v1Miss.statusCode).toBe(404);
     expect((v1Miss.json() as { code: string }).code).toBe('NOT_FOUND');
+    // 裸前缀也归机器面（v1.12.1 勘误）：判据是**段边界**，不是 `startsWith('/api/')` ——
+    // 前缀判据会把裸 `/api`、`/v1` 漏进 SPA 支。这两个路径在管理面没有真实路由，就该 404。
+    for (const url of ['/api', '/v1']) {
+      const bare = await h.app.inject({ method: 'GET', url });
+      expect(bare.statusCode, `${url}: ${bare.body}`).toBe(404);
+      expect((bare.json() as { code: string }).code).toBe('NOT_FOUND');
+    }
+    // 同前缀不同段不是路由，回落 SPA 是对的（段边界判据不得退化成「前缀即机器面」）
+    const apiFoo = await h.app.inject({ method: 'GET', url: '/apifoo' });
+    expect(apiFoo.statusCode, apiFoo.body).toBe(200);
+    expect(apiFoo.body).toContain('SPA_SHELL');
     const postMiss = await h.app.inject({ method: 'POST', url: '/keys', headers: auth(h) });
     expect(postMiss.statusCode).toBe(404);
     expect((postMiss.json() as { code: string }).code).toBe('NOT_FOUND');
     await closeHarness(h);
   });
 
-  it('配了不存在的目录：不炸、托管退化，GET / 仍是 JSON 404', async () => {
+  it('配了不存在的目录：不炸、托管退化，GET / 与 SPA 深链都是 JSON 404', async () => {
     const missing = join(tmpdir(), 'api-webdist-missing-' + Date.now());
     const h = await setup({ adminWebDist: missing });
-    const res = await h.app.inject({ method: 'GET', url: '/' });
-    expect(res.statusCode).toBe(404);
-    expect((res.json() as { code: string }).code).toBe('NOT_FOUND');
+    for (const url of ['/', '/keys', '/assets/app-abc123.js']) {
+      const res = await h.app.inject({ method: 'GET', url });
+      expect(res.statusCode, `${url}: ${res.body}`).toBe(404);
+      expect((res.json() as { code: string }).code).toBe('NOT_FOUND');
+    }
     await closeHarness(h);
   });
 });

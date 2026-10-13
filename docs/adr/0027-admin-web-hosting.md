@@ -1,6 +1,6 @@
 # ADR-0027：管理面同源托管前端产物（@fastify/static + SPA fallback）
 
-- 状态：已接受（2026-10-14）
+- 状态：已接受（2026-10-14）；v1.12.1 勘误（缓存判据改 content-type、路径判据收紧段边界）
 - 关联：契约 v1.12.0 §17；`docs/开发约束-v0.1.md` §155（「生产环境部署」明列管理面要托管构建产物，此前未实现）
 - 车道：管家（`src/api/` + `src/config.ts` + `.env.example`）；画师零改动需求
 
@@ -16,6 +16,11 @@ PM 的交付链探查（2026-10-14）指出缺口 3：管理面没有托管前�
    与开发态 Vite 的「同源代理」口径一致（Cookie 不跨域、WS `/api/stats/live` 同源升级）。
 2. **注册顺序**：`buildApp` 内先注册全部 `/api/*` 路由，静态托管**最后**注册。
    Fastify 路由按注册序匹配，`/api/*` 永远先于静态命中。
+2b. **路径判据是段边界（v1.12.1 勘误）**：SPA 兜底与缓存钩子判「非机器面」用的是
+   `p === '/api' || p.startsWith('/api/')`（`/v1` 同）—— 首版用 `startsWith('/api/')`
+   前缀判，裸 `/api`、`/v1`（无尾斜杠）漏进 SPA 支。实测（2026-10-14）两条裸前缀
+   `GET` 均回 200 HTML。功能上同口径可解释（管理面没有这两个路径的真实路由，`/v1foo`
+   也不可能撞上），故定性为措辞收紧、真缺陷一并为「缓存判据」那条；已收口。
 3. **插件形态：`wildcard: false`（逐文件路由），不取 `wildcard: true`（`/*` catch-all）**。
    实测（2026-10-14，`@fastify/static` 8.3.0）：
    - `wildcard:true` 在 `setNotFoundHandler` **之前**注册 `GET /*`，会把 `/keys`、
@@ -39,8 +44,13 @@ PM 的交付链探查（2026-10-14）指出缺口 3：管理面没有托管前�
    - 目录不存在时**不 fail-fast**：启动只打 warn（`vite build` 没跑是常态，不拦后端启动），
      托管退化为「注册 0 条静态路由 + 兜底退化为 404」（实测 `wildcard:false` 在 root 缺失
      时安全退化，不炸 ready）—— 这是可诊断的配置错误，不能静默。
-5. **缓存纪律**：`index.html` 不缓存（SPA 入口必须每次校验，否则新版本发不出去）；
-   带指纹的 `/assets/*`（Vite 产物文件名自带内容 hash）长缓存 `maxAge=30d, immutable`。
+5. **缓存纪律（v1.12.1 勘误）**：`index.html` 不缓存（SPA 入口必须每次校验，否则新版本
+   发不出去）；带指纹的静态资源（Vite 产物文件名自带内容 hash）长缓存
+   `maxAge=30d, immutable`。**缓存头的判据是响应 content-type，不是 URL 路径**：
+   首版按 URL 里含 `/assets/` 判缓存，而 404 兜底回的 `index.html` 也落在 `/assets/`
+   路径上 —— 实测（2026-10-14）`GET /assets/<不存在文件>` 与 `GET /assets/` 都回
+   200 HTML 且带 `immutable`，入口壳被长缓存。首版实现已收口：content-type 含 `html`
+   一律 `no-cache`，`immutable` 只挂真正命中的静态资源。
 6. **资产目录遍历**：`@fastify/static` 自带 root 约束（`/../package.json` → 404，实测）；
    资产目录经 `path.resolve` 归一，防拼接路径逃逸。
 7. **`sendFile` 兜底**：注册在路由清单末尾 + notFound 处理器内部。插件关闭或产物缺失时
@@ -48,8 +58,9 @@ PM 的交付链探查（2026-10-14）指出缺口 3：管理面没有托管前�
 
 ## 后果
 
-- 生产形态：`pnpm web:build` → `ADMIN_WEB_DIST=web/dist`（或默认探测到 `web/dist`）→
-  `PORT_ADMIN` 一个入口同时给 API 与控制台。
+- 生产形态：`pnpm web:build` → `.env` 里 `ADMIN_WEB_DIST=web/dist` 显式打开 →
+  `PORT_ADMIN` 一个入口同时给 API 与控制台。首版「或默认探测到 web/dist」半句系笔误，
+  本 ADR 决策 4 明文**不做目录探测**。
 - 测试进程零影响：`makeConfig()` 不配 `adminWebDist` ⇒ 托管关闭 ⇒ 全部既有 spec 行为不变。
 - `restart-dev.ps1` 的活体验证、四闸、红线扫均不受影响（开发态仍走 Vite :5173）。
 - 画师零改动：`API_BASE` 钉死同源相对路径（既有硬约束），生产同源后 Cookie/WS 语义不变。

@@ -452,17 +452,20 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   // `assertAdminPath()` 护栏（永不允许拼 /v1 前缀）在这条链上继续成立。
   app.setNotFoundHandler((req, reply) => {
     const path = req.url.split('?')[0] ?? req.url;
-    if (
-      spaEnabled &&
-      req.method === 'GET' &&
-      !path.startsWith('/api/') &&
-      !path.startsWith('/v1/')
-    ) {
+    if (spaEnabled && req.method === 'GET' && isBrowserPath(path)) {
       void reply.sendFile('index.html');
       return;
     }
     void reply.code(404).send({ code: 'NOT_FOUND', message: `接口不存在: ${req.method} ${req.url}` });
   });
+
+  // 路径判据是**段边界**而不是前缀（v1.12.1 勘误 / ADR-0027 补遗）：裸 `/api`、`/v1`
+  // 归机器面 404，`/apifoo`、`/v1foo` 不可能撞上真实路由。前缀判据会把裸前缀漏进
+  // SPA 支 —— 功能上同口径可解释，但「机器面判据」的措辞必须收紧成段边界。
+  const isBrowserPath = (p: string): boolean => {
+    const boundary = (prefix: string): boolean => p === prefix || p.startsWith(prefix + '/');
+    return !boundary('/api') && !boundary('/v1');
+  };
 
   // 实时通道。三处顺序/取舍值得记下来：
   //   1. `preClose` 由我们提供，覆盖插件的默认实现。默认那版用 **1000** 关掉所有连接，
@@ -523,10 +526,14 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     // （入口恒回 `public, max-age=0`）。`onSend` 在那些之后执行，是唯一能真正落地的地方。
     app.addHook('onSend', async (req, reply, payload) => {
       const p = req.url.split('?')[0] ?? '';
-      if (req.method === 'GET' && !p.startsWith('/api/') && !p.startsWith('/v1/')) {
+      if (req.method === 'GET' && isBrowserPath(p)) {
+        // 判据是 content-type 而不是 URL 里的 '/assets/'（v1.12.1 勘误 / ADR-0027 补遗）：
+        // 404 兜底回的 index.html 也落在 /assets/ 路径上，按 URL 判会把入口壳
+        // 挂上 immutable —— 它必须保持 no-cache，否则新版本发不出去。
+        const ct = String(reply.getHeader('content-type') ?? '');
         reply.header(
           'cache-control',
-          p.includes('/assets/') ? 'public, max-age=2592000, immutable' : 'no-cache',
+          ct.includes('html') ? 'no-cache' : 'public, max-age=2592000, immutable',
         );
       }
       return payload;

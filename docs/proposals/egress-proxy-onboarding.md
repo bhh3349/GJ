@@ -32,7 +32,7 @@ Bo 的两句话各改变一件事：
 
 | 方案 | 网关侧代价 |
 |---|---|
-| **HTTP 代理（`CONNECT` 隧道）** | **+1 运行时依赖，不换栈** —— 按请求注入 `dispatcher` 是 Node 原生 `fetch` 支持的（v22 实测：喂假 dispatcher 能收到请求）；但 `ProxyAgent` **不是 `node:` 内置**（`builtinModules` 里没有 `undici`，本仓 `undici` 也未安装），要装一个运行时依赖。**fetch 栈不动**，与 stream 透传不冲突 |
+| **HTTP 代理（`CONNECT` 隧道）** | **+1 运行时依赖，不换栈** —— 按请求注入 `dispatcher` 是 Node 原生 `fetch` 支持的（v22 实测：喂假 dispatcher 能收到请求）；但 `ProxyAgent` **不是 `node:` 内置**（`builtinModules` 里没有 `undici`；本仓已装该运行时依赖 `undici@^7.30.0`，数据面接线见 `src/wiring/egress-proxy.ts`）。**fetch 栈不动**，与 stream 透传不冲突 |
 | SOCKS5 | undici **不支持**。要么引入 `socks-proxy-agent` 换掉 fetch 栈（与「stream 透传不缓冲」的既有实现冲突），要么本地再套一层 HTTP→SOCKS 桥 |
 
 > 订正（路由者实测）：本节原写「零新依赖」，不成立 —— 见上表。结论不变，只是代价从 0 变成 +1 个依赖。

@@ -388,7 +388,7 @@ export function EgressProxyPanel({ refreshSignal }: EgressProxyPanelProps) {
     },
     {
       title: (
-        <Tooltip title="当前绑定到这条出口的供应商账号数（SupplierAccount.egressId，v1.13.0 / ADR-0029）。判据与退役拦截 409 EGRESS_HAS_ACCOUNTS 同源。绑定 ≠ 流量从这里出去（数据面尚未接出口代理），也 ≠ 出口健康（那只有 §7 帧一条读面，本期不发射）。改绑入口在账号池每行。">
+        <Tooltip title="绑定到这条出口的供应商账号数。绑定只表示这些账号被指派给了它，既不代表流量真的从这里出去，也不代表这条出口是健康的。改绑 / 解绑入口在账号池每一行；仍有账号绑着时，这条出口不能删除。">
           <span>已绑账号</span>
         </Tooltip>
       ),

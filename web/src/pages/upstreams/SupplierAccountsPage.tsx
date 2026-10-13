@@ -85,6 +85,7 @@ import { SupplierPoolFundsCards } from '@/pages/upstreams/SupplierPoolFundsCards
 import { PageHeader } from '@/components/PageHeader';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { EgressPoolCard } from '@/pages/upstreams/EgressPoolCard';
+import { EgressProxyPanel } from '@/pages/upstreams/EgressProxyPanel';
 import { SupplierAccountDetailDrawer } from '@/pages/upstreams/SupplierAccountDetailDrawer';
 import { SupplierBatchDrawer } from '@/pages/upstreams/SupplierBatchDrawer';
 import { SupplierCreateKeysModal, SupplierImportModal } from '@/pages/upstreams/SupplierModals';
@@ -990,7 +991,12 @@ export default function SupplierAccountsPage() {
             {
               key: 'egress',
               label: '出口池',
-              children: <EgressPoolCard />,
+              children: (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.md }}>
+                  <EgressProxyPanel />
+                  <EgressPoolCard />
+                </div>
+              ),
             },
           ]}
         />

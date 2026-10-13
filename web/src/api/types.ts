@@ -1423,3 +1423,87 @@ export const SUPPLIER_STATUS_TEXT: Record<SupplierAccountStatus, string> = {
   session_expired: '会话过期',
   unknown: '未查询过',
 };
+
+// ── §16.7.2 出口池（Tier 2 出口代理，v1.7.1） ────────────────────────────────
+//
+// 这是「Upstream 之外的第 10 类资源对象」，与供应商账号面**完全独立**：账号面回答
+// 「这些号能不能登录」；出口面回答「流量从哪个 IP 出去」。两者唯一的交集是
+// `supplier_accounts.egress_id` 那一列（**不进任何 DTO**，只在这两处出现：
+// POST/PATCH /api/supplier-accounts 的请求体 `egressId`）。
+//
+// 三条与账号面同源、但**必须分开写**的纪律：
+// 1. 明文凭据**只进不回**：`username` / `password` 只在 POST/PATCH 请求体里出现一次，
+//    响应只回 `authSet`（推导值）。所以没有「查看已设凭据」这种入口。
+// 2. `lastTestOk` 是**三态**：`null` = 未测。**未知 ≠ 失败**（同 §0.2 纪律）。
+// 3. 退役**不删行**：`retiredAt` / `retiredReason` 回池后**不清**（历史可读性）。
+
+/** §16.7.2 单轴生命周期。只滤 `active`，不存在「启用且已退役」组合态。 */
+export type EgressLifecycle = 'active' | 'retired';
+
+/** 退役原因。**必带** —— 没有原因的退役半年后没人判断得了它能不能删。 */
+export type EgressRetiredReason = 'replaced' | 'manual';
+
+/**
+ * §16.7.2 `EgressProxy`（全字段）。`secret`（aes-256-gcm BLOB）**不出任何响应体**，
+ * 只在 `authSet` 里以布尔推导值露头。
+ */
+export interface EgressProxy {
+  /** `eg_` 前缀，不透明键。**退役不删行** ⇒ 它比 IP 活得久。前端不得解析其内容。 */
+  id: string;
+  /** 唯一。同名冲突 → `409 CONFLICT`（`details.field = 'name'`）。 */
+  name: string;
+  /** 只放 `scheme://host:port`，**归一化后唯一**；不含 `user:pass@`、查询串、锚点。 */
+  url: string;
+  region: string | null;
+  note: string | null;
+  status: EgressLifecycle;
+  retiredReason: EgressRetiredReason | null;
+  retiredAt: Iso8601 | null;
+  /** **推导值**：凭据是否已设。明文永不出后端。 */
+  authSet: boolean;
+  /** 最近一次 `/test` 时刻；`null` = 未测。 */
+  lastTestAt: Iso8601 | null;
+  /** **三态**：`null` = 未测（未知 ≠ 失败）。 */
+  lastTestOk: boolean | null;
+  createdAt: Iso8601;
+  updatedAt: Iso8601;
+}
+
+export interface EgressProxyListQuery {
+  status?: EgressLifecycle;
+}
+
+/** §16.7.2 `POST /api/egress`。凭据**只在这一次请求里出现**，落盘即加密、不回显、不落日志。 */
+export interface EgressProxyCreateRequest {
+  name: string;
+  url: string;
+  username?: string;
+  password?: string;
+  region?: string | null;
+  note?: string | null;
+}
+
+/**
+ * §16.7.2 `PATCH /api/egress/:id`（任意子集，空 body → 200 行未变）。
+ *
+ * 凭据是**整体换**、不是子集更新（密码无法子集更新）：`username` + `password`
+ * **都非空**才落 `secret`；**都为空** = 清除凭据（`authSet` 从 `true` 回到 `false`）；
+ * 一空一非空 = **不落**（避免落一个登不上去的半份凭据）。
+ */
+export interface EgressProxyPatchRequest {
+  name?: string;
+  region?: string | null;
+  note?: string | null;
+  username?: string;
+  password?: string;
+}
+
+/** §16.7.2 `POST /api/egress/:id/test`。`egressIp` 只在 `ok` 时非 null。 */
+export interface EgressProxyTestResult {
+  ok: boolean;
+  /** 回显端点（`api.ipify.org`）观测到的出口 IP；失败为 `null`。 */
+  egressIp: string | null;
+  latencyMs: number;
+  /** HTTP 状态或错误 message，**不含凭据**。 */
+  error: string | null;
+}

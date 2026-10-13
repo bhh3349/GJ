@@ -13,6 +13,12 @@ import type {
   BalanceTemplateTestRequest,
   BalanceTestResult,
   CallLog,
+  EgressProxy,
+  EgressProxyCreateRequest,
+  EgressProxyListQuery,
+  EgressProxyPatchRequest,
+  EgressProxyTestResult,
+  EgressRetiredReason,
   Group,
   GroupCreateRequest,
   GroupCreateResponse,
@@ -273,6 +279,36 @@ export const supplierAccountsApi = {
    */
   exportCsv: (query: { upstreamId?: string } = {}) =>
     downloadFile('/supplier-accounts/export', { query: q(query) }),
+};
+
+// ── §16.7.2 出口池（Tier 2 出口代理） ──────────────────────────────────────
+//
+// 十类资源对象里的第十类，与 §15 账号面**独立**。写方法的 CSRF 头由 http.ts 统一带；
+// 明文凭据只走 create / patch 的请求体，响应只回 `authSet` —— 所以这里**没有**读凭据的端点。
+//
+// `/test` 是唯一一个**真的打外网**的端点（出站 `api.ipify.org`）且吃出口预算：
+// 预算耗尽 → `429 TOO_MANY_ATTEMPTS`（`details.retryAfterSec`）。调用方据此给"稍后再试"。
+
+export const egressApi = {
+  /** 默认全量（按 `name` 排）；`status` 可选过滤。 */
+  list: (query: EgressProxyListQuery = {}) =>
+    api.get<{ items: EgressProxy[] }>('/egress', { query: q(query) }),
+  get: (id: string) => api.get<EgressProxy>(`/egress/${id}`),
+  /** 明文凭据仅在本次请求里进入系统，落盘即加密；响应不回显、日志不出现。 */
+  create: (body: EgressProxyCreateRequest) => api.post<EgressProxy>('/egress', body),
+  /** 任意子集；凭据是**整体换**（见 `EgressProxyPatchRequest`）。 */
+  update: (id: string, body: EgressProxyPatchRequest) =>
+    api.patch<EgressProxy>(`/egress/${id}`, body),
+  /**
+   * 退役（`replaced` | `manual`，**必填**）。仍被账号引用 → `409 EGRESS_HAS_ACCOUNTS`
+   * （`details.accountCount`，**没有 `force`** —— 迁移必须先把账号改到别的 active 出口）。
+   */
+  retire: (id: string, reason: EgressRetiredReason) =>
+    api.post<{ ok: boolean; status: 'retired' }>(`/egress/${id}/retire`, { reason }),
+  /** 回池。**复用原 id**（同 URL 只有一条路回到 active，不新建行 —— §16.7 裁定 3）。 */
+  reactivate: (id: string) => api.post<EgressProxy>(`/egress/${id}/reactivate`),
+  /** 探活：真的从该出口打一次外网，回观测 IP。吃出口预算，可能 `429 TOO_MANY_ATTEMPTS`。 */
+  test: (id: string) => api.post<EgressProxyTestResult>(`/egress/${id}/test`),
 };
 
 export const logsApi = {

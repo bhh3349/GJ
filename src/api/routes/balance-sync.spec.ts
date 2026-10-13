@@ -97,6 +97,9 @@ function makeConfig(dbPath: string, over: Partial<AppConfig> = {}): AppConfig {
     // 默认关：本文件不测调度器节奏，只测路由。要测 `auto.enabled=true` 的用例自己覆盖。
     balanceSyncMinutes: 0,
     balanceSnapshotRetentionDays: 90,
+    // 能力探测（契约 §5 / ADR-0024）测试取值：与装配默认逐字一致（本套用例不触发补探）
+    modelProbeEnabled: true,
+    modelProbeMaxModels: 10,
     ...over,
   };
 }

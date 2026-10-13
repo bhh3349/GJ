@@ -9,13 +9,22 @@
 
 import type { FastifyInstance } from 'fastify';
 import type { ModelCapability, ModelType } from '../dto.js';
-import { getModel, listModels, updateModel } from '../../db/repo/models.js';
+import { getModel, getModelRow, listModels, updateModel } from '../../db/repo/models.js';
+import { appendAudit } from '../../db/repo/audit.js';
+import { getUpstreamRow } from '../../db/repo/upstreams.js';
+import type { Db } from '../../db/database.js';
 import { ApiError } from '../errors.js';
-import { auditWrite } from '../http.js';
+import { auditWrite, captureAuditActor } from '../http.js';
 import { idParam, nullableInteger, pageProps, revisionProp } from '../schemas.js';
 import { resolveSyncTargets, syncModels } from '../services/model-sync.js';
+import { isProbeCapability, probeModel, ALL_PROBE_CAPABILITIES } from '../services/model-probe.js';
 import { startTask } from '../task-runner.js';
 import type { ApiContext } from '../app.js';
+
+interface SyncBody {
+  upstreamId?: string;
+  probe?: boolean;
+}
 
 interface ListQuery {
   upstreamId?: string;
@@ -32,6 +41,11 @@ interface PriceBody {
   outputPer1k: number | null;
 }
 
+interface ProbeBody {
+  targets?: string[];
+  apply?: boolean;
+}
+
 interface UpdateBody {
   enabled?: boolean;
   type?: ModelType;
@@ -42,12 +56,19 @@ interface UpdateBody {
   revision: number;
 }
 
-interface SyncBody {
-  upstreamId?: string;
-}
 
 const MODEL_TYPES = ['chat', 'embedding', 'image', 'audio', 'rerank'] as const;
 const MODEL_CAPABILITIES = ['stream', 'function_call', 'vision', 'json_mode'] as const;
+
+/**
+ * 上游 baseUrl：探测服务**不 import upstreams repo**（服务面保持窄），由路由层喂进去。
+ * 找不到上游时返回空串 —— 探测请求会在 `chatCompletionsEndpoint` 处判 `isHttpUrl` 失败，
+ * 表现为每项 `reason:"network"`，而不是抛一个把整个 200 响应变成 500 的异常。
+ */
+function upstreamBaseUrl(db: Db, upstreamId: string): string {
+  const row = getUpstreamRow(db, upstreamId);
+  return row?.base_url ?? '';
+}
 
 export function registerModelRoutes(app: FastifyInstance, ctx: ApiContext): void {
   const { db, config } = ctx;
@@ -154,7 +175,11 @@ export function registerModelRoutes(app: FastifyInstance, ctx: ApiContext): void
       schema: {
         body: {
           type: 'object',
-          properties: { upstreamId: { type: 'string', minLength: 1, maxLength: 64 } },
+          properties: {
+            upstreamId: { type: 'string', minLength: 1, maxLength: 64 },
+            // 单次关闸（§5 v1.11.0 ⑤）：`{"probe": false}` 关掉本次尾部补探。缺省 = 装配侧开关。
+            probe: { type: 'boolean' },
+          },
         },
       },
     },
@@ -163,10 +188,35 @@ export function registerModelRoutes(app: FastifyInstance, ctx: ApiContext): void
       // 先解析目标：指定的上游不存在时要当场 404，而不是建个任务让前端轮询到失败。
       const targets = resolveSyncTargets(db, upstreamId);
 
-      const task = startTask(db, 'model_sync', targets.length, (reporter) =>
-        // 出站 fetch 走**管理面那把**（`ctx.supplier.fetchImpl`）。原先这里不传、靠
-        // `syncModels` 的 `= fetch` 兜底 —— 于是注入的假 fetch / 闸包装在这条路上失守。
-        syncModels(db, config.masterKey, upstreamId, reporter, ctx.supplier.fetchImpl),
+      // 补探总闸：请求体 `{probe:false}` 单次关；`MODEL_PROBE_ENABLED=false` 全局关（装配侧）。
+      const probeEnabled = config.modelProbeEnabled && (req.body ?? {}).probe !== false;
+
+      // 补探审计要在任务收尾时写（那时 req 已过它的一生）—— 先在这一刻取 actor/ip（§15.2 先例）
+      const who = captureAuditActor(req, config);
+      const task = startTask(
+        db,
+        'model_sync',
+        targets.length,
+        (reporter) =>
+          // 出站 fetch 走**管理面那把**（`ctx.supplier.fetchImpl`）。原先这里不传、靠
+          // `syncModels` 的 `= fetch` 兜底 —— 于是注入的假 fetch / 闸包装在这条路上失守。
+          syncModels(db, config.masterKey, upstreamId, reporter, ctx.supplier.fetchImpl, undefined, {
+            enabled: probeEnabled,
+            limit: config.modelProbeMaxModels,
+          }),
+        (result, failed) => {
+          // §5 ⑤：审计 `model.probe` 与计数同源 —— detail **只放计数**（不放逐项结论/文案）
+          const probe = (result as { probe?: Record<string, number> } | null)?.probe;
+          if (probe === undefined) return;
+          appendAudit(db, {
+            ...who,
+            action: 'model.probe',
+            targetType: 'upstream',
+            targetId: upstreamId ?? null,
+            result: failed ? 'fail' : 'ok',
+            detail: `task=${task.id} candidates=${probe['candidates']} probed=${probe['probed']} applied=${probe['applied']} skipped=${probe['skipped']} failed=${probe['failed']} requests=${probe['requests']}`,
+          });
+        },
       );
       auditWrite(db, req, config, {
         action: 'model.sync',
@@ -175,6 +225,65 @@ export function registerModelRoutes(app: FastifyInstance, ctx: ApiContext): void
         detail: `task=${task.id} upstreams=${targets.length}`,
       });
       return reply.code(202).send({ taskId: task.id });
+    },
+  );
+
+  // 能力探测（契约 §5 v1.11.0 / ADR-0024）。**同步返回** `200 ModelProbeResult`（ADR-0024 决策 1 原文：
+  // 不 202、不打任务）；出站走装配层注入的 fetchImpl（第九类出站，ADR-0021）。
+  app.post<{ Params: { id: string }; Body: ProbeBody }>(
+    '/api/models/:id/probe',
+    {
+      schema: {
+        params: idParam,
+        body: {
+          type: 'object',
+          properties: {
+            targets: {
+              type: 'array',
+              items: { type: 'string', enum: [...ALL_PROBE_CAPABILITIES] },
+              maxItems: 4,
+              uniqueItems: true,
+            },
+            apply: { type: 'boolean' },
+          },
+        },
+      },
+    },
+    async (req) => {
+      const row = getModelRow(db, req.params.id);
+      if (row === null) throw ApiError.notFound('模型', req.params.id);
+
+      // targets 白名单：只收四枚能力名，其余 400（details.field 指名道姓，§0 通用约定）。
+      // schema 的 enum 已挡住非法值，这里再拦一道是为了 details.field 精确指向 targets。
+      const rawTargets = req.body?.targets;
+      if (rawTargets !== undefined) {
+        for (const t of rawTargets) {
+          if (!isProbeCapability(t)) {
+            throw ApiError.invalidParam('targets', `未知能力名：${String(t)}`);
+          }
+        }
+      }
+      const targets: readonly ModelCapability[] =
+        rawTargets === undefined
+          ? [...ALL_PROBE_CAPABILITIES]
+          : rawTargets.filter((t): t is ModelCapability => isProbeCapability(t));
+
+      const result = await probeModel(
+        db,
+        config.masterKey,
+        { id: row.upstream_id, baseUrl: upstreamBaseUrl(db, row.upstream_id) },
+        { id: row.id, name: row.name },
+        { targets, apply: req.body?.apply === true, fetchImpl: ctx.supplier.fetchImpl },
+      );
+
+      // 审计（§5 ⑧）：detail 只放计数（同 supplier.* 那批的纪律），不放逐项结论
+      auditWrite(db, req, config, {
+        action: 'model.probe',
+        targetType: 'model',
+        targetId: row.id,
+        detail: `requests=${result.requests} applied=${result.applied.length} items=${result.items.length} apply=${req.body?.apply === true}`,
+      });
+      return result;
     },
   );
 }

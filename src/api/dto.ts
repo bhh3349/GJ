@@ -222,6 +222,9 @@ export interface GatewayKeyIssuedDto {
 export type ModelType = 'chat' | 'embedding' | 'image' | 'audio' | 'rerank';
 export type ModelCapability = 'stream' | 'function_call' | 'vision' | 'json_mode';
 
+/** 契约 §5 `capabilitiesSource`（v1.11.0 / ADR-0024）：能力那格的**写入来源**。 */
+export type ModelCapabilitiesSource = 'manual' | 'probe';
+
 export interface ModelDto {
   id: string;
   name: string;
@@ -229,6 +232,13 @@ export interface ModelDto {
   upstreamId: string;
   type: ModelType;
   capabilities: ModelCapability[];
+  /**
+   * v1.11.0 只读（`PATCH` 不收该字段）。与 `capabilities` 一起解读三态：
+   * 非空 = 有该能力 / `[]` + `probe` = 问过、不支持 / `[]` + `null` = 还没问过。
+   */
+  capabilitiesSource: ModelCapabilitiesSource | null;
+  /** v1.11.0 只读：最近一次能力探测的时刻（探测每次都刷，与是否覆盖 capabilities 无关）；null = 从没探测过 */
+  lastProbedAt: string | null;
   contextLength: number | null;
   /** 两端都缺失时整体为 null；前端显示 — */
   price: { inputPer1k: number | null; outputPer1k: number | null } | null;

@@ -78,6 +78,17 @@ export interface AppConfig {
    * 也不 import `src/db`（AGENTS.md §8）—— 它收的是**已解析的目录字符串或 null**。
    */
   egressHeartbeatInboxDir: string | null;
+  /**
+   * 能力探测（契约 §5 / ADR-0024）自动补探总开关。默认开（Bo 拍板"默认开"）；
+   * `MODEL_PROBE_ENABLED=false` 装配侧全局关。请求体 `{probe:false}` 是单次调用的第二道闸。
+   */
+  modelProbeEnabled: boolean;
+  /**
+   * 同步尾部自动补探的**单轮模型数上限**（占位 10，装配侧 env 默认，数值不进契约 ——
+   * 契约 §5 v1.11.2 只登记来源与默认值语义，不锁数值）。
+   * 超出的模型留在 `capabilities_source IS NULL`，下一轮再补。
+   */
+  modelProbeMaxModels: number;
 }
 
 /**
@@ -243,5 +254,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     // "这一行先留着"写法，把它当成一个叫空字符串的模型名会让助手静默走 503。
     assistantModel: (env['ASSISTANT_MODEL'] ?? '').trim() === '' ? null : (env['ASSISTANT_MODEL'] ?? '').trim(),
     egressHeartbeatInboxDir: (env['EGRESS_HEARTBEAT_INBOX_DIR'] ?? '').trim() === '' ? null : (env['EGRESS_HEARTBEAT_INBOX_DIR'] ?? '').trim(),
+    modelProbeEnabled: boolFromEnv(env, 'MODEL_PROBE_ENABLED', true),
+    modelProbeMaxModels: positiveIntFromEnv(env, 'MODEL_PROBE_MAX_MODELS', 10),
   };
 }

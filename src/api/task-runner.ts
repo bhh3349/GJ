@@ -24,6 +24,12 @@ export function startTask<T>(
   type: string,
   total: number,
   work: (reporter: TaskReporter) => Promise<T>,
+  /**
+   * 任务终态回调（可选）：审计要在"干完的那一刻"写，而那时 `req` 早过了它的一生 ——
+   * 调用方先 `captureAuditActor` 拿下 actor/ip，在这里回带结果（§15.2 批量端点先例）。
+   * 只在 startTask 自己写完终态之后调用；回调抛错**不影响**任务终态（终态已落库）。
+   */
+  onFinish?: (result: T | null, failed: boolean) => void,
 ): TaskDto {
   const task = createTask(db, type, total);
 
@@ -53,10 +59,12 @@ export function startTask<T>(
     void work(reporter)
       .then((result) => {
         finishTask(db, task.id, 'succeeded', { result: result ?? null });
+        onFinish?.(result ?? null, false);
       })
       .catch((err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
         finishTask(db, task.id, 'failed', { message });
+        onFinish?.(null, true);
       });
   });
 

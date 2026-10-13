@@ -398,3 +398,89 @@ describe('v1.7.1 加列（egress_proxies last_test_at / last_test_ok）', () => 
     expect(columnsOf(db, 'egress_proxies').filter((c) => c === 'last_test_ok')).toHaveLength(1);
   });
 });
+
+/* ---------------- v1.11.0 能力探测两列（契约 §5，ADR-0024）---------------- */
+
+/** v1.11.0 之前形态的 models 表：没有 capabilities_source / last_probed_at，且已有一行档案。 */
+function seedPreV111ModelsDatabase(path: string): void {
+  const legacy = new Database(path);
+  legacy.exec(`
+    CREATE TABLE upstreams (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE, base_url TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1, balance_query TEXT NOT NULL DEFAULT '{}',
+      revision INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE models (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, display_name TEXT,
+      upstream_id TEXT NOT NULL REFERENCES upstreams(id),
+      type TEXT NOT NULL CHECK (type IN ('chat','embedding','image','audio','rerank')),
+      capabilities TEXT NOT NULL DEFAULT '[]',
+      context_length INTEGER, price_input_per_1k INTEGER, price_output_per_1k INTEGER,
+      enabled INTEGER NOT NULL DEFAULT 1, last_synced_at TEXT,
+      revision INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+      UNIQUE (upstream_id, name)
+    );
+  `);
+  const at = '2026-10-10T00:00:00.000Z';
+  legacy
+    .prepare('INSERT INTO upstreams (id, name, base_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?)')
+    .run('up_old_111', '老上游', 'https://legacy.example', at, at);
+  // 一行 capabilities 非空的档案：加列绝不能动它（"没问过"由新列的 NULL 表达，不是把能力清空）
+  legacy
+    .prepare(
+      `INSERT INTO models (id, name, upstream_id, type, capabilities, created_at, updated_at)
+       VALUES (?, ?, ?, 'chat', ?, ?, ?)`,
+    )
+    .run('mdl_old_111', '老模型', 'up_old_111', '["stream"]', at, at);
+  legacy.close();
+}
+
+describe('v1.11.0 加列（models capabilities_source / last_probed_at）', () => {
+  it('新库直接带两列，SCHEMA_VERSION 不递增', () => {
+    const db = open(tempDbPath());
+    expect(columnsOf(db, 'models')).toEqual(
+      expect.arrayContaining(['capabilities_source', 'last_probed_at']),
+    );
+    // 纯加列 ⇒ 版本号不动（迁移判据是"列在不在"，不是版本号 —— 与 v1.1.1 / v1.4.x / v1.7.1 同一条）
+    expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+  });
+
+  it('老库必须真发 ALTER，老行两列都是 NULL（= 从没问过），既有 capabilities 分文不动', () => {
+    const path = tempDbPath();
+    seedPreV111ModelsDatabase(path);
+
+    // 前置断言：种子库确实没有这两列。少了它，"migrate 什么都没做"也可能看起来通过。
+    const legacy = new Database(path);
+    expect(columnsOf(legacy, 'models')).not.toContain('capabilities_source');
+    expect(columnsOf(legacy, 'models')).not.toContain('last_probed_at');
+    legacy.close();
+
+    const db = open(path);
+    expect(columnsOf(db, 'models')).toEqual(
+      expect.arrayContaining(['capabilities_source', 'last_probed_at']),
+    );
+    const row = db
+      .prepare('SELECT capabilities, capabilities_source, last_probed_at FROM models WHERE id = ?')
+      .get('mdl_old_111') as {
+      capabilities: string;
+      capabilities_source: string | null;
+      last_probed_at: string | null;
+    };
+    // 两列都必须是 NULL 而不是 '' / 0：三态里「还没问过」这一态就靠 NULL 表达
+    expect(row.capabilities_source).toBeNull();
+    expect(row.last_probed_at).toBeNull();
+    expect(row.capabilities).toBe('["stream"]'); // 加列不动既有能力那格
+  });
+
+  it('加列幂等：重复 migrate 不抛 duplicate column name', () => {
+    const path = tempDbPath();
+    seedPreV111ModelsDatabase(path);
+    const db = open(path);
+    expect(() => {
+      migrate(db);
+      migrate(db);
+    }).not.toThrow();
+    expect(columnsOf(db, 'models').filter((c) => c === 'capabilities_source')).toHaveLength(1);
+    expect(columnsOf(db, 'models').filter((c) => c === 'last_probed_at')).toHaveLength(1);
+  });
+});

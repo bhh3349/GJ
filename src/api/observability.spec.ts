@@ -78,6 +78,9 @@ function makeConfig(dbPath: string, over: Partial<AppConfig> = {}): AppConfig {
     // 契约 §14 新增两项：测试里关掉自动同步，不引后台定时器
     balanceSyncMinutes: 0,
     balanceSnapshotRetentionDays: 90,
+    // 能力探测（契约 §5 / ADR-0024）测试取值：与装配默认逐字一致（本套用例不触发补探）
+    modelProbeEnabled: true,
+    modelProbeMaxModels: 10,
     ...over,
   };
 }

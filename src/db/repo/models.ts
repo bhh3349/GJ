@@ -7,7 +7,13 @@
 // 所以可用性判据在这里只写一份，M3 的 snapshot 构造必须复用同一个函数。
 
 import { ApiError } from '../../api/errors.js';
-import type { ModelCapability, ModelDto, ModelType, Page } from '../../api/dto.js';
+import type {
+  ModelCapabilitiesSource,
+  ModelCapability,
+  ModelDto,
+  ModelType,
+  Page,
+} from '../../api/dto.js';
 import { nowIso } from '../../util/time.js';
 import type { Db } from '../database.js';
 import { newId } from '../ids.js';
@@ -21,6 +27,9 @@ interface ModelRow {
   upstream_id: string;
   type: ModelType;
   capabilities: string;
+  /** 契约 §5 v1.11.0：能力来源。库内取值 'manual' | 'probe' | NULL */
+  capabilities_source: string | null;
+  last_probed_at: string | null;
   context_length: number | null;
   price_input_per_1k: number | null;
   price_output_per_1k: number | null;
@@ -74,6 +83,11 @@ export function availableKeysByUpstream(db: Db, nowIsoStr = new Date().toISOStri
   return map;
 }
 
+/** 库里那一列是三值（'manual' | 'probe' | NULL）；DTO 只认前两个值，其余一律按"没问过"。 */
+function parseCapabilitiesSource(raw: string | null): ModelCapabilitiesSource | null {
+  return raw === 'manual' || raw === 'probe' ? raw : null;
+}
+
 function toDto(row: ModelRow, availability: Map<string, string[]>): ModelDto {
   const price =
     row.price_input_per_1k === null && row.price_output_per_1k === null
@@ -86,6 +100,8 @@ function toDto(row: ModelRow, availability: Map<string, string[]>): ModelDto {
     upstreamId: row.upstream_id,
     type: row.type,
     capabilities: parseCapabilities(row.capabilities),
+    capabilitiesSource: parseCapabilitiesSource(row.capabilities_source),
+    lastProbedAt: row.last_probed_at,
     contextLength: row.context_length,
     price,
     availableKeyIds: availability.get(row.upstream_id) ?? [],
@@ -186,6 +202,9 @@ export function updateModel(db: Db, id: string, patch: UpdateModelInput): ModelD
   if (patch.capabilities !== undefined) {
     sets.push('capabilities = ?');
     params.push(JSON.stringify(patch.capabilities));
+    // 契约 §5 来源规则第 1 条：PATCH **传了** capabilities ⇒ manual；没传就不动这一列
+    // （本来是 null 的仍为 null —— "没问过"与"人写过"是两件事）。
+    sets.push("capabilities_source = 'manual'");
   }
   if (patch.contextLength !== undefined) {
     sets.push('context_length = ?');
@@ -368,6 +387,85 @@ export function listEnabledGatewayModels(db: Db): EnabledGatewayModel[] {
     .all() as (Omit<EnabledGatewayModel, 'capabilities'> & { capabilitiesRaw: string })[];
   // capabilities 列是 JSON 文本，解析复用本文件唯一那份 parseCapabilities（§16.3 禁同语义两处实现）
   return rows.map(({ capabilitiesRaw, ...rest }) => ({ ...rest, capabilities: parseCapabilities(capabilitiesRaw) }));
+}
+
+/**
+ * 同步尾部补探的候选（契约 §5 v1.11.0 / ADR-0024 决策 5）。
+ *
+ * 候选 = **本次同步涉及**的模型（调用方显式给出 id 集合）里 `capabilities_source IS NULL`
+ * 的那些 —— 已经问过（probe）或人手写过（manual）的一律不进候选，不重复烧真请求。
+ *
+ * "本次涉及"为什么由调用方传 id、而不是拿 `last_synced_at` 当连接键：
+ * `upsertModelFromSync` 每行各取一次 `nowIso()`，同毫秒与跨毫秒的行会混在同一批里，
+ * 用时间戳等值去捞"本轮的模型"会漏捞或多捞 —— 而这两种都静默。调用方手里本来就有 id。
+ */
+export function listProbeCandidates(
+  db: Db,
+  modelIds: readonly string[],
+  limit: number,
+): { id: string; name: string }[] {
+  if (limit < 1 || modelIds.length === 0) return [];
+  const placeholders = modelIds.map(() => '?').join(', ');
+  return db
+    .prepare(
+      `SELECT id, name FROM models
+       WHERE id IN (${placeholders}) AND capabilities_source IS NULL
+       ORDER BY name, id
+       LIMIT ?`,
+    )
+    .all(...modelIds, limit) as { id: string; name: string }[];
+}
+
+/**
+ * 探测落库（契约 §5 来源规则第 2/3/4 条）：**一条 `UPDATE` 原子完成**。
+ *
+ * 为什么要写成 `CASE` 守卫而不是 `WHERE ... <> 'manual'`：规则 3 要求
+ * **`manual` 永不被覆盖**，规则 4 又要求 **`last_probed_at` 每次都刷**（无论有没有覆盖）。
+ * 用 WHERE 挡 `manual` 会让那一行的探测时刻也一起不刷 —— 两个条件在同一条语句里做不到；
+ * 拆成两条语句则在同表同列上开出一个竞态窗口。所以把判据放进 SET 的 `CASE`：
+ * 两个规则一条语句同时满足，**不需要 `revision` 参数、不与并发 `PATCH` 竞态**。
+ *
+ * `capabilities` / `capabilities_source` 只在「没问过」或「上次也是机器写的」时被覆盖；
+ * `capsJson` 只含判为 `true` 的项（`false` / `null` 从不写库）。
+ *
+ * 返回 `true` = 这一行**可写**（source 不是 manual）；`false` = 被 manual 挡下或行不存在。
+ */
+export function applyProbeCapabilities(
+  db: Db,
+  id: string,
+  input: { capsJson: string; probedAt: string },
+): boolean {
+  const before = getModelRow(db, id);
+  if (before === null) return false;
+
+  // SQL UPDATE 的所有 SET 表达式都按**更新前**的行值求值，所以这三处 `capabilities_source`
+  // 读的都是旧值 —— manual 那一行会被原样保留，同时 last_probed_at 照刷（规则 2 + 规则 4 同句满足）。
+  db.prepare(
+    `UPDATE models
+     SET capabilities = CASE
+           WHEN capabilities_source IS NULL OR capabilities_source <> 'manual' THEN ?
+           ELSE capabilities
+         END,
+         capabilities_source = CASE
+           WHEN capabilities_source IS NULL OR capabilities_source <> 'manual' THEN 'probe'
+           ELSE capabilities_source
+         END,
+         last_probed_at = ?,
+         updated_at = CASE
+           WHEN capabilities_source IS NULL OR capabilities_source <> 'manual' THEN ?
+           ELSE updated_at
+         END
+     WHERE id = ?`,
+  ).run(input.capsJson, input.probedAt, input.probedAt, id);
+
+  // 只有 capabilities 那格真的变了才写 change_log：只刷了探测时刻却推一次网关刷新是假信号
+  // （网关快照读的是 capabilities，不读 last_probed_at）。manual 行被 CASE 原样保留 ⇒
+  // 现值 == 旧值，这里天然不写。
+  const after = getModelRow(db, id);
+  if (after !== null && after.capabilities !== before.capabilities) {
+    appendChange(db, 'model', id, 'update', before.revision);
+  }
+  return before.capabilities_source !== 'manual';
 }
 
 /** 供 /v1/models 与「已启用集合」对齐用（验收 4）。 */

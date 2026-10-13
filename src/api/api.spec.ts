@@ -96,6 +96,9 @@ function makeConfig(dbPath: string): AppConfig {
     // 余额自动同步在测试配置里默认关：本套用例不为它开后台定时器（它有自己的 spec）
     balanceSyncMinutes: 0,
     balanceSnapshotRetentionDays: 90,
+    // 能力探测（契约 §5 / ADR-0024）测试取值：与装配默认逐字一致（本套用例不触发补探）
+    modelProbeEnabled: true,
+    modelProbeMaxModels: 10,
   };
 }
 

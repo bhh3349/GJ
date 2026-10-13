@@ -24,6 +24,7 @@ import {
   UpstreamCredentialError,
   type CredentialAttempt,
 } from './credential-rotation.js';
+import { probeCandidatesAfterSync, type ModelSyncProbeCounters } from './model-probe.js';
 
 const FETCH_TIMEOUT_MS = 15_000;
 
@@ -42,6 +43,12 @@ export interface SyncSummary {
    * 不含明文（`DecryptedKeyRef` 不带 `toJSON`，明文出不了序列化）。
    */
   credentials?: CredentialAttempt;
+  /**
+   * 尾部自动补探的六计数（契约 §5 v1.11.0 ⑤ / ADR-0024）：候选/探了/写入/跳过/失败/请求数。
+   * `MODEL_PROBE_ENABLED=false` 或请求体 `{probe:false}` 时不带该字段 —— "没跑探测"与
+   * "跑了但全 0"是两种状态，前端面板要区分着渲染。
+   */
+  probe?: ModelSyncProbeCounters;
 }
 
 interface TargetUpstream {
@@ -167,6 +174,8 @@ export async function syncModels(
   fetchImpl: typeof fetch,
   /** 凭据换把预算（ADR-0026）。默认装配常量 `CREDENTIAL_ATTEMPT_BUDGET`，测试可注入更小值。 */
   rotationBudget: number = CREDENTIAL_ATTEMPT_BUDGET,
+  /** 尾部自动补探（§5 v1.11.0 ⑤）。省略 = 不补探（`MODEL_PROBE_ENABLED=false` 的装配侧形态）。 */
+  probeOptions?: { enabled: boolean; limit: number; budget?: number },
 ): Promise<SyncSummary> {
   const targets = resolveSyncTargets(db, upstreamId);
   reporter.setTotal(targets.length);
@@ -185,6 +194,7 @@ export async function syncModels(
   const usedMaskedKeys: string[] = [];
   let credTried = 0;
   let credSwitched = 0;
+
 
   for (const upstream of targets) {
     try {
@@ -210,6 +220,9 @@ export async function syncModels(
       credSwitched += rotation.attempts.switched;
       usedMaskedKeys.push(...rotation.attempts.usedMaskedKeys);
 
+      // "本次同步涉及"的模型 id：**按上游分堆**。跨上游共用一份列表，会把 B 的模型
+      // 用 A 的 baseUrl 去探（探测打到错的上游，结论还是"看起来像样"的）。
+      const syncedModelIds: string[] = [];
       for (const name of rotation.result) {
         const type = inferModelType(name);
         const model: SyncedModel = {
@@ -223,6 +236,7 @@ export async function syncModels(
           price: null,
         };
         const result = upsertModelFromSync(db, model);
+        syncedModelIds.push(result.id); // "本次同步涉及"的显式记录：补探候选与时间戳等值无关（见 listProbeCandidates）
         if (result.action === 'inserted') {
           summary.inserted += 1;
           // 只有**建档**时 type 才来自推断：已存在的行以库中现值为准（ADR-0009 §3），
@@ -230,6 +244,27 @@ export async function syncModels(
           summary.inferredTypeCount += 1;
         } else if (result.action === 'updated') summary.updated += 1;
         else summary.unchanged += 1;
+      }
+
+      // 尾部自动补探（§5 v1.11.0 ⑤ / ADR-0024）：只补探**本次拉列表成功**的上游。
+      // 探测失败不改任务成败（异常吞进 counters.failed）。
+      if (probeOptions?.enabled === true && syncedModelIds.length > 0) {
+        const counters = await probeCandidatesAfterSync(
+          db,
+          masterKey,
+          { id: upstream.id, baseUrl: upstream.baseUrl },
+          syncedModelIds,
+          { limit: probeOptions.limit, budget: probeOptions.budget, fetchImpl },
+        );
+        const prev = summary.probe ?? { candidates: 0, probed: 0, applied: 0, skipped: 0, failed: 0, requests: 0 };
+        summary.probe = {
+          candidates: prev.candidates + counters.candidates,
+          probed: prev.probed + counters.probed,
+          applied: prev.applied + counters.applied,
+          skipped: prev.skipped + counters.skipped,
+          failed: prev.failed + counters.failed,
+          requests: prev.requests + counters.requests,
+        };
       }
     } catch (err) {
       summary.failedUpstreams += 1;
@@ -245,6 +280,7 @@ export async function syncModels(
   if (credSwitched > 0) {
     summary.credentials = { tried: credTried, usedMaskedKeys, switched: credSwitched };
   }
+
 
   if (summary.upstreams > 0 && summary.failedUpstreams === summary.upstreams) {
     throw new Error(

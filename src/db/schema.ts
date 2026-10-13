@@ -122,6 +122,9 @@ CREATE TABLE IF NOT EXISTS models (
   upstream_id         TEXT NOT NULL REFERENCES upstreams(id),
   type                TEXT NOT NULL CHECK (type IN ('chat','embedding','image','audio','rerank')),
   capabilities        TEXT NOT NULL DEFAULT '[]',   -- JSON string[]
+  -- 能力探测（契约 §5 v1.11.0 / ADR-0024）。纯加列，SCHEMA_VERSION 不递增（迁移判据是"列在不在"）：
+  capabilities_source TEXT,                         -- 'manual' | 'probe' | NULL；NULL = 从没问过
+  last_probed_at      TEXT,                         -- ISO8601；探测每次都刷，与是否覆盖 capabilities 无关
   context_length      INTEGER,
   price_input_per_1k  INTEGER,                      -- 分；NULL = 缺失（缺失 != 0）
   price_output_per_1k INTEGER,
@@ -564,6 +567,10 @@ export function migrate(db: SqliteDatabase): void {
       // 不是补一个好看的空缺：`unlimited` 这一列本身就是 v1.4.0 才有的，
       // 比它更早的快照里不可能存在无限额度 key。
       ['balance_snapshots', 'unlimited_key_count', 'INTEGER NOT NULL DEFAULT 0'],
+      // v1.11.0：能力探测两列（契约 §5，ADR-0024）。可空、无默认 —— 老行 NULL = "从没问过"，
+      // 与加列前逐字一致（三态里 NULL 那一态）。与同组四列同一形态，随本块一起真发 ALTER。
+      ['models', 'capabilities_source', 'TEXT'],
+      ['models', 'last_probed_at', 'TEXT'],
     ];
     for (const [table, column, decl] of added) {
       if (!hasColumn(db, table, column)) {

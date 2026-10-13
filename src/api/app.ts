@@ -15,8 +15,11 @@
 // 包括 Fastify 自己的 schema 校验错误：它默认的形状不符合契约，
 // 且前端拿不到 `details.field` 就没法把表单那一栏标红。
 
+import fastifyStatic from '@fastify/static';
 import fastifyWebsocket from '@fastify/websocket';
 import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
+import { existsSync, statSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { AppConfig } from '../config.js';
 import type { Db } from '../db/database.js';
 import { NO_ASSISTANT_METRICS } from '../db/observability.js';
@@ -262,6 +265,31 @@ export interface BuildAppOptions {
    * 实例由接线层持有（同一份 `poolSnapshot()`），这里只收读函数。
    */
   egressPool?: () => readonly EgressPoolNode[];
+  /**
+   * 管理面静态托管目录（契约 §17 / ADR-0027）。缺省用 `config.adminWebDist`。
+   * 测试想要「无论构建没构建都不挂前端」时注入 `null`（探测被显式绕过）。
+   */
+  adminWebDist?: string | null;
+}
+
+/**
+ * `ADMIN_WEB_DIST` 的**唯一**解释点（契约 §17 / ADR-0027；`AppConfig.adminWebDist` 只负责取值）。
+ *
+ * **显式配置才开，默认关闭** —— 这是刻意的，不是偷懒：
+ *   - 默认关闭时行为与 v1.12.0 之前**逐字节相同**（`GET /` 回既有 JSON 404），
+ *     于是既有的 8 个 spec 全部零行为变更（它们不配这一项 ⇒ `null` ⇒ 托管关）；
+ *   - **不做"探测 web/dist 存在就托管"**：仓库里 `web/dist` 是构建产物、长期存在，
+ *     一探测就会让**测试进程**意外开启静态托管（用例 cwd 就是仓库根），
+ *     真实 index.html 被塞进 inject 响应，断言随构建产物漂移 —— 那是把一个部署开关
+ *     变成了测试环境依赖。生产用 `.env` 里 `ADMIN_WEB_DIST=web/dist` 显式打开（`.env.example` 该项留空 = 默认关闭，只作说明）。
+ *
+ * 返回 `null` = 关闭托管（buildApp 跳过静态注册）。非空值按目录解释；
+ * 目录不存在也返回 `null`（不 fail-fast，见下），由调用方 warn 一条。
+ */
+export function resolveWebDist(adminWebDist: string | null): string | null {
+  if (adminWebDist === null) return null;
+  const dir = resolve(adminWebDist);
+  return existsSync(dir) && statSync(dir).isDirectory() ? dir : null;
 }
 
 /**
@@ -407,7 +435,32 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     void reply.code(500).send({ code: 'INTERNAL', message: '服务端异常，请稍后重试' });
   });
 
+  // 静态托管是否启用（在下面静态注册那一跳之前先算出来，因为 404 收口要用它）。
+  // **必须在这里算**：`reply.sendFile` 只在插件注册后才有装饰；托管没启用时调它会抛
+  // `TypeError`（经 setErrorHandler 变成 500）—— 一个「没开托管」的部署会把 404 变成 500。
+  const configuredWebDist = opts.adminWebDist ?? config.adminWebDist;
+  const webDist = resolveWebDist(configuredWebDist);
+  const spaEnabled = webDist !== null;
+
+  // 404 收口分两层（契约 §17 / ADR-0027）：
+  //   1. `/api/*` 与 `/v1/*` 的未命中维持既有 JSON 404 —— 机器消费面（脚本 / SDK）靠它分诊，
+  //      形状与 v1.12.0 之前逐字节相同；非 GET 方法也走这层（SPA 兜底只接浏览器导航）。
+  //   2. 其余 GET（`/keys`、`/logs`… SPA 深链）交给 `reply.sendFile('index.html')`。
+  //      静态托管未启用或产物缺失时 `sendFile` 安全退化为 404（实测 @fastify/static 8.3.0，
+  //      `wildcard:false` + 缺 root 不炸 ready），不需要运行时再探一次文件存在性。
+  // 顺序刻意是「先 API 后 SPA」：`/api/*`、`/v1/*` 的 404 语义永远不被前端兜底吃掉，
+  // `assertAdminPath()` 护栏（永不允许拼 /v1 前缀）在这条链上继续成立。
   app.setNotFoundHandler((req, reply) => {
+    const path = req.url.split('?')[0] ?? req.url;
+    if (
+      spaEnabled &&
+      req.method === 'GET' &&
+      !path.startsWith('/api/') &&
+      !path.startsWith('/v1/')
+    ) {
+      void reply.sendFile('index.html');
+      return;
+    }
     void reply.code(404).send({ code: 'NOT_FOUND', message: `接口不存在: ${req.method} ${req.url}` });
   });
 
@@ -452,6 +505,45 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   app.register(async (instance) => {
     registerLiveRoutes(instance, ctx, liveHub);
   });
+
+  // 管理面静态托管（契约 §17 / ADR-0027）。三处顺序纪律：
+  //   1. **必须是最后一条路由注册**：Fastify 按注册序匹配，上面全部 `/api/*`（含 WS 那条
+  //      `register` 回调）都先注册，静态逐文件路由（`wildcard:false`）永远排在它们后面 ——
+  //      `/api/*` 先于静态命中。
+  //   2. **`wildcard:false` 刻意不取 `true`**：`true` 会注册 `GET /*` catch-all，
+  //      把 `/v1/*` 等 GET 未命中先吃进静态处理器再落它的 not-found 路径，
+  //      网关面 404 形状（`{"error":{…}}`）会被覆盖 —— 实测见 ADR-0027 决策 3。
+  //   3. **root 解析只在装配时做一次**：目录缺失时 `wildcard:false` 安全退化
+  //      （注册 0 条路由），not-found 兜底自动退化为 404，不需要热路径探测。
+  //     （`register` 本就是 avvio 队列语义，不 await 也不会乱序；buildApp 保持同步签名。）
+  if (spaEnabled) {
+    app.log.info({ webDist }, '管理面静态托管已启用');
+    // 缓存纪律（ADR-0027 决策 5）用 `onSend` 而不是插件的 `setHeaders`：
+    // 实测 8.3.0 里 `setHeaders` 先跑、随后 `reply.headers(headers)` 会把它覆盖掉
+    // （入口恒回 `public, max-age=0`）。`onSend` 在那些之后执行，是唯一能真正落地的地方。
+    app.addHook('onSend', async (req, reply, payload) => {
+      const p = req.url.split('?')[0] ?? '';
+      if (req.method === 'GET' && !p.startsWith('/api/') && !p.startsWith('/v1/')) {
+        reply.header(
+          'cache-control',
+          p.includes('/assets/') ? 'public, max-age=2592000, immutable' : 'no-cache',
+        );
+      }
+      return payload;
+    });
+    app.register(fastifyStatic, {
+      root: webDist,
+      prefix: '/',
+      wildcard: false,
+      index: ['index.html'],
+    });
+  } else if (configuredWebDist !== null) {
+    // 只在「显式配了目录但目录不存在」时 warn —— 这是可诊断的配置错误，别人两天都查不出来。
+    app.log.warn(
+      { configured: configuredWebDist },
+      'ADMIN_WEB_DIST 指向的目录不存在，管理面静态托管未启用（先跑 pnpm web:build）',
+    );
+  }
 
   // 60s 健康快照（契约 §12.2 / ADR-0013 §5）。生命周期挂在 app 上而不是 server.ts 的
   // 维护定时器数组里：冻结的关停顺序（src/wiring/shutdown.ts）保证 `app.close()` 早于

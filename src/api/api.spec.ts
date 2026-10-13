@@ -9,7 +9,7 @@
 // 明文探针在运行时拼装，源码里不存在该字面量 —— 否则
 // `pnpm check:secrets` 会在自己的测试文件里命中，把扫描器变成狼来了。
 
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { FastifyInstance } from 'fastify';
@@ -100,10 +100,14 @@ function makeConfig(dbPath: string): AppConfig {
     // 能力探测（契约 §5 / ADR-0024）测试取值：与装配默认逐字一致（本套用例不触发补探）
     modelProbeEnabled: true,
     modelProbeMaxModels: 10,
+    // 托管默认关（契约 §17）：本套用例不挂前端，`GET /` 维持既有 JSON 404
+    adminWebDist: null,
   };
 }
 
-async function setup(opts: { fetchImpl?: typeof fetch } = {}): Promise<Harness> {
+async function setup(
+  opts: { fetchImpl?: typeof fetch; adminWebDist?: string | null } = {},
+): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'api-probe-'));
   dirs.push(dir);
   const dbPath = join(dir, 'gateway.db');
@@ -115,6 +119,7 @@ async function setup(opts: { fetchImpl?: typeof fetch } = {}): Promise<Harness> 
     // `vi.stubGlobal('fetch', …)`：那对已经拿定重放的缺省值无效，用例会打到真网络上，
     // 然后以"超时"的形式红 —— 红得与契约毫无关系。
     ...(opts.fetchImpl === undefined ? {} : { supplier: { fetchImpl: opts.fetchImpl } }),
+    ...(opts.adminWebDist === undefined ? {} : { adminWebDist: opts.adminWebDist }),
   });
   bootstrapAdmin(db, { ADMIN_USERNAME: ADMIN_USER, ADMIN_PASSWORD: ADMIN_PASS });
 
@@ -1241,3 +1246,93 @@ interface UpstreamFields {
   unlimitedKeyCount: number;
   keysBalance: number | null;
 }
+
+/* -------------------------------------------------------------------------- */
+
+/**
+ * §17 管理面静态托管（v1.12.0 / ADR-0027）。
+ *
+ * 三条判据各自钉一个"破了会静默出错"的地方：
+ *   1. **默认关**：不配 `adminWebDist` 时 `GET /` 必须还是既有 JSON 404 ——
+ *      托管一旦默认打开，全部既有 spec 的 inject 会被真实 index.html 污染；
+ *   2. **开了要对**：SPA 入口 200、带指纹 assets 长缓存、SPA 深链回落 200；
+ *   3. **机器面不被吃掉**：`/api/*`、`/v1/*` 与非 GET 的未命中维持 JSON 404
+ *      （前端兜底只能兜浏览器导航，不能兜 SDK 的错误分诊面）。
+ */
+describe('§17 管理面静态托管（v1.12.0）', () => {
+  /** 造一份最小的 dist：一个入口 + 一个带指纹的 asset。 */
+  function makeDist(): string {
+    const dir = mkdtempSync(join(tmpdir(), 'api-webdist-'));
+    dirs.push(dir);
+    mkdirSync(join(dir, 'assets'));
+    writeFileSync(join(dir, 'index.html'), '<!doctype html><div id="root">SPA_SHELL</div>');
+    writeFileSync(join(dir, 'assets', 'app-abc123.js'), 'console.log(1)');
+    return dir;
+  }
+
+  it('默认（未配 adminWebDist）：GET / 与 /assets 仍是既有 JSON 404，托管不生效', async () => {
+    const h = await setup();
+    for (const url of ['/', '/index.html', '/assets/app-abc123.js', '/keys']) {
+      const res = await h.app.inject({ method: 'GET', url });
+      expect(res.statusCode, `${url}: ${res.body}`).toBe(404);
+      expect(res.headers['content-type']).toContain('application/json');
+      expect((res.json() as { code: string }).code).toBe('NOT_FOUND');
+    }
+    await closeHarness(h);
+  });
+
+  it('配了目录：入口/资源/SPA 深链都对，机器面维持 JSON 404', async () => {
+    const dist = makeDist();
+    const h = await setup({ adminWebDist: dist });
+
+    // SPA 入口：`GET /` 与 `index.html` 都回壳
+    for (const url of ['/', '/index.html']) {
+      const res = await h.app.inject({ method: 'GET', url });
+      expect(res.statusCode, `${url}: ${res.body}`).toBe(200);
+      expect(res.headers['content-type']).toContain('text/html');
+      expect(res.body).toContain('SPA_SHELL');
+      // 入口不得被缓存（否则新版本发不出去）
+      expect(String(res.headers['cache-control'])).toContain('no-cache');
+    }
+
+    // 带指纹的资源：200 + 长缓存 immutable
+    const asset = await h.app.inject({ method: 'GET', url: '/assets/app-abc123.js' });
+    expect(asset.statusCode, asset.body).toBe(200);
+    expect(String(asset.headers['cache-control'])).toContain('immutable');
+    expect(asset.body).toContain('console.log(1)');
+
+    // SPA 深链：未命中的非 /api 非 /v1 GET 回落 index.html（200）
+    const deep = await h.app.inject({ method: 'GET', url: '/keys' });
+    expect(deep.statusCode, deep.body).toBe(200);
+    expect(deep.body).toContain('SPA_SHELL');
+
+    // 机器面不被吃掉：/api/*、/v1/*、非 GET 一律维持 JSON 404
+    // （带会话：未鉴权的 /api/* 由 onRequest 闸门先回 401，那是另一条既有口径）
+    const apiMiss = await h.app.inject({
+      method: 'GET',
+      url: '/api/not-a-real-endpoint',
+      headers: auth(h),
+    });
+    expect(apiMiss.statusCode, apiMiss.body).toBe(404);
+    expect((apiMiss.json() as { code: string }).code).toBe('NOT_FOUND');
+    // 未鉴权的 /api/* 未命中仍是 401（闸门在 404 收口之前，托管不能把这条吃掉）
+    const anon = await h.app.inject({ method: 'GET', url: '/api/not-a-real-endpoint' });
+    expect(anon.statusCode).toBe(401);
+    const v1Miss = await h.app.inject({ method: 'GET', url: '/v1/not-a-real-endpoint' });
+    expect(v1Miss.statusCode).toBe(404);
+    expect((v1Miss.json() as { code: string }).code).toBe('NOT_FOUND');
+    const postMiss = await h.app.inject({ method: 'POST', url: '/keys', headers: auth(h) });
+    expect(postMiss.statusCode).toBe(404);
+    expect((postMiss.json() as { code: string }).code).toBe('NOT_FOUND');
+    await closeHarness(h);
+  });
+
+  it('配了不存在的目录：不炸、托管退化，GET / 仍是 JSON 404', async () => {
+    const missing = join(tmpdir(), 'api-webdist-missing-' + Date.now());
+    const h = await setup({ adminWebDist: missing });
+    const res = await h.app.inject({ method: 'GET', url: '/' });
+    expect(res.statusCode).toBe(404);
+    expect((res.json() as { code: string }).code).toBe('NOT_FOUND');
+    await closeHarness(h);
+  });
+});

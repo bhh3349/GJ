@@ -154,6 +154,19 @@ describe('其余项仍然 fail-fast', () => {
     assert.throws(() => loadConfig(env({ MAX_ATTEMPTS: '-1' })), /MAX_ATTEMPTS/, '负数归 >=1 那条管，不归字面量这条');
   });
 
+  /**
+   * ADMIN_WEB_DIST（契约 §17 / ADR-0027）：配置层只负责取值 —— 空串按"未配置"处理，
+   * 其余原样透出；「显式关闭值」与「目录探测」的解释在装配层（resolveWebDist），
+   * 默认值的解释只有一处。
+   */
+  it('ADMIN_WEB_DIST：空串是 null（未配置），其余原样透出（trim）', () => {
+    assert.equal(loadConfig(env({ ADMIN_WEB_DIST: '' })).adminWebDist, null);
+    assert.equal(loadConfig(env()).adminWebDist, null);
+    assert.equal(loadConfig(env({ ADMIN_WEB_DIST: '  ' })).adminWebDist, null);
+    assert.equal(loadConfig(env({ ADMIN_WEB_DIST: 'web/dist' })).adminWebDist, 'web/dist');
+    assert.equal(loadConfig(env({ ADMIN_WEB_DIST: ' none ' })).adminWebDist, 'none');
+  });
+
   it('十进制整数照旧生效（收紧不误伤正常写法，两侧空白仍去）', () => {
     assert.equal(loadConfig(env({ PORT_GATEWAY: '8080' })).portGateway, 8080);
     assert.equal(loadConfig(env({ PORT_ADMIN: ' 4002 ' })).portAdmin, 4002);

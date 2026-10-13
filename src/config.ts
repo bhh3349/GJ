@@ -89,6 +89,20 @@ export interface AppConfig {
    * 超出的模型留在 `capabilities_source IS NULL`，下一轮再补。
    */
   modelProbeMaxModels: number;
+  /**
+   * 管理面同源托管的前端产物目录（契约 §17 / ADR-0027）。**默认 `null` = 托管关闭**
+   * （关闭时行为与 v1.12.0 之前逐字节相同：`GET /` 回既有 JSON 404）。
+   *
+   * **显式配置才开**：不做"探测 web/dist 存在就托管"——仓库里 `web/dist` 是长期存在的
+   * 构建产物，一探测就会让测试进程意外开启托管（用例 cwd 即仓库根），真实 index.html
+   * 被塞进 inject 响应，断言随构建产物漂移。生产在 `.env` 里 `ADMIN_WEB_DIST=web/dist` 打开
+   * （相对路径按进程 cwd 解析）。
+   *
+   * **目录缺失不 fail-fast**（与 MASTER_KEY 那条相反，理由也相反）：`vite build` 没跑是常态，
+   * 不该拦后端启动。启动 warn 一条，托管退化为「0 条静态路由 + 兜底退化为 404」
+   * （`@fastify/static` `wildcard:false` 在 root 缺失时安全退化，实测不炸 ready）。
+   */
+  adminWebDist: string | null;
 }
 
 /**
@@ -256,5 +270,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     egressHeartbeatInboxDir: (env['EGRESS_HEARTBEAT_INBOX_DIR'] ?? '').trim() === '' ? null : (env['EGRESS_HEARTBEAT_INBOX_DIR'] ?? '').trim(),
     modelProbeEnabled: boolFromEnv(env, 'MODEL_PROBE_ENABLED', true),
     modelProbeMaxModels: positiveIntFromEnv(env, 'MODEL_PROBE_MAX_MODELS', 10),
+    // 空串按"未配置 / 探测"处理（与 ASSISTANT_MODEL / EGRESS_HEARTBEAT_INBOX_DIR 同款写法：
+    // `ADMIN_WEB_DIST=` 是部署脚本里最常见的"这行先留着"写法）。显式关闭值的解释留在装配层
+    // （`src/api/app.ts` 的 `resolveWebDist`），配置层只负责"取出来"—— 与 resolveEgressGate 同一条纪律：
+    // 默认值的解释只有一处，否则"关托管"会有两种写法各自为政。
+    adminWebDist: (env['ADMIN_WEB_DIST'] ?? '').trim() === '' ? null : (env['ADMIN_WEB_DIST'] ?? '').trim(),
   };
 }

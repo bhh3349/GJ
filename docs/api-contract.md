@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.11.2**　｜
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.12.0**　｜
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -69,6 +69,14 @@
 > ② **同步接线 + 可观测位**：`syncModels` 候选从「第一把启用 key」改为共享选择器；成功上游的 `SyncSummary` 新增**可选**字段 `credentials: {tried, usedMaskedKeys, switched}`（省略 = 未换过；**只含计数与掩码、不含明文**）。
 > ③ **口径补充三处（正文已并入对应小节）**：来源规则第 3 条条件 `UPDATE` 的 WHERE 补「本轮 `now` 已知」半句；探测端点**同步返回** `200 ModelProbeResult`（不 `202` 不打任务，单上游多模型超时预算时才退任务面）；`MODEL_PROBE_MAX_MODELS` 落**装配侧 env 默认 = 10**（数值不进契约）。
 > **无字段改名、无字段删除；`/v1/*` 零变更；`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增；`SCHEMA_VERSION` 仍为 2（v1.11.0 的两列随本笔实现落 `ALTER`，仍零迁移）。**
+
+> **v1.12.0（2026-10-14，管理面同源托管前端产物 —— PM 交付链探查缺口 3）**：新增 **§17 管理面静态托管**。管理面此前只跑 `/api/*`，`GET :4001/` 回 JSON 404；开发态靠 Vite（:5173），生产没有任何 UI 入口。动机与影响见 **`docs/adr/0027-admin-web-hosting.md`**。
+> ① **同源托管**：`GET /`（及 SPA 深链路由）回 `web/dist` 的 `index.html`，`/assets/*` 静态资源同源 —— Cookie 不跨域、WS `/api/stats/live` 同源升级，与开发态 Vite 代理口径一致。
+> ② **注册顺序**：`/api/*` 路由全部先注册，静态托管最后 —— `/api/*` 永远先于静态命中。
+> ③ **插件形态 `wildcard:false`（逐文件路由）**：不为未存在的路径注册 `/*` catch-all；SPA 深链由**应用级 404 兜底**承接 —— 非 GET 方法、非 `/api`、非 `/v1` 的 GET 未命中 → `sendFile('index.html')`（200）；其余未命中（非 GET 方法 / `/api/*` / `/v1/*`）维持既有 JSON 404（`{"code":"NOT_FOUND",…}`）。`assertAdminPath()` 前端护栏（永不允许拼 `/v1` 前缀）继续有效。
+> ④ **root 来源 = 新可选 env `ADMIN_WEB_DIST`**：**默认空 = 关闭托管**（行为与改动前逐字节相同），**显式配置才开**（不做"探测 `web/dist` 存在就托管" —— 那是把部署开关变成测试环境依赖）；目录缺失**不 fail-fast**（启动 warn 一条，托管退化，Vite build 没跑是常态）。
+> ⑤ **缓存纪律**：`index.html` 不缓存；带指纹的 `/assets/*` 长缓存 `maxAge=30d, immutable`（Vite 产物文件名自带内容 hash）。
+> ⑥ **零鉴权面变更**：静态资源不经会话鉴权（onRequest 闸门只管 `/api/*`）；`/api/*` / `/v1/*` 行为零字节变更；`SCHEMA_VERSION` 仍为 2、零 DDL、零迁移；`src/gateway/` 零改动。
 > **补遗 v1.0.2（2026-10-06）**：① §3 `POST /api/keys/:id/balance/refresh` 的响应补成 `202 {taskId}`（原文只写了用途、没写形状，而实现从第一天起就回 `202 {taskId}`，属于文本与实现的既存分歧，本次抹平）；② §5 新增「`POST /api/models/sync` 的字段映射」小节，把「只落能证明的、其余一律未知」写成明文规则；③ §5 补一句「同步不覆盖人工值」。除此之外 v1.0.1 全部内容不变 —— 无字段改名、无类型变更、无端点删除。动机与影响见 ADR-0009。
 >
 > **补遗 v1.0.3（2026-10-06）**：① §3 写明 `health` 等四个运行态字段的**来源与新鲜度**（网关进程 1s 批量镜像落 `key_runtime`，重启后归零），动机见 ADR-0010；② §6 新增「`costCents` 金额口径」小节 —— 契约此前**暴露**了 `costCents`（§4 Group、§6 usage 点）却从未**定义**它，未知单价该记 0 还是 null 无据可依；③ §10 把「无可用 key」与「候选用尽」两个 Terminating 结果拆开登记（`503 NO_AVAILABLE_KEY` ≠ `502 UPSTREAM_ERROR`，原文一句话把两者混在一起，与实现不符），并登记已在使用但未登记的 `504 UPSTREAM_TIMEOUT`。三处都是**文本对齐实现**，无字段改名、无类型变更、无端点增删。
@@ -3253,3 +3261,17 @@ v1.11.0（**2026-10-14，模型能力探测** —— 新增 **§5 `POST /api/mod
 v1.11.1（**2026-10-14，助手页错误汇总面板的数据口径** —— 新增 **§13.6**，Bo 原话「不是价格错误汇总。是日志的错误日志汇总表，这样方便和助手对话复制」）：**纯前端消费口径登记，零新端点、零字段新增、零 DTO 变更、零代码改动**。① 面板行 = §12.3 `GET /api/observability/errors` 原样响应（默认近 1h、`ts DESC, id DESC`）；② 顶部 9 分型计数条 = §12.2 `events.byCategory`，**不得**用分页响应现算计数；③ 点行注入只走 §13.1 `logContext` 白名单字段（`window` / `from` / `to` / `category` / `severity` / `model` / `requestId`），**禁止把行文本塞进 `messages`**（§13 纪律 3「日志隔离」不接受自由文本查询）；④ **裁定 `done.citations` 不加默认快照** —— 自动快照每轮撞 §13.3「50 条」上限使 `truncated` 常驻失真，且面板上线后「复制」痛点已解、价值不抵代价；全局视野改由点行注入 `category` 多值承担（§13.2 语义一字未动）；⑤ 面板（`from`/`to`）与计数条（`window`）允许不同窗口，后端只回显（§12.3 `range` / §12.2 `window`），一致性归前端渲染，**不新增字段**；⑥ 取证：`observabilityApi.errors()` 自 `56d0dbb` 起零调用点、§12.3 端点活性实测 `200` —— 实现早已就位，缺的是消费侧。**`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2、零 DDL、`src/api/` + `src/gateway/` + `src/db/` 零改动**（`docs/adr/0025-assistant-error-summary-panel.md`）。
 
 v1.11.2（**2026-10-14，sync 选 key 候选修复 + 探测口径三点补充** —— sync 401 根因 = `pickSyncKey` 选中无台账绑定的孤儿 key `****amMc`（`key_232d66a4385d`，上游侧已失效、零观测面），A/B 实测 `****amMc`→401 / 台账绑定 key→200，Bo 拍板停用 + 共享凭据选择器）：① 新增 `src/api/services/credential-rotation.ts` 共享凭据选择器（候选 = 已启用 +（有则）台账绑定 active 账号优先，`created_at,id` 稳定序；`tryWithRotation` 401/403 记 `auth` 换下一把、装配默认试 3 把、预算耗尽回最后一个错误）；② `SyncSummary` 新增可选可观测位 `credentials: {tried, usedMaskedKeys, switched}`（只含计数与掩码、不含明文）；③ 探测口径钉死三处：条件 `UPDATE` 的 WHERE 补 `now` 半句、端点**同步返回** `200 ModelProbeResult`（不 202 不打任务，单上游多模型超时预算才退任务面 `result.probe`）、`MODEL_PROBE_MAX_MODELS` 落装配侧 env 默认（数值不进契约）。**无字段改名、无字段删除、`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2、零迁移**（`docs/adr/0026-sync-credential-rotation.md`）。
+---
+
+## 17. 管理面静态托管（v1.12.0）
+
+| 项 | 口径 |
+|---|---|
+| 服务面 | 管理面（`PORT_ADMIN`，默认 :4001）同时服务 `/api/*` 与前端产物 |
+| root | env `ADMIN_WEB_DIST`（**默认空 = 关闭托管**；显式配相对/绝对目录路径才开，不做目录探测） |
+| `GET /` | `index.html`（SPA 入口，**不缓存**） |
+| `GET /assets/*` | 带指纹静态资源，`Cache-Control: public, max-age=2592000, immutable`（30 天） |
+| SPA 深链 | 非 `/api`、非 `/v1` 的 GET 未命中 → `index.html`（200）；`/api/*` / `/v1/*` 与非 GET 维持 JSON 404 |
+| 顺序 | `/api/*` 路由全部先注册，静态最后；`wildcard:false`，不注册 `/*` catch-all |
+| 鉴权 | 静态资源不经会话闸门（onRequest 只判 `/api/*`）；`/api/*` / `/v1/*` 行为零变更 |
+| 目录缺失 | 不 fail-fast：启动 warn，托管退化（0 条静态路由 + 兜底退化为 404） |

@@ -17,6 +17,10 @@ export default defineConfig(({ mode }) => {
       },
     },
     server: {
+      // host: true = 绑 ::（双栈，Node 对 :: 默认关 V6ONLY）。
+      // 不写时 Vite 5 缺省绑 localhost，本机把 localhost 解析成 ::1 在前，
+      // dev server 就只剩 IPv6，Bo 用 127.0.0.1 / IPv4 打不开。双栈后两边都通。
+      host: true,
       port: 5173,
       strictPort: true,
       proxy: {

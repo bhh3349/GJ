@@ -259,6 +259,14 @@ describe('web 排版防回退锁（2026-10-12 事故）', () => {
     ).toBe(false);
   });
 
+  it('Vite dev server 绑定是双栈（host: true，不许回退成缺省 localhost）', () => {
+    // 事故本体：vite.config.ts 不写 host 时 Vite 5 缺省绑 localhost，本机把 localhost
+    // 解析成 ::1 在前，dev server 只听 IPv6 —— Bo 用 127.0.0.1（IPv4）打不开页面。
+    // host: true = 绑 ::（Node 对 :: 默认关 V6ONLY），IPv4/IPv6 都通。
+    const vite = readFileSync(join(webSrcRoot, '..', 'vite.config.ts'), 'utf8');
+    expect(vite).toMatch(/host:\s*true/);
+  });
+
   it('套餐台账表仍是 fixed 布局 + 全列声明宽度（长文本换行事故的回归位）', () => {
     const src = readFileSync(
       join(webSrcRoot, 'pages', 'upstreams', 'SupplierSubscriptionsTable.tsx'),

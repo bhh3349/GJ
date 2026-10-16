@@ -51,6 +51,8 @@ export const router = createBrowserRouter([
       { path: 'models', element: lazyPage(() => import('@/pages/ModelsPage')) },
       { path: 'stats', element: lazyPage(() => import('@/pages/StatsPage')) },
       { path: 'logs', element: lazyPage(() => import('@/pages/LogsPage')) },
+      // 接入信息独立分包：一屏读部署自报口径，不进 Dashboard 首屏。
+      { path: 'access', element: lazyPage(() => import('@/pages/access/AccessInfoPage')) },
       // 助手页独立分包，不进 Dashboard 首屏、不加载 ECharts。
       { path: 'assistant', element: lazyPage(() => import('@/pages/assistant/AssistantPage')) },
       { path: '*', element: <NotFoundPage /> },

@@ -6,6 +6,7 @@
  */
 import { api, downloadFile, type QueryValue } from './http';
 import type {
+  AccessInfo,
   AuditEntry,
   BalanceStats,
   BalanceSyncQuery,
@@ -327,4 +328,17 @@ export const logsApi = {
   list: (query: LogListQuery = {}) => api.get<Paged<CallLog>>('/logs', { query: q(query) }),
   audit: (query: { page?: number; pageSize?: number } = {}) =>
     api.get<Paged<AuditEntry>>('/audit', { query: q(query) }),
+};
+
+// ── §18 接入信息 ──────────────────────────────────────────────────
+
+/**
+ * §18 `GET /api/access-info`（v1.12.2，只读、无副作用、零新存储）。
+ * 响应里**没有**完整 URL 字段 —— URL 拼接责任在前端（§18：
+ * `publicHost ?? window.location.hostname` + 端口），绑定地址禁止直拼给用户。
+ */
+export const accessInfoApi = {
+  /** 读面传 `signal` 以支持卸载/重读时 abort 掉在途请求（同 `useResource` 的其它读面）。 */
+  get: (options: { signal?: AbortSignal } = {}) =>
+    api.get<AccessInfo>('/access-info', options),
 };

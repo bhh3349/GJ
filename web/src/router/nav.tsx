@@ -7,6 +7,7 @@ import {
   KeyOutlined,
   RobotOutlined,
   TeamOutlined,
+  ApiOutlined,
 } from '@ant-design/icons';
 import type { ReactNode } from 'react';
 
@@ -64,6 +65,12 @@ export const navItems: readonly NavItem[] = [
     label: '日志',
     icon: <FileTextOutlined />,
     description: '调用记录查询（保留 30 天）',
+  },
+  {
+    path: '/access',
+    label: '接入信息',
+    icon: <ApiOutlined />,
+    description: 'Base URL、后台地址与调用密钥入口',
   },
   {
     path: '/assistant',

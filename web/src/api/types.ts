@@ -1533,3 +1533,22 @@ export interface EgressProxyTestResult {
   /** HTTP 状态或错误 message，**不含凭据**。 */
   error: string | null;
 }
+
+// ── §18 接入信息 ────────────────────────────────────────────────
+
+/**
+ * §18 `GET /api/access-info`（v1.12.2，只读、无副作用、零新存储）。
+ *
+ * 契约刻意**不回**任何完整 URL（`gatewayUrl`/`adminUrl` 不存在）：服务端只知道
+ * 端口与绑定地址，不知道公网 host —— `0.0.0.0`/`127.0.0.1` 都是监听语义，不是
+ * 可访问地址。URL 拼接责任在前端：`(publicHost ?? window.location.hostname) + 端口`，
+ * **禁止**把 `hostGateway`/`hostAdmin` 直接拼给用户（契约 §18 响应表逐行口径）。
+ */
+export interface AccessInfo {
+  gateway: { scheme: string; portGateway: number; hostGateway: string };
+  admin: { scheme: string; portAdmin: number; hostAdmin: string };
+  /** env `PUBLIC_HOST`（默认空 = null）。对外基址覆盖值（不带 scheme），不落库。 */
+  publicHost: string | null;
+  /** `ADMIN_WEB_DIST` 非空即 true；前端据此提示「生产直开 :4001」还是「先起 Vite」。 */
+  adminWebDistEnabled: boolean;
+}

@@ -186,6 +186,26 @@ export const EGRESS_LOCAL_HEADER = 'x-sub2api-egress-local';
 export const EGRESS_LOCAL_VALUE = '1';
 
 /**
+ * 探活回显端点的**缺省值**（唯一字面量来源，ADR-0033）。
+ *
+ * 为什么这个字面量必须在端口层而不是留在两个调用点里：**它有两个消费者** ——
+ * 管理面 `/api/egress/:id/test`（`src/api/routes/egress.ts`）与心跳生产者入口 B
+ * （`src/egress/heartbeat.ts`）。两处各写一遍 `'https://api.ipify.org'` 的后果不是
+ * "以后要改两个地方"这种小事，而是**两个消费者可以配不同的值而毫无症状**：
+ * 面板说这台出口通（它打的是新端点）、心跳说这台出口死了（它还打旧的）——
+ * 用户看到的是"同一条数据两个互相矛盾的真相"，而两边的日志都写着"探测正常"。
+ * 这正是 ADR-0021「同一个对象/同一张表」那把刀的同形：**共享的东西必须只有一份**。
+ *
+ * 放这里而不是 `src/config.ts`：这个字面量要同时被 `src/api/` 与 `src/egress/` 读，
+ * 而配置模块属于装配层。端口模块零依赖（无 import），两侧都 import 它不引入新边。
+ *
+ * 它只是**缺省**：运行时可用 `EGRESS_ECHO_URL` 覆盖（`.env.example` / 契约 §16.7）。
+ * 保留 ipify 作缺省而不是换成国内可达的目标 —— 换缺省值会**静默改变所有现存部署**
+ * 的探测语义（含那些"我测试过、面板显示通"的记录），而那件事该由部署者显式做。
+ */
+export const EGRESS_ECHO_URL_DEFAULT = 'https://api.ipify.org';
+
+/**
  * 剩余毫秒 → 写进 `Retry-After` 的秒数（向上取整，**至少 1s**）。
  *
  * 放在端口模块是因为它必须**只有一份**：`src/gateway/egress.ts` 与合成响应两处各算一遍，

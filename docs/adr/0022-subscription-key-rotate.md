@@ -51,7 +51,8 @@ v1.4.0 冻结时（ADR-0018 决策 7），上游的 `POST /api/subscription/self
       失败只写 `statusMessage`（同 `failurePatch`），成功也不把它顶成 `active`。
 
 4. **落库口径**：`category='token-plan'`、`enabled=1`、`label=套餐-<plan_title>`；
-   **`token_plan_remaining` 落 `NULL`**（余量未知 ≠ 0，由后续 `keys/sync` / 余额刷新回填）；
+   **`token_plan_remaining` 落 `NULL`**（余量未知 ≠ 0，由后续 `keys/sync` / 余额刷新回填
+   —— **该"后续"已于 2026-10-16 由 ADR-0030 落地为 `backfillSubscriptionTokenPlan`**）；
    **`unlimited` 不适用**（`token-plan` 行不落该列，§15.7）。旧 key 走既有 `deleteKey` 软删
    （`enabled=0` + `deleted_at`），台账行**不删**（保留对账历史）。
 
@@ -73,6 +74,11 @@ v1.4.0 冻结时（ADR-0018 决策 7），上游的 `POST /api/subscription/self
 - **不复活 ADR-0011 的"先烧套餐再烧余额"**：`rotate` 只产出**凭据**；**套餐额度仍不进任何网关准入判断**。
   池内出现 `token-plan` 行的是**挂该账号的套餐专属 key**（其额度池归上游管），
   与"本地账本按 ADR-0011 排序"是两回事。真正的"先烧套餐"若要落地，仍须另开一次契约变更。
+  > **2026-10-16 追认（ADR-0030）**：那次契约变更**已经做了** —— ADR-0030 补上本文 §4 承诺的
+  > "后续回填"腿，并把 ADR-0011 的未知哨兵从 `-1` 改 `1`，"套餐 key 优先于余额 key"自此生效。
+  > 本文 §4 的**具体承诺**（"由后续 `keys/sync` / 余额刷新回填"）由 ADR-0030 的
+  > `backfillSubscriptionTokenPlan` 兑现；**判据本身未变**：`token_plan_remaining` 仍是
+  > "未知 ≠ 0、仍可用"，`/v1/*` 与 `src/gateway/` 的准入过滤零改动。
 
 ## 代价与已知边界（不粉饰）
 

@@ -39,7 +39,7 @@ function upstreamTarget(upstreamId: string, apiKey: string): UpstreamTarget {
   return { upstreamId, baseUrl, apiKey, egressId: egressIdOfUrl(baseUrl), accountId: null };
 }
 
-const GROUP: GroupContext = { groupId: 'grp_1', name: '测试组', enabled: true, rpm: null, tpm: null, dailyQuota: null };
+const GROUP: GroupContext = { groupId: 'grp_1', name: '测试组', enabled: true, rpm: null, tpm: null, dailyQuota: null, authorizedModels: null };
 
 /**
  * 关联键（契约 §6 / ADR-0014）。引擎对它是**纯透传**：不生成、不校验、只往上游请求头
@@ -172,6 +172,8 @@ function makeHarness(options: {
   const models: ModelCatalog = {
     listEnabledModels: async () => [],
     resolveUpstreamModel: (m) => aliases[m] ?? m,
+    // 引擎不用类别（准入判在路由层，ADR-0039）；引擎单测里这个桩永远不被调用
+    typeOf: () => null,
   };
 
   const logs: UsageLogEntry[] = [];
@@ -239,6 +241,7 @@ describe('0 真实尝试的分型（ADR-0011：不再合流成 502 UPSTREAM_ERRO
       lastFailureReason: null,
       lastLatencyMs: null,
       inflight: 0,
+      autoDisabled: false,
     }));
     return {
       getAvailableKeys: async () => candidates,
@@ -252,7 +255,7 @@ describe('0 真实尝试的分型（ADR-0011：不再合流成 502 UPSTREAM_ERRO
   }
 
   function engineOver(pool: KeyPoolInternal, resolveSecret: (keyId: string) => UpstreamTarget | null, steps: Script[]) {
-    const models: ModelCatalog = { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m };
+    const models: ModelCatalog = { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m, typeOf: () => null };
     const logs: UsageLogEntry[] = [];
     const { fetchImpl, calls } = scriptedFetch(steps);
     return {
@@ -433,7 +436,7 @@ describe('首字节前换 key（验收 2 / 7）', () => {
     const engine = createGatewayEngine({
       pool: h.pool,
       secrets: { resolve: () => upstreamTarget('up1', 'sk-x') },
-      models: { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m },
+      models: { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m, typeOf: () => null },
       fetchImpl: () =>
         new Promise<Response>((_resolve, reject) => {
           setTimeout(() => reject(Object.assign(new Error('timeout'), { name: 'TimeoutError' })), 20);
@@ -767,7 +770,7 @@ describe('并发与运行态', () => {
     const engine = createGatewayEngine({
       pool,
       secrets: { resolve: () => upstreamTarget('up1', 'sk-k1') },
-      models: { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m },
+      models: { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m, typeOf: () => null },
       fetchImpl: (_url, init) =>
         new Promise<Response>((_resolve, reject) => {
           const abort = (): void => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));

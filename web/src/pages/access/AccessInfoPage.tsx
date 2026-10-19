@@ -24,6 +24,7 @@ import { PageHeader } from '@/components/PageHeader';
 import { Panel } from '@/components/Panel';
 import { EmptyState, ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { tokens } from '@/theme/tokens';
+import { externalHostOf, gatewayUrlsOf, joinHostPort } from '@/utils/gatewayUrl';
 
 const { Text } = Typography;
 
@@ -96,24 +97,13 @@ export function AccessInfoPage() {
 
   const resource = useResource<AccessInfo>((signal) => accessInfoApi.get({ signal }), []);
 
-  // 对外 host：PUBLIC_HOST 配置值优先；没配 = 当前浏览器地址栏的机器名（本机部署的兜底）。
-  const externalHost = useMemo(() => {
-    if (resource.data?.publicHost) return resource.data.publicHost;
-    if (typeof window === 'undefined') return null;
-    return window.location.hostname;
-  }, [resource.data]);
-
   /**
-   * host + 端口拼接。三种输入都要对：
-   * - `gw.example.com` → 补端口；`gw.example.com:4000` → 已完整，不动；
-   * - IPv6 裸地址 `[::1]`（浏览器 hostname 的原样输出）→ **要**补端口；
-   * - IPv6 带端口 `[::1]:4000` → 已完整，不动。
+   * 对外 host 与两个网关地址都来自共享的 `utils/gatewayUrl`（v1.15.7 / ADR-0036 决策 1）。
+   * 这里不再自己实现 `joinHostPort` —— 那段"两处各自照契约实现"的论证见该文件头注：
+   * 契约里当时根本没有 `/v1` 这一层，所以两边照的是同一份**缺了后缀的**公式。
    */
-  const joinHostPort = (base: string, port: number): string => {
-    if (/]:\d+$/.test(base)) return base;
-    if (base.includes(':')) return base.startsWith('[') ? `${base}:${port}` : base;
-    return `${base}:${port}`;
-  };
+  const externalHost = useMemo(() => externalHostOf(resource.data), [resource.data]);
+  const gatewayUrls = useMemo(() => gatewayUrlsOf(resource.data), [resource.data]);
 
   const copyPublicHost = async (): Promise<void> => {
     const value = resource.data?.publicHost ?? '';
@@ -148,8 +138,7 @@ export function AccessInfoPage() {
   const access = resource.data;
   if (access === null) return null;
 
-  const gatewayUrl =
-    externalHost === null ? null : joinHostPort(externalHost, access.gateway.portGateway);
+  const gatewayUrl = gatewayUrls?.baseUrl ?? null;
   // 管理后台与它的数据接口同源托管时，后台地址就是你当前打开的本页；
   // 未托管时给出数据接口所在地址，仅作核对与排障参考，不再虚构另一个页面地址。
   const adminUrl = access.adminWebDistEnabled
@@ -213,13 +202,21 @@ export function AccessInfoPage() {
           alignItems: 'stretch',
         }}
       >
-        <Panel title="网关地址" description="外部程序调用模型服务时填这个地址">
+        <Panel
+          title="网关地址"
+          description="外部程序（ChatGPT-Next-Web、LobeChat、Cursor 等）的 Base URL 填这一行 —— 结尾的 /v1 是地址的一部分，不能省。"
+        >
           <InfoRow
-            label="接入地址"
+            label="API 地址"
             value={gatewayUrl ?? '—'}
             {...(externalHost === null
               ? {}
-              : { hint: '配置了对外地址就用它，没配置就用你当前浏览器的机器名' })}
+              : { hint: '配置了对外地址就用它，没配置就用你当前浏览器的机器名。结尾的 /v1 是网关路径的一部分，缺了它客户端会收到 404' })}
+          />
+          <InfoRow
+            label="服务根"
+            value={gatewayUrls?.root ?? '—'}
+            hint="不带 /v1 的那个地址：管理页面与 /api/* 在这里，能打开本页就说明它是通的。客户端的 Base URL 用上面那一行"
           />
           <InfoRow
             label="绑定地址"

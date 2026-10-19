@@ -9,6 +9,14 @@ import type {
   AccessInfo,
   AuditEntry,
   BalanceStats,
+  ConsoleKeyIssued,
+  ConsoleKeyItem,
+  ConsoleKeys,
+  ConsoleModels,
+  ConsoleQuota,
+  ConsoleSession,
+  ConsoleUsage,
+  ConsoleUsageQuery,
   BalanceSyncQuery,
   BalanceSyncStatus,
   BalanceTemplateTestRequest,
@@ -24,7 +32,10 @@ import type {
   GroupCreateRequest,
   GroupCreateResponse,
   GroupKeyIssued,
+  GroupKeyItem,
   GroupKeyResetResponse,
+  GroupModels,
+  GroupModelsPutRequest,
   GroupPatchRequest,
   KeyBalanceUpsertRequest,
   KeyBatchRequest,
@@ -32,6 +43,7 @@ import type {
   KeyCreateRequest,
   KeyListQuery,
   KeyPatchRequest,
+  ChangePasswordRequest,
   LoginRequest,
   LogListQuery,
   ModelListQuery,
@@ -46,6 +58,7 @@ import type {
   ObservabilityPaged,
   ObservabilitySnapshotQuery,
   ObservabilityWindow,
+  PageQuery,
   Paged,
   SessionInfo,
   StatsOverview,
@@ -57,6 +70,7 @@ import type {
   SupplierImportRequest,
   SupplierKeysRequest,
   SupplierRotateKeyRequest,
+  SupplierSessionImportRequest,
   SupplierSubscriptionRow,
   SupplierTestResult,
   Task,
@@ -68,6 +82,9 @@ import type {
   UpstreamPatchRequest,
   UsageQuery,
   UsageStats,
+  UserCreateRequest,
+  UserDto,
+  UserUpdateRequest,
 } from './types';
 
 /**
@@ -87,6 +104,19 @@ export const authApi = {
   logout: () => api.post<void>('/auth/logout'),
   /** 启动时调它决定是否跳登录页。未登录 → 401 UNAUTHORIZED。 */
   session: () => api.get<SessionInfo>('/auth/session'),
+  /**
+   * 改**自己**的口令（v1.15.9 / ADR-0038 决策 3）。消费面与管理面共用这一条
+   * （它改的是会话本人那一行，与角色无关），所以两个 Layout 的账号菜单都挂它。
+   *
+   * 两个调用方必须知道的服务端行为：
+   * - 旧口令不对 → `401 INVALID_CREDENTIALS`；新口令与旧口令相同 → `400`
+   *   （`details.field = 'newPassword'`）；短于 8 位 → `400`（与建号同一把尺子）。
+   * - 成功 → `204`。**其他设备的会话会被踢掉**（改密的语义就是"我怀疑别人有我的凭据"），
+   *   当前会话留着 —— 所以调用方**不要**跳登录页。
+   * - 与登录共用同一个限速闸（5 次/分钟），拿 `429 TOO_MANY_ATTEMPTS` 时
+   *   不是"网络出错"，是"等一分钟"。
+   */
+  changePassword: (body: ChangePasswordRequest) => api.post<void>('/auth/password', body),
 };
 
 // ── §2 上游 ───────────────────────────────────────────────────────────────
@@ -149,13 +179,43 @@ export const groupsApi = {
   create: (body: GroupCreateRequest) => api.post<GroupCreateResponse>('/groups', body),
   update: (id: string, body: GroupPatchRequest) => api.patch<Group>(`/groups/${id}`, body),
   remove: (id: string) => api.del<void>(`/groups/${id}`),
+  /**
+   * 该组的网关 key 列表（**只有掩码**）。逐把管理面唯一的读面 ——
+   * `Group` 对象只给 `gatewayKeyMasked`，拿不到 `:keyId` 就无从重置/吊销（契约 §4）。
+   * 排序固定 `createdAt, id`，所以第一项恒等于组行那个 `gatewayKeyMasked`。
+   */
+  listKeys: (id: string, query: { page?: number; pageSize?: number } = {}) =>
+    api.get<Paged<GroupKeyItem>>(`/groups/${id}/keys`, { query: q(query) }),
   /** 再签发一把，明文仅此一次。 */
   issueKey: (id: string) => api.post<GroupKeyIssued>(`/groups/${id}/keys`),
-  /** 重置：旧 key **立即失效**。 */
+  /**
+   * 重置：**旧 key 立即失效**（同一个事务里删旧插新），明文仅此一次。
+   * 响应里的 `id` 是**新**那把的 id —— 旧 `keyId` 此后查不到。
+   */
   resetKey: (groupId: string, keyId: string) =>
     api.post<GroupKeyResetResponse>(`/groups/${groupId}/keys/${keyId}/reset`),
+  /**
+   * 吊销：**硬删**（行不在即失效），不可恢复，不像上游 key 那样有软删。
+   * `:keyId` 不属于该组时回 `404`（不是 403 —— 不泄漏 key 的存在性）。
+   */
   removeKey: (groupId: string, keyId: string) =>
     api.del<void>(`/groups/${groupId}/keys/${keyId}`),
+  /**
+   * 该组授权的模型（契约 §4「模型授权」，v1.15.8 / ADR-0037）。
+   *
+   * `models` 是可写回的名字列表、`authorizedModels` 是展开行（两个都要：
+   * 前者给多选控件，后者给"这条授权落到哪个上游"）。`models === null` = 不限。
+   */
+  getModels: (id: string) => api.get<GroupModels>(`/groups/${id}/models`),
+  /**
+   * 整组替换授权。**必须带当前 `revision`** —— 组只有一条版本号，改授权会推它 +1，
+   * 拿旧版本号来保存会 409 `REVISION_MISMATCH`（这是对的：别人先改过就该让人知道）。
+   *
+   * 响应额外带 `group`（那一格已是新值、`revision` 已 +1），所以调用方可以就地更新
+   * 表格那一行，**不需要刷新整页**（v1.15.8 的验收之一）。
+   */
+  setModels: (id: string, body: GroupModelsPutRequest) =>
+    api.put<GroupModels & { group: Group }>(`/groups/${id}/models`, body),
 };
 
 // ── §5 模型 ───────────────────────────────────────────────────────────────
@@ -223,11 +283,14 @@ export const observabilityApi = {
     }),
 };
 
-// ── §15 供应商账号面（TierFlow） ───────────────────────────────────────────
+// ── §15 供应商账号面（TierFlow / TokenRhythm） ─────────────────────────────
 //
 // 一个函数对应 §15.2 的一行。11 个端点**全在这里**，因为它们是同一张管理面的两个切面
 // （账号池 / 套餐台账），拆成两个命名空间只会让"这个上游有没有账号面"这个判据
-// 散在两处 —— 而那个判据只有一条：`Upstream.supplier === 'tierflow'`（§15.12 锚 1）。
+// 散在两处 —— 而那个判据只有一条：`supplier ∈ SUPPLIER_ACCOUNT_KINDS`（§15.12 锚 1），
+// 与具体哪家供应商无关：路由端点是同一批，差异全在服务端按 `supplier` 列选驱动器
+// （ADR-0018 决策 0）。TokenRhythm 没有套餐概念：`subscriptions` 列表恒空、
+// `rotateKey` 恒 422 —— 这两个入口的 UI 展示由调用方按 kind 决定。
 
 export const supplierAccountsApi = {
   list: (query: SupplierAccountListQuery = {}) =>
@@ -240,11 +303,17 @@ export const supplierAccountsApi = {
   subscriptions: (query: { upstreamId?: string; page?: number; pageSize?: number } = {}) =>
     api.get<Paged<SupplierSubscriptionRow>>('/supplier-accounts/subscriptions', { query: q(query) }),
   /**
-   * 批量导入（`text` = 「手机号,密码」行文本）。**只收密码型凭据** ——
-   * 会话型凭据不走 HTTP（§15.9），所以这里没有第二个入口。
+   * 批量导入（`text` = 「手机号,密码」行文本）。**只收密码型凭据**。
    * 返回 `202 {taskId}`：成了几行要等任务跑完，靠 §15.3 的逐行结果说话。
    */
   import: (body: SupplierImportRequest) => api.post<TaskAccepted>('/supplier-accounts/import', body),
+  /**
+   * 粘贴 Cookie 导入（v1.16.4，仅 TokenRhythm）。`text` 每行一枚 `tr_session`；
+   * 服务端逐行问上游身份后加密入池，逐行结果 `action="import"`。
+   * 这是唯一把会话明文送进管理面的入口 —— 值不落前端存储、不回显。
+   */
+  importSessions: (body: SupplierSessionImportRequest) =>
+    api.post<TaskAccepted>('/supplier-accounts/import-sessions', body),
   /** 刷余额。`ids` 省略 = 该上游全部账号（**不按状态筛**，会话过期的号正是最该刷的）。 */
   refresh: (body: SupplierBatchRequest) => api.post<TaskAccepted>('/supplier-accounts/refresh', body),
   /** 批量新建 key 并入池。上游明文**不经浏览器**，响应与任务结果只回 `keyId` + `keyMasked`。 */
@@ -341,4 +410,100 @@ export const accessInfoApi = {
   /** 读面传 `signal` 以支持卸载/重读时 abort 掉在途请求（同 `useResource` 的其它读面）。 */
   get: (options: { signal?: AbortSignal } = {}) =>
     api.get<AccessInfo>('/access-info', options),
+};
+
+// ── §19 消费面 `/api/console/*`（ADR-0034） ────────────────────────────────
+
+/**
+ * 消费面（`role=user`）的端点。**一个函数对应契约 §19 的一行**，
+ * 与上面管理面各命名空间同一条纪律：只拼路径、拼 query、给返回类型。
+ *
+ * 四处刻意的选择：
+ * 1. **读面全是 `GET`；写面只有 key 自助这一组**（v1.15.9 / ADR-0038）。
+ *    v1.15.0–v1.15.8 这里写着"全是 GET，key 签发明确不做"（ADR-0034 决策 3）；
+ *    ADR-0038 订正了那条 —— 因为"没有自助"的真实代价是**整组的 key 生命周期
+ *    卡在一个管理员身上**。护栏是下放的代价：服务端把每个组的持数钉在 10 把
+ *    （`keyLimit`），且写方法照旧过 CSRF。
+ *    这个命名空间里**仍然没有**"显示明文"的方法 —— 明文只在签发那一次的 201 里
+ *    出现（§4 铁律 / ADR-0006），没有任何取回路径。
+ * 2. **`usage` 不提供 `groupId` 参数**。归属恒来自服务端会话（§19.4：`?groupId=`
+ *    一律忽略）。在这里暴露一个会被静默忽略的参数，等于教调用方一个假规律。
+ *    同理，key 的三个写方法的响应/请求里也**没有** `groupId` —— 写入的组恒是
+ *    会话那个组，带了也会被 schema 剥掉（剥掉之后请求照常成功，那比报错更坏）。
+ * 3. **不新开 access-info 别名**。接入 URL 的三个字段（`publicHost` / 端口）
+ *    只有 §18 那一个端点有，v1.15.1 裁定放行 `role=user` 读它；新开一个
+ *    `/api/console/access-info` 就是两份口径（ADR-0033 决策 2 同理由）。
+ *    所以前端拼 URL 时调的是 `accessInfoApi.get()`，不是这里的方法。
+ * 4. **删除/改名没有"先查一下这是不是我的"这一步**。服务端越权判据是
+ *    `WHERE id = ? AND group_id = ?` 命中不到就 404（不是 403 —— 403 会告诉调用方
+ *    "这个 keyId 存在、只是不属于你"，那正是枚举别人 key 的反馈信号）。
+ *    前端因此**不预判**，直接调，按 404 显示"这把 key 不存在"。
+ */
+export const consoleApi = {
+  /** §19.2。`role=user` 启动时读它，决定三个列表页显示数据还是"未分配到组"。 */
+  session: () => api.get<ConsoleSession>('/console/session'),
+  /**
+   * §19.3。本组 key 的**掩码**列表；`assigned: false` = 还没被分配到组。
+   * 响应里的 `keyLimit` 是自助签发的把数上限（服务端的事实，前端不写死）。
+   */
+  keys: () => api.get<ConsoleKeys>('/console/keys'),
+  /**
+   * §19.3b 自助签发（v1.15.9）。**明文只在这一次的 201 响应里**，此后没有任何
+   * 取回路径 —— 调用方必须当场展示并让用户抄走（`ConsoleKeyRevealModal`），
+   * 不许缓存、不许写 localStorage。
+   *
+   * `label` 可省 = 不起名。空串/纯空白由服务端归一化成 `null`。
+   * 这个组的持数已达 `keyLimit` 时 → `422 UNPROCESSABLE`（请求本身合法，
+   * 挡下它的是组的现状），未分配到组时 → `400`（`details.field = 'groupId'`）。
+   */
+  issueKey: (body: { label?: string } = {}) => api.post<ConsoleKeyIssued>('/console/keys', body),
+  /** §19.3b 改名。`label: null` = 清掉名字。跨组 → 404。响应是这条 key 的新形状。 */
+  renameKey: (keyId: string, body: { label: string | null }) =>
+    api.patch<ConsoleKeyItem>(`/console/keys/${encodeURIComponent(keyId)}`, body),
+  /**
+   * §19.3b 吊销。**硬删**（行不在即失效，没有回收站），成功 204。
+   * 这不是"暂时停用" —— 这个版本没有 `enabled` 开关（v1.15.10 backlog）。
+   */
+  removeKey: (keyId: string) => api.del<void>(`/console/keys/${encodeURIComponent(keyId)}`),
+  /** §19.3c 本组额度。逐格透传 §4 `GroupDto`，消费面不新造第二份计算。 */
+  quota: () => api.get<ConsoleQuota>('/console/quota'),
+  /** §19.4。响应体与 §6 `/api/stats/usage` 逐字相同，只恒按本组收窄。 */
+  usage: (query: ConsoleUsageQuery) => api.get<ConsoleUsage>('/console/usage', { query: q(query) }),
+  /** §19.6。站内已启用模型；判据与 §10 `/v1/models` 同一份。 */
+  models: () => api.get<ConsoleModels>('/console/models'),
+};
+
+// ── §19.7 管理面用户 ──────────────────────────────────────────────────────
+
+/**
+ * 管理面用户端点。**`role=user` 打这些一律 403**（§19.1 授面表：只有
+ * `/api/console/**` 与 §18 那一个 access-info 是例外）—— 这不是前端判断，
+ * 是服务端闸门。前端也**不该**在 `ConsoleLayout` 里露出这一页的入口。
+ *
+ * 三条纪律，全部来自契约 §19.7 而不是前端偏好：
+ * 1. **没有 `update` 方法**。改角色 = 删了重建（仓储层刻意不提供 `PATCH {role}`：
+ *    那会让"把自己降级"变成一次普通请求，而降完就改不回来了）。归属组与显示名
+ *    同理**没有单独端点**（`updateUser` 在仓储层有，但没挂路由），所以这里
+ *    只有 list / create / remove 三个 —— 少一个方法就是一个少一类越权面。
+ * 2. **`remove` 不接受任何"强制"参数**。删自己 / 删最后一个 admin 由服务端判
+ *    （`400 INVALID_PARAM`），前端只是把这句话**原样显示**，不自己先判一遍 ——
+ *    前端先判会出现"前端说能删、服务端说不能"，而那个准是服务端对。
+ * 3. **没有 `password` 相关方法**。〔v1.15.9 订正：这句话当时是事实，现在要分清**改谁的**。
+ *    `POST /api/auth/password`（§1，挂在 `authApi`）改的是**会话本人**那一行 ——
+ *    它给所有人开着，包括普通用户。而本命名空间里**仍然**没有"重置别人的口令"
+ *    这个能力：管理员改不了任何别人的密码，所以用户页上依然不做"重置密码"按钮。
+ *    两个都是刻意留着的：前者的缺失会让"忘了密码"只能删号重建，
+ *    后者的存在会让"一个管理员能静默接管任何账号"。〕
+ */
+export const usersApi = {
+  list: (query: PageQuery = {}) => api.get<Paged<UserDto>>('/users', { query: q(query) }),
+  /** 建号。响应只回 DTO（**不含口令散列**）；明文由调用方当场交给用户。 */
+  create: (body: UserCreateRequest) => api.post<UserDto>('/users', body),
+  /**
+   * 改归属组（v1.15.6 / §19.7）。**唯一的改用户路径** —— 改角色、改口令都没有端点，
+   * 只能删了重建。`groupId: null` = 退回未分配，是合法值而不是"清空"以外的意思。
+   */
+  update: (username: string, body: UserUpdateRequest) =>
+    api.patch<UserDto>(`/users/${encodeURIComponent(username)}`, body),
+  remove: (username: string) => api.del<void>(`/users/${encodeURIComponent(username)}`),
 };

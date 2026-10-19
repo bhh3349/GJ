@@ -28,6 +28,26 @@ export interface AppConfig {
    */
   readonlyToken: string | null;
   logRetentionDays: number;
+  /**
+   * 审计日志保留天数（默认 180）。**不并入 `logRetentionDays`** —— 那是 `usage_logs` 的口径
+   * （契约 §6，30 天），而审计是**安全证据**：§6 的 retention 是从"用量明细有用期"出发的，
+   * 拿它去裁审计等于让"三个月前谁改过配置"比"三天前跑过多少请求"更早消失。
+   * 180 天的理由：它比"一次安全事件的追溯期"长，又不会让库永远背着历史。
+   */
+  auditRetentionDays: number;
+  /**
+   * 历史任务保留天数（默认 7）。`tasks` 的读者只有两个：轮询中的前端
+   * （`listLiveTasks` 只认 `queued/running` + 60s 内结束的）与事后查 `GET /api/tasks/:id`。
+   * 两者都不需要一周以前的作业记录，而 `result` 那列是 JSON ——
+   * 2000 行粘贴导入的 result ≈ 75KB（契约 §15.3），一天几十次批量就是几 MB。
+   */
+  taskRetentionDays: number;
+  /**
+   * `change_log` 的保留行数（默认 10000）。**行数而不是天数**：它是广播信道、不是历史
+   * （`pruneChanges` 头注原话），判据是"消费者的 seq 追到哪了"而不是"这条广播多老了"。
+   * 取 10000 的依据见 `src/db/repo/change-log.ts` 的裁剪安全分析。
+   */
+  changeLogKeepRows: number;
   /** 健康快照保留天数；快照量级远小于日志（60s 一条），默认给 90 天 */
   healthSnapshotRetentionDays: number;
   /**
@@ -78,6 +98,24 @@ export interface AppConfig {
    * 也不 import `src/db`（AGENTS.md §8）—— 它收的是**已解析的目录字符串或 null**。
    */
   egressHeartbeatInboxDir: string | null;
+  /**
+   * 出口探活的**回显端点**（ADR-0033 / 契约 §16.7）。**空 / 未设 = `null` = 用缺省值**
+   * `EGRESS_ECHO_URL_DEFAULT`（`src/egress/port.ts`，唯一字面量来源）。
+   *
+   * 为什么要有这个旋钮：回显端点被墙/被 DNS 污染时，`/api/egress/:id/test` 会对一台
+   * **完全健康**的代理回 `ok:false` 并把它写进 `egress_proxies.last_test_ok` ——
+   * 面板上唯一那个"我的出口通不通"的信号在最坏情况下恒假，而照着它删代理的人
+   * 删掉的是能用的机器。心跳生产者入口 B 同源：端点不可达 ⇒ 每拍都是失败证据 ⇒
+   * 累计到 `HEARTBEAT_EVICT_AFTER_FAILURES`(3) 就把好节点**静默摘除**。
+   * 两个消费者必须能指向同一个新端点，所以值可配；**缺省不变**（换缺省会静默改变
+   * 所有现存部署的探测语义，理由见 `EGRESS_ECHO_URL_DEFAULT` 头注）。
+   *
+   * 与 `egressHeartbeatInboxDir` 同款空串纪律：`EGRESS_ECHO_URL=` 是部署脚本里
+   * 最常见的"这行先留着"写法。这里**不做 URL 合法性校验** —— 配置层只负责取值，
+   * 语法对不对由运行时暴露（一个连不上的端点就是一次失败的探测，那正是探测的职责），
+   * 而"拒绝启动"会让一个填错别名的用户在启动阶段看到一句与网络无关的报错。
+   */
+  egressEchoUrl: string | null;
   /**
    * 能力探测（契约 §5 / ADR-0024）自动补探总开关。默认开（Bo 拍板"默认开"）；
    * `MODEL_PROBE_ENABLED=false` 装配侧全局关。请求体 `{probe:false}` 是单次调用的第二道闸。
@@ -271,6 +309,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     adminToken: adminToken === '' ? null : adminToken,
     readonlyToken: readonlyToken === '' ? null : readonlyToken,
     logRetentionDays: intFromEnv(env, 'LOG_RETENTION_DAYS', 30),
+    auditRetentionDays: positiveIntFromEnv(env, 'AUDIT_RETENTION_DAYS', 180),
+    taskRetentionDays: positiveIntFromEnv(env, 'TASK_RETENTION_DAYS', 7),
+    changeLogKeepRows: positiveIntFromEnv(env, 'CHANGE_LOG_KEEP_ROWS', 10_000),
     healthSnapshotRetentionDays: positiveIntFromEnv(env, 'HEALTH_SNAPSHOT_RETENTION_DAYS', 90),
     // 0 是**显式含义**（关闭自动同步），所以走非负版本而不是 positive 版本
     balanceSyncMinutes: nonNegativeIntFromEnv(env, 'BALANCE_SYNC_MINUTES', 15),
@@ -282,6 +323,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     // "这一行先留着"写法，把它当成一个叫空字符串的模型名会让助手静默走 503。
     assistantModel: (env['ASSISTANT_MODEL'] ?? '').trim() === '' ? null : (env['ASSISTANT_MODEL'] ?? '').trim(),
     egressHeartbeatInboxDir: (env['EGRESS_HEARTBEAT_INBOX_DIR'] ?? '').trim() === '' ? null : (env['EGRESS_HEARTBEAT_INBOX_DIR'] ?? '').trim(),
+    egressEchoUrl: (env['EGRESS_ECHO_URL'] ?? '').trim() === '' ? null : (env['EGRESS_ECHO_URL'] ?? '').trim(),
     modelProbeEnabled: boolFromEnv(env, 'MODEL_PROBE_ENABLED', true),
     modelProbeMaxModels: positiveIntFromEnv(env, 'MODEL_PROBE_MAX_MODELS', 10),
     // 空串按"未配置 / 探测"处理（与 ASSISTANT_MODEL / EGRESS_HEARTBEAT_INBOX_DIR 同款写法：

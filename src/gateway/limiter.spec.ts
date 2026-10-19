@@ -22,7 +22,7 @@ beforeEach(() => {
 });
 
 function group(over: Partial<GroupContext> = {}): GroupContext {
-  return { groupId: 'g1', name: '测试组', enabled: true, rpm: null, tpm: null, dailyQuota: null, ...over };
+  return { groupId: 'g1', name: '测试组', enabled: true, rpm: null, tpm: null, dailyQuota: null, authorizedModels: null, ...over };
 }
 
 describe('RPM', () => {

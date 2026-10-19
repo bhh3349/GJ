@@ -11,6 +11,7 @@ import { openDatabase, type Db } from '../../db/database.js';
 import { buildApp } from '../app.js';
 import { bootstrapAdmin } from '../auth.js';
 import type { EgressProxyDto } from '../../db/repo/egress.js';
+import { EGRESS_ECHO_URL_DEFAULT } from '../../egress/port.js';
 
 const ADMIN_USER = 'admin';
 const ADMIN_PASS = 'egress-route-pass-1';
@@ -58,12 +59,16 @@ function makeConfig(dbPath: string, over: Partial<AppConfig> = {}): AppConfig {
     adminToken: null,
     readonlyToken: null,
     logRetentionDays: 30,
+    auditRetentionDays: 180,
+    taskRetentionDays: 7,
+    changeLogKeepRows: 10_000,
     healthSnapshotRetentionDays: 90,
     maxAttempts: 3,
     maxConcurrencyPerKey: 4,
     cooldownLadderSeconds: [0, 60, 300, 900, 1800],
     assistantModel: null,
     egressHeartbeatInboxDir: null,
+    egressEchoUrl: null,
     balanceSyncMinutes: 0,
     balanceSnapshotRetentionDays: 90,
     // 能力探测（契约 §5 / ADR-0024）测试取值：与装配默认逐字一致（本套用例不触发补探）
@@ -76,14 +81,14 @@ function makeConfig(dbPath: string, over: Partial<AppConfig> = {}): AppConfig {
   };
 }
 
-export async function setup(probeFetch?: typeof fetch): Promise<Harness> {
+export async function setup(probeFetch?: typeof fetch, over: Partial<AppConfig> = {}): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'egress-route-'));
   dirs.push(dir);
   const dbPath = join(dir, 'gateway.db');
   const db = openDatabase({ path: dbPath });
   const app = buildApp({
     db,
-    config: makeConfig(dbPath),
+    config: makeConfig(dbPath, over),
     balanceSync: false,
     healthSnapshots: false,
     ...(probeFetch === undefined ? {} : { egressProbeFetch: probeFetch }),
@@ -332,5 +337,46 @@ describe('/api/egress/:id/test', () => {
     expect((testRes.body as { latencyMs: number }).latencyMs).toBeGreaterThanOrEqual(0);
     expect(egressRow(h.db, id)).toMatchObject({ last_test_ok: 1 });
     expect((egressRow(h.db, id)['last_test_at'] as string).endsWith('Z')).toBe(true);
+  });
+
+  /**
+   * ADR-0033：回显端点可配。**缺省不变**这条才是主线 ——
+   * 没配 `EGRESS_ECHO_URL` 时必须逐字节走回 `EGRESS_ECHO_URL_DEFAULT`，
+   * 否则"加一个旋钮"就顺手改掉了所有现存部署的探测语义。
+   */
+  it('未配 EGRESS_ECHO_URL：打的是端口层缺省端点（不是空串、不是 null）', async () => {
+    const seen: string[] = [];
+    const probe: typeof fetch = async (input) => {
+      seen.push(String(input));
+      return new Response('203.0.113.7', { status: 200 });
+    };
+    const h = await setup(probe);
+    const created = await post(h, '/api/egress', { name: 'hk-1', url: 'https://proxy.example:8443' });
+    const id = (created.body as { id: string }).id;
+    const res = await post(h, `/api/egress/${id}/test`);
+    expect(res.status).toBe(200);
+    expect((res.body as { ok: boolean }).ok).toBe(true);
+    expect(seen).toEqual([EGRESS_ECHO_URL_DEFAULT]);
+  });
+
+  /**
+   * ADR-0033 的**动机**那条判据：端点被墙时，一台健康的代理不该被判成失败并写进库。
+   * 换成国内可达的回显端点后 `/test` 必须打**新**端点 —— 否则旋钮配了却照旧打被墙的，
+   * 症状是"我明明改了 .env，面板还是说不通"。
+   */
+  it('配了 EGRESS_ECHO_URL：/test 打配置值，缺省端点一次都不碰', async () => {
+    const seen: string[] = [];
+    const probe: typeof fetch = async (input) => {
+      seen.push(String(input));
+      return new Response('203.0.113.7', { status: 200 });
+    };
+    const h = await setup(probe, { egressEchoUrl: 'https://myip.example.com/ip' });
+    const created = await post(h, '/api/egress', { name: 'hk-1', url: 'https://proxy.example:8443' });
+    const id = (created.body as { id: string }).id;
+    const res = await post(h, `/api/egress/${id}/test`);
+    expect(res.status).toBe(200);
+    expect((res.body as { ok: boolean }).ok).toBe(true);
+    expect(seen).toEqual(['https://myip.example.com/ip']);
+    expect(seen).not.toContain(EGRESS_ECHO_URL_DEFAULT);
   });
 });

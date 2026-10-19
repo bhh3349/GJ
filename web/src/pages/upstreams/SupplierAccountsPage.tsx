@@ -1,9 +1,13 @@
 /**
  * 供应商账号池 —— `/upstreams/:id/accounts`（契约 §15.6 / §15.8 第 6 问 / §14.7 / §15.12）。
  *
- * **进门先看一个字段**：`upstream.supplier === 'tierflow'`（§15.12 锚 1）。
+ * **进门先看一个字段**：`hasSupplierAccountPanel(upstream.supplier)`（§15.12 锚 1）。
  * **不 parse `baseUrl`、不查域名、不猜** —— §15.6 写死了理由：猜错会静默渲染出一个功能全 422 的分区。
  * 判据不成立时这一页只留一行说明并指回上游管理，**账号 UI 一个都不渲染**。
+ *
+ * 进门之后**每个入口再问一次「这家有没有这个概念」**（`supplierCapabilities`，§15.14 的镜像）：
+ * TierFlow 五个批量入口俱全；TokenRhythm 没有套餐与额度 ——「套餐台账」页签与
+ * 「重置套餐 key」按钮不画（画了也是恒 422 / 恒空表），建 key 表单不给额度与白名单字段。
  *
  * 三个 tab 是三个**数据来源完全不同**的切面，混着看必然读错，所以分开：
  *
@@ -83,6 +87,8 @@ import { describeError, isApiError } from '@/api/http';
 import { useAction, useResource } from '@/api/hooks';
 import { useTaskPolling } from '@/api/useTaskPolling';
 import {
+  hasSupplierAccountPanel,
+  supplierCapabilities,
   PAGE_SIZE_DEFAULT,
   PAGE_SIZE_MAX,
   SUPPLIER_STATUS_TEXT,
@@ -146,6 +152,11 @@ interface BatchActionSpec {
   submit: (body: SupplierBatchRequest) => Promise<TaskAccepted>;
   /** §14.7 的 `outcome` 槽位：等待说明的尾部。重置的代价（旧 key 立即失效）写在这里。 */
   outcome?: string | undefined;
+  /**
+   * 只对**有套餐概念**的供应商画这个入口（§15.14：TokenRhythm 的 rotate 端点是入口 422）。
+   * 缺省 `false` = 所有账号面供应商都有。
+   */
+  requiresPlans?: boolean;
 }
 
 const BATCH_ACTIONS: readonly BatchActionSpec[] = [
@@ -164,6 +175,7 @@ const BATCH_ACTIONS: readonly BatchActionSpec[] = [
     label: '批量重置套餐 key',
     submit: (body) => supplierAccountsApi.rotateKey(body),
     outcome: '执行后等终态，逐行结论见明细浮层；旧套餐 key 会立即失效。',
+    requiresPlans: true,
   },
 ];
 
@@ -523,6 +535,14 @@ export default function SupplierAccountsPage() {
     task.clear();
   };
 
+  const supplier = upstream.data?.supplier ?? null;
+  /**
+   * 能力位（§15.14 前端镜像）。`null` = 通用上游 —— 下面那个分支根本走不到，
+   * 但保持 `null` 而不是给个全 false 的默认值：真漏到这里时 UI 会少画，
+   * 而不会假装能建带额度的 key、也不会画一张永远空着的套餐表。
+   */
+  const caps = supplierCapabilities(supplier);
+
   const columns: ColumnsType<SupplierAccount> = [
     {
       title: (
@@ -823,7 +843,16 @@ export default function SupplierAccountsPage() {
     },
   ];
 
-  const supplier = upstream.data?.supplier ?? null;
+  /**
+   * 没有套餐概念的供应商（§15.14 TokenRhythm）**不画「套餐余额」列**：
+   * 那一格恒是「—」（没有套餐 ≠ 余额 0），占着 132px 只会让人以为"套餐没同步上"。
+   * 过滤按 `key` 做而不是在数组里加条件展开 —— 列的**定义**只有一份，
+   * 显不显示是这一层的事，两者分开才不会出现"某个供应商少了一列，定义也找不到了"。
+   */
+  const visibleColumns =
+    caps !== null && caps.plans
+      ? columns
+      : columns.filter((column) => column.key !== 'subscriptionBalance');
 
   if (upstreamId === undefined) {
     return (
@@ -866,7 +895,7 @@ export default function SupplierAccountsPage() {
           variant="page"
           title="上游信息加载失败"
         />
-      ) : supplier !== 'tierflow' ? (
+      ) : !hasSupplierAccountPanel(supplier) ? (
         /* 判据是**一个字段**（§15.12 锚 1）。这里不渲染任何账号 UI —— 画一套不存在的账号面更坏。 */
         <Alert
           type="info"
@@ -951,15 +980,28 @@ export default function SupplierAccountsPage() {
                   </div>
 
                   <Space wrap size={tokens.space.sm}>
-                    <Button
-                      size="small"
-                      icon={<PlusOutlined />}
-                      onClick={() => {
-                        setImportOpen(true);
-                      }}
+                    <Tooltip
+                      title={
+                        caps?.sessionImport === true
+                          ? '粘贴 Cookie 导入：每行一枚 tr_session。值只用于本次导入并加密落库，不回显、不进日志。'
+                          : caps?.passwordLogin === false
+                            ? '该供应商只有会话鉴权，且没有可用的 Cookie 导入入口；请在操作员本机执行离线会话导入（支持 SUPPLIER_SESSION_BATCH_FILE 批量文件）。'
+                            : undefined
+                      }
                     >
-                      导入账号
-                    </Button>
+                      <span style={{ display: 'inline-block' }}>
+                        <Button
+                          size="small"
+                          icon={<PlusOutlined />}
+                          disabled={caps?.passwordLogin === false && caps?.sessionImport !== true}
+                          onClick={() => {
+                            setImportOpen(true);
+                          }}
+                        >
+                          {caps?.sessionImport === true ? '导入 Cookie' : '导入账号'}
+                        </Button>
+                      </span>
+                    </Tooltip>
                     <Tooltip title="新建的 key 会进入账号名下的 key 池；套餐是上游的事实，只能同步，不能新建。">
                       <Button
                         size="small"
@@ -972,19 +1014,26 @@ export default function SupplierAccountsPage() {
                         新建 key
                       </Button>
                     </Tooltip>
-                    {BATCH_ACTIONS.map((spec) => (
-                      <Button
-                        key={spec.key}
-                        size="small"
-                        icon={<SyncOutlined />}
-                        loading={isPending(spec.key)}
-                        onClick={() => {
-                          runBatch(spec);
-                        }}
-                      >
-                        {spec.label.replace('批量', '')}
-                      </Button>
-                    ))}
+                    {BATCH_ACTIONS.map((spec) =>
+                      /*
+                       * 能力位先问一次：没有套餐概念的供应商不画 rotate（画一个恒 422 的按钮
+                       * 等于把服务端的拒绝做成一个功能）。判断写在渲染处而不是把 BATCH_ACTIONS
+                       * 变成每渲染一次过滤一遍的工厂 —— 这张表是静态常量，能力是上游行上的事实。
+                       */
+                      spec.requiresPlans && caps !== null && !caps.plans ? null : (
+                        <Button
+                          key={spec.key}
+                          size="small"
+                          icon={<SyncOutlined />}
+                          loading={isPending(spec.key)}
+                          onClick={() => {
+                            runBatch(spec);
+                          }}
+                        >
+                          {spec.label.replace('批量', '')}
+                        </Button>
+                      ),
+                    )}
                     <Tooltip title="对账表，不分页导出全部账号（分页导出拿到的「账号总数」取决于点第几页，那不是对账表）。表里不含密码、不含会话、不含任何 key 明文或掩码，所以它只能用来对账，不能用来重建账号。">
                       <Button
                         size="small"
@@ -1025,7 +1074,7 @@ export default function SupplierAccountsPage() {
                     <Table<SupplierAccount>
                       rowKey="id"
                       size="small"
-                      columns={columns}
+                      columns={visibleColumns}
                       dataSource={localRows ?? accounts.data?.items ?? []}
                       loading={accounts.refreshing}
                       scroll={{ x: 1686 }}
@@ -1074,27 +1123,32 @@ export default function SupplierAccountsPage() {
                               </Button>
                               按上游筛。
                             </Text>
-                            <div>
-                              <Tooltip title="套餐余额 = 本账号名下各套餐「总额 − 已用」的合计（¥）。它不是账号钱包，也不是 key 的余额，三者不相加。">
-                                <Text style={{ fontSize: 12, fontWeight: 600 }}>
-                                  {`套餐 ${formatCount(row.subscriptions.length)} 个${subscriptionRemainingTail(row)}`}
-                                </Text>
-                              </Tooltip>
-                            </div>
-                            <Table<SupplierSubscription>
-                              rowKey="subNo"
-                              size="small"
-                              columns={SUBSCRIPTION_COLUMNS}
-                              dataSource={row.subscriptions}
-                              pagination={false}
-                              locale={{
-                                emptyText: (
-                                  <Text type="secondary" style={{ fontSize: 12 }}>
-                                    这个账号名下没有套餐。
+                            {/* 展开行里的套餐块同样问能力位：没有套餐概念的供应商整块不画（§15.14）。 */}
+                            {caps !== null && caps.plans ? (
+                              <div>
+                                <Tooltip title="套餐余额 = 本账号名下各套餐「总额 − 已用」的合计（¥）。它不是账号钱包，也不是 key 的余额，三者不相加。">
+                                  <Text style={{ fontSize: 12, fontWeight: 600 }}>
+                                    {`套餐 ${formatCount(row.subscriptions.length)} 个${subscriptionRemainingTail(row)}`}
                                   </Text>
-                                ),
-                              }}
-                            />
+                                </Tooltip>
+                              </div>
+                            ) : null}
+                            {caps !== null && caps.plans ? (
+                              <Table<SupplierSubscription>
+                                rowKey="subNo"
+                                size="small"
+                                columns={SUBSCRIPTION_COLUMNS}
+                                dataSource={row.subscriptions}
+                                pagination={false}
+                                locale={{
+                                  emptyText: (
+                                    <Text type="secondary" style={{ fontSize: 12 }}>
+                                      这个账号名下没有套餐。
+                                    </Text>
+                                  ),
+                                }}
+                              />
+                            ) : null}
                           </div>
                         ),
                       }}
@@ -1129,7 +1183,7 @@ export default function SupplierAccountsPage() {
                             ? '整池快照里没有命中这一条的账号 —— 上面那条计数是刚才那一刻的，刷新后会变。'
                             : q || status !== undefined
                               ? '当前筛选条件下没有账号。'
-                              : '这个上游还没有账号。用「导入账号」粘贴「手机号,密码」清单开始。'
+                              : '这个上游还没有账号。用「导入账号」粘贴「账号,密码」清单开始。'
                         }
                           />
                         ),
@@ -1139,11 +1193,20 @@ export default function SupplierAccountsPage() {
                 </div>
               ),
             },
-            {
-              key: 'subscriptions',
-              label: '套餐台账',
-              children: <SupplierSubscriptionsTable upstreamId={upstreamId} identifierOf={identifierOf} />,
-            },
+            /*
+             * 套餐台账只对有套餐概念的供应商画（§15.14）。TokenRhythm 的订阅腿是
+             * 零请求的空数组 —— 表格恒空、还白占一个页签；而「这家长得什么样」
+             * 这件事放这里说一句，比在页签里画一张永远空着的表诚实。
+             */
+            ...(caps !== null && caps.plans
+              ? [
+                  {
+                    key: 'subscriptions',
+                    label: '套餐台账',
+                    children: <SupplierSubscriptionsTable upstreamId={upstreamId} identifierOf={identifierOf} />,
+                  },
+                ]
+              : []),
             {
               key: 'egress',
               label: '出口池',
@@ -1211,9 +1274,9 @@ export default function SupplierAccountsPage() {
               message="保存后会发生什么"
               description={
                 <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-                  ① 网关会按这个账号名下**每一把 key** 重建出口归属（重建会清掉 token-plan key 的
-                  乐观扣减，直到下次同步回填）；② 绑定只决定「用哪个出口的预算桶」，**流量真从那个 IP
-                  出去需要装配层接线**，尚未落地；③ 选同一个出口再保存 = 空操作，服务端不会推版本。
+                  ① 网关会按这个账号名下<Text strong style={{ color: tokens.color.textSecondary }}>每一把 key</Text>重建出口归属（重建会清掉 token-plan key 的
+                  乐观扣减，直到下次同步回填）；② 绑定只决定「用哪个出口的预算桶」，<Text strong style={{ color: tokens.color.textSecondary }}>流量真从那个 IP
+                  出去需要装配层接线</Text>，尚未落地；③ 选同一个出口再保存 = 空操作，服务端不会推版本。
                 </Text>
               }
             />
@@ -1229,6 +1292,7 @@ export default function SupplierAccountsPage() {
       <SupplierImportModal
         open={importOpen}
         upstreamId={upstreamId}
+        supplier={supplier}
         onClose={() => {
           setImportOpen(false);
         }}
@@ -1243,6 +1307,7 @@ export default function SupplierAccountsPage() {
         open={keysOpen}
         upstreamId={upstreamId}
         ids={ids}
+        supplier={supplier}
         onClose={() => {
           setKeysOpen(false);
         }}
@@ -1276,6 +1341,7 @@ export default function SupplierAccountsPage() {
           setBatchOpen(true);
           task.start(taskId);
         }}
+        supplier={supplier}
       />
     </>
   );

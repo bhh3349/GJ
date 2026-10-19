@@ -183,12 +183,16 @@ function makeConfig(dbPath: string, over: Partial<AppConfig> = {}): AppConfig {
     adminToken: null,
     readonlyToken: null,
     logRetentionDays: 30,
+    auditRetentionDays: 180,
+    taskRetentionDays: 7,
+    changeLogKeepRows: 10_000,
     healthSnapshotRetentionDays: 90,
     maxAttempts: 3,
     maxConcurrencyPerKey: 4,
     cooldownLadderSeconds: [0, 60, 300, 900, 1800],
     assistantModel: null,
     egressHeartbeatInboxDir: null,
+    egressEchoUrl: null,
     balanceSyncMinutes: 0,
     balanceSnapshotRetentionDays: 90,
     // 能力探测（契约 §5 / ADR-0024）测试取值：与装配默认逐字一致（本套用例不触发补探）
@@ -270,6 +274,25 @@ function seedPasswordAccount(
         : encodeSessionBlob(over.session, '42', MASTER_KEY),
   });
   return id;
+}
+
+/**
+ * 把账号密码密文的**最后一个字节**翻掉。
+ *
+ * 用途只有一个：造出"`work()` 整支 reject"这一种任务形态。翻的是尾巴而不是整块 ——
+ * 版本字节在头部，翻头部会得到"密文版本不支持"（一条友好的错误），
+ * 而这里要的是 aes-256-gcm 的 AUTH_TAG 不认（`decryptSecret` 的 `decipher.final()` 抛错）。
+ * 现实里与之同形的事只有一件：`MASTER_KEY` 被换过，而账号是旧密钥写的。
+ */
+function tamperCipher(db: Db, accountId: string): void {
+  const row = db
+    .prepare('SELECT encrypted_password FROM supplier_accounts WHERE id = ?')
+    .get(accountId) as { encrypted_password: Buffer | null };
+  const blob = row.encrypted_password;
+  if (blob === null) throw new Error('夹具错误：这个账号没有密码密文可翻');
+  const buf = Buffer.from(blob);
+  buf.writeUInt8(buf.readUInt8(buf.length - 1) ^ 0xff, buf.length - 1);
+  db.prepare('UPDATE supplier_accounts SET encrypted_password = ? WHERE id = ?').run(buf, accountId);
 }
 
 /** 种一个**只有会话**的账号：没有存档密码，重登无从谈起（§15.9 的已知代价）。 */
@@ -753,6 +776,91 @@ describe('POST /keys', () => {
     // 上游侧 key 名不含凭据（§15.2）。
     expect(String(row['label'])).not.toContain(SECRET_A);
   });
+
+  // 审计项 D 的服务侧那一半：`createToken` 曾写死 500000 换算 `quotaCents`。
+  // 站点改了比值时 `unlimited:false` 建出来的 key 额度成比例地错，且**不报错**。
+  // 正解不是"建 key 时多打一发 /api/user/self"（§15.5 钉死建 key = 2 次请求），
+  // 而是让 refresh / keys/sync / 自测那三条**已经在打** `/api/user/self` 的腿顺手记下来。
+  it('固定额度建 key：用这个账号 refresh 时读到的站点比值换算，不写死 500000', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    // 站点自己的比值是 250000/元（不是文档默认的 500000）。
+    h.upstream.on('/api/user/self', () => ok({ quota: 2168881, id: '42', quota_per_unit: 250000 }));
+
+    // 先刷一次：这一发 /api/user/self 顺手把比值记在账号上。
+    await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id, ids: [accountId] });
+    expect(accountRow(h.db, accountId)['quota_per_unit']).toBe(250000);
+    expect(accountRow(h.db, accountId)['quota_read_at']).toBeTruthy();
+
+    // 建一把 1000 分（10 元）的 key。按站点比例 → 2500000 quota。
+    await runBatch(h, '/api/supplier-accounts/keys', {
+      upstreamId: id,
+      ids: [accountId],
+      count: 1,
+      unlimited: false,
+      quotaCents: 1000,
+    });
+
+    const create = h.upstream.calls.find((c) => c.path === '/api/token/' && c.method === 'POST');
+    const body = JSON.parse(String(create?.body)) as Record<string, unknown>;
+    expect(body['unlimited_quota']).toBe(false);
+    expect(body['remain_quota']).toBe(2_500_000);
+    // 写死的那一版会发 5000000（= 20 元）：凭空多一倍额度，且没有任何东西会报错。
+
+    // §15.5 的请求数预算**没有被动过**：建 key 仍然是 2 次（创建 + 回查 token_no）。
+    // 这里是"建 key 之前那次 refresh 已经读过比值"，所以 refresh 那次是 2 次、
+    // 建 key 那次也是 2 次 —— 两笔账各自独立，没有为拿比值多发任何一发。
+    expect(h.upstream.count('/api/user/self')).toBe(1);
+  });
+
+  it('从没 refresh 过的账号 ⇒ 比值落回文档默认 500000（老库/新账号的形状，不猜）', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    // 不给 /api/user/self 打比值桩（默认桩不带 quota_per_unit），且**不先 refresh**。
+    expect(accountRow(h.db, accountId)['quota_per_unit']).toBeNull();
+
+    await runBatch(h, '/api/supplier-accounts/keys', {
+      upstreamId: id,
+      ids: [accountId],
+      count: 1,
+      unlimited: false,
+      quotaCents: 1000,
+    });
+
+    const body = JSON.parse(
+      String(h.upstream.calls.find((c) => c.path === '/api/token/' && c.method === 'POST')?.body),
+    ) as Record<string, unknown>;
+    expect(body['remain_quota']).toBe(5_000_000);
+    // 这一条不是"允许写死"，是钉住**缺省路径的形状**：NULL = 从没读到过，
+    // 与"读到 500000"在取值上同形、在语义上不同，建 key 时只有前者该落默认。
+  });
+
+  it('建 key **不为拿比值多发一次请求**（§15.5：建 key = 2 次）', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    h.upstream.on('/api/user/self', () => ok({ quota: 2168881, id: '42', quota_per_unit: 250000 }));
+    await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id, ids: [accountId] });
+    const selfBefore = h.upstream.count('/api/user/self');
+
+    // 默认桩的创建响应**带 token_no**，所以这一轮只有"创建"那 1 次
+    // （回查是 §15.5 的 2 次里另一次，仅在创建响应不带它时才发生，见驱动器用例）。
+    const before = h.upstream.calls.length;
+    await runBatch(h, '/api/supplier-accounts/keys', {
+      upstreamId: id,
+      ids: [accountId],
+      count: 1,
+      unlimited: false,
+      quotaCents: 1000,
+    });
+    expect(h.upstream.calls.length - before).toBe(1);
+
+    // 关键在这一行：比值是**从库里读的**，这一轮一次 /api/user/self 都没多打。
+    // 写死比值的那一版也满足上一行；本行钉住的是"没有为修它而加请求"。
+    expect(h.upstream.count('/api/user/self')).toBe(selfBefore);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -946,6 +1054,39 @@ describe('审计（§15.7：四个批量端点各一条，`detail` 只放计数�
     expect(dump).not.toContain(PHONE_A);
     expect(dump).not.toContain(PHONE_B);
     expect(dump).not.toContain(SECRET_A);
+  });
+
+  // 审计项 E：收尾回调一度在 `work()` **里面**手调（而不是 `startTask` 的第 5 参），
+  // 而 `appendAudit` 是裸的 `.run()` —— DB 忙 / 外键一炸就抛。那句 throw 会 reject 掉
+  // `work()`，把一个**已经跑完**的批量倒置成 failed，`result` 也一起丢。
+  // 第 5 参在终态落库之后调用，抛错影响不到任务本身。
+  //
+  // 这里用一个**真会让 `work()` 整支 reject** 的形状：密文解不开。驱动器把每次 fetch
+  // 都裹在 try 里（上游不可达只算一行失败），所以"让假 fetch 抛错"到不了这条支 ——
+  // 而 `refreshOne` 里 `readSupplierCredential` 的 `decryptSecret` 是裸的
+  // `decipher.final()`，AUTH_TAG 不对就当场抛。密文被改动过一次正是"MASTER_KEY 换过"
+  // 的现场形态（服务层那句话自己写着"多半是 MASTER_KEY 与写入时不一致"）。
+  it('任务失败 ⇒ auditBatch 收到 result=null 且记 result=fail（回调走 startTask 第 5 参）', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    // 把密码密文的最后一个字节翻掉：GCM 的 tag 必炸。**只动一个字节** ——
+    // 翻整个 blob 会连密文版本字节一起坏掉，那条路的报错是"版本不支持"而不是 tag，
+    // 而这里要的正是"密文读得出来、但校验不过"这一种。
+    tamperCipher(h.db, accountId);
+
+    const res = await post(h, '/api/supplier-accounts/refresh', { upstreamId: id, ids: [accountId] });
+    expect(res.status).toBe(202);
+    const task = await settle(h.db, String(res.body['taskId']));
+    expect(task.status).toBe('failed');
+
+    const audits = h.db
+      .prepare("SELECT result, detail FROM audit_log WHERE action = 'supplier.refresh'")
+      .all() as { result: string; detail: string }[];
+    expect(audits).toHaveLength(1);
+    // 任务炸了 ⇒ 这次审计动作本身失败，不能写成 ok
+    expect(audits[0]?.result).toBe('fail');
+    expect(audits[0]?.detail).toBe('task failed');
   });
 });
 

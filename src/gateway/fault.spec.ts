@@ -26,7 +26,7 @@ import type { KeyConfig, PoolSnapshot } from './types.js';
 
 /* ------------------------------ 测试台 ------------------------------ */
 
-const GROUP: GroupContext = { groupId: 'grp_fault', name: '故障演练', enabled: true, rpm: null, tpm: null, dailyQuota: null };
+const GROUP: GroupContext = { groupId: 'grp_fault', name: '故障演练', enabled: true, rpm: null, tpm: null, dailyQuota: null, authorizedModels: null };
 
 /** 关联键（契约 §6 / ADR-0014）：引擎纯透传，此处给合法常量即可 */
 const REQUEST_ID = 'req-fault-spec-0001';
@@ -78,7 +78,7 @@ function makeHarness(keys: KeyConfig[], steps: Step | Step[], upstreams?: PoolSn
       return target;
     },
   };
-  const models: ModelCatalog = { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m };
+  const models: ModelCatalog = { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m, typeOf: () => null };
   const fetchImpl: FetchLike = async (_u, _i) => {
     const step = Array.isArray(steps) ? steps.shift() : steps;
     if (step === undefined) throw new Error('unexpected extra fetch call');

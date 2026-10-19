@@ -359,6 +359,59 @@ describe('key 对账与创建', () => {
     expect(body['remain_quota']).toBe(DEFAULT_QUOTA_PER_UNIT);
   });
 
+  it('固定额度建 key：站点自己的换算比说了算（审计项 D，写死 500000 会成比例算错）', async () => {
+    const { impl, calls } = fakeFetch((call) =>
+      call.init.method === 'POST'
+        ? json({ success: true, data: { key: 'sk-x1y2', token_no: '78' } })
+        : json({ success: true, data: { items: [] } }),
+    );
+    // 站点把比值改成 250000/元。要建 1000 分（10 元）的 key：
+    // 按站点比例 → 2500000；按写死的 500000 → 5000000（= 20 元，凭空多一倍）。
+    const res = await client(impl).createToken(CRED, {
+      name: 'n',
+      unlimited: false,
+      quotaCents: 1000,
+      models: null,
+      quotaPerUnit: 250_000,
+    });
+    expect(res.ok).toBe(true);
+    const body = JSON.parse(String(calls[0]?.init.body)) as Record<string, unknown>;
+    expect(body['unlimited_quota']).toBe(false);
+    expect(body['remain_quota']).toBe(2_500_000);
+    // 比值只影响 remain_quota 一处：`unlimited_quota` 与其它字段不该跟着变。
+    expect(body).not.toHaveProperty('quota_per_unit');
+  });
+
+  it('比值缺省 ⇒ 落回文档默认值（老库没读到过比值的账号走这条路）', async () => {
+    const { impl, calls } = fakeFetch((call) =>
+      call.init.method === 'POST'
+        ? json({ success: true, data: { key: 'sk-x1y2', token_no: '78' } })
+        : json({ success: true, data: { items: [] } }),
+    );
+    await client(impl).createToken(CRED, { name: 'n', unlimited: false, quotaCents: 100, models: null });
+    const body = JSON.parse(String(calls[0]?.init.body)) as Record<string, unknown>;
+    expect(body['remain_quota']).toBe(DEFAULT_QUOTA_PER_UNIT);
+  });
+
+  it('无限额度时比值**不参与**：body 里没有 remain_quota 可错', async () => {
+    const { impl, calls } = fakeFetch((call) =>
+      call.init.method === 'POST'
+        ? json({ success: true, data: { key: 'sk-x1y2', token_no: '78' } })
+        : json({ success: true, data: { items: [] } }),
+    );
+    // 给一个错得离谱的比值：unlimited 分支根本不看它，所以发出去的 body 必须干净。
+    await client(impl).createToken(CRED, {
+      name: 'n',
+      unlimited: true,
+      quotaCents: null,
+      models: null,
+      quotaPerUnit: 1,
+    });
+    const body = JSON.parse(String(calls[0]?.init.body)) as Record<string, unknown>;
+    expect(body['unlimited_quota']).toBe(true);
+    expect(body).not.toHaveProperty('remain_quota');
+  });
+
   it('白名单给了值才发 model_limits，逗号拼接', async () => {
     const { impl, calls } = fakeFetch((call) =>
       call.init.method === 'POST'

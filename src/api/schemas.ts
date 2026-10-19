@@ -32,8 +32,8 @@ export const revisionProp = { type: 'integer', minimum: 1 } as const;
 export const nullableInteger = { type: ['integer', 'null'] } as const;
 export const nullableString = { type: ['string', 'null'] } as const;
 
-export const pageQuery = {
-  type: 'object',
-  properties: { ...pageProps },
-  additionalProperties: true,
-} as const;
+// 这里曾有一个 `pageQuery`（把 pageProps 包成 object 的导出），**全仓零引用**，已删
+// （2026-10-16 清死代码）。删它的理由不是重复 —— 是它是个**没被用过的半成品**：
+// 真正的分页 querystring 全在路由里就地展开（`...pageProps` 再加各自的筛选位），
+// 一个没人引用的包装件会让人以为"分页校验有第二种写法"，从而在新路由里引它、
+// 于是同一个 querystring 出现两条构造路径。

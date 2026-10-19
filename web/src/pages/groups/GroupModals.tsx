@@ -29,6 +29,12 @@ export interface GatewayKeyReveal {
   maskedKey: string;
   /** 哪个组、是建组签发还是追加签发——只在提示文案里用。 */
   context: string;
+  /**
+   * 带 `/v1` 的网关 Base URL（有就显示）。抄走 key 的人下一个问题永远是"填哪儿"，
+   * 而这两个值**只在同一帧里同时握在手上**（v1.15.7 / ADR-0036 决策 1）：
+   * 事后再去接入页抄地址，就是又一次"两处各说一半"的机会。
+   */
+  baseUrl?: string | null;
 }
 
 export interface GatewayKeyRevealModalProps {
@@ -103,6 +109,30 @@ export function GatewayKeyRevealModal({ reveal, onClose }: GatewayKeyRevealModal
           掩码：{reveal?.maskedKey ?? '—'}
         </Text>
       </Space>
+
+      {reveal?.baseUrl ? (
+        <div
+          style={{
+            border: `1px solid ${tokens.color.border}`,
+            borderRadius: tokens.radius.md,
+            background: tokens.color.bgBase,
+            padding: tokens.space.md,
+            marginBottom: tokens.space.sm,
+          }}
+        >
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            客户端 Base URL（结尾的 /v1 不能省）：
+          </Text>
+          <div style={{ marginTop: tokens.space.xs }}>
+            <Text
+              style={{ fontFamily: tokens.font.mono, fontSize: 13, wordBreak: 'break-all' }}
+              copyable={{ text: reveal.baseUrl }}
+            >
+              {reveal.baseUrl}
+            </Text>
+          </div>
+        </div>
+      ) : null}
 
       <Alert
         type="warning"

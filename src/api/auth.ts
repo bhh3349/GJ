@@ -16,6 +16,8 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { sha256Hex } from '../db/crypto.js';
 import type { Db } from '../db/database.js';
 import { newSessionToken } from '../db/ids.js';
+import { createGroup, findGroupByName } from '../db/repo/groups.js';
+import { findUser, setUserGroup } from '../db/repo/users.js';
 import { isoAfterHours, nowIso } from '../util/time.js';
 import { ApiError } from './errors.js';
 
@@ -76,9 +78,30 @@ export function adminCount(db: Db): number {
  * 不采用"随机生成并打印到日志"的常见做法：日志常常被收集、转发、留存，
  * 把管理员口令打进标准输出，等于把它复制到一个生命周期完全不可控的地方。
  * 与 MASTER_KEY 的处理保持一致 —— 缺关键配置就 fail-fast。
+ *
+ * **返回值是数据、不是副作用**（v1.15.6 / ADR-0035 决策 1）：种子组那件事要
+ * 往标准输出打一行明文 key，而这个函数有 13 处直接调用（全是 spec）。把 I/O
+ * 放进来意味着**每次跑测试都印一行 key** —— 噪音还是小事，真问题是
+ * "谁负责把凭据送到人眼前"从一个决定变成十三条路径。所以这里只**返回**种子结果，
+ * 由 `server.ts` 那一个真实调用点决定怎么呈现（`src/api/auth.ts` 保持零 I/O）。
  */
-export function bootstrapAdmin(db: Db, env: NodeJS.ProcessEnv = process.env): void {
-  if (adminCount(db) > 0) return;
+export interface BootstrapResult {
+  /** 本次是否真的造了管理员（`false` = 库里本来就有账号，整段是 no-op）。 */
+  created: boolean;
+  /**
+   * 首个管理员归属的「管理组」。库空且成功引导时恒非空 —— 管理员必须有一把能打
+   * `/v1/*` 的 key，否则这个网关对他就是一个"看得见、进不去"的东西。
+   */
+  adminGroup?: { id: string; name: string };
+  /** 建组时自动签发的那把网关 key 的**明文**。只在这一次返回值里存在，库内只有 sha256。 */
+  adminGatewayKey?: string;
+}
+
+/** 种子组的名字。**只此一处字面量** —— 用户可见文案与日志都从这里取。 */
+export const BOOTSTRAP_ADMIN_GROUP_NAME = '管理组';
+
+export function bootstrapAdmin(db: Db, env: NodeJS.ProcessEnv = process.env): BootstrapResult {
+  if (adminCount(db) > 0) return { created: false };
   const username = env['ADMIN_USERNAME'] ?? 'admin';
   const password = env['ADMIN_PASSWORD'];
   if (password === undefined || password.length < 8) {
@@ -90,6 +113,34 @@ export function bootstrapAdmin(db: Db, env: NodeJS.ProcessEnv = process.env): vo
   db.prepare(
     'INSERT INTO admin_users (username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?)',
   ).run(username, hashPassword(password), at, at);
+
+  /*
+    种子「管理组」并把首个管理员放进它（ADR-0035 决策 1）。
+
+    **为什么必须在这里、在 `adminCount === 0` 这个分支里**：这是"库是新的"的
+    唯一判据。放进 `migrate()` 会让每一个 harness 都长出一个组，而
+    `openDatabase` → `migrate()` 是所有用例的公共前置 —— 既有用例里有按
+    **全局计数**断言的（`console.spec.ts` 那条 `COUNT(*) FROM gateway_keys` 恒等于 1），
+    种子进去就等于悄悄改了几十条用例的前置条件，红的会是它们，而它们测的不是这件事。
+
+    **老库不走这里**（上面的 early return）：不替用户做"给你补一个组"这个配额决策。
+    老库管理员要组，走 `PATCH /api/users/:username`（可见、有审计）。
+  */
+  const existing = findGroupByName(db, BOOTSTRAP_ADMIN_GROUP_NAME);
+  if (existing !== null) {
+    // **复用分支不签发第二把 key**：新 key 是一份新的可用凭据，而没有人要求过它。
+    // （只在"老库有同名组、账号却又全被删空"这种边角走到。）
+    setUserGroup(db, username, existing.id);
+    return { created: true, adminGroup: { id: existing.id, name: existing.name } };
+  }
+
+  const created = createGroup(db, { name: BOOTSTRAP_ADMIN_GROUP_NAME });
+  setUserGroup(db, username, created.group.id);
+  return {
+    created: true,
+    adminGroup: { id: created.group.id, name: created.group.name },
+    adminGatewayKey: created.gatewayKey.gatewayKey,
+  };
 }
 
 // --- 登录限速 -----------------------------------------------------------
@@ -136,6 +187,14 @@ export class LoginRateLimiter {
 export interface SessionInfo {
   username: string;
   expiresAt: string;
+  /**
+   * 身份（v1.15.0 / §19 / ADR-0034）。**每次鉴权从 `admin_users` 现读**，
+   * 不存进 `sessions` —— 存了就有"管理员改了角色、旧会话还是老角色"的窗口，
+   * 而现读只是一次主键点查（`username` 是 PRIMARY KEY）。
+   */
+  role: 'admin' | 'user';
+  /** 归属组（§19.2）。`null` = 未分配 */
+  groupId: string | null;
 }
 
 export function createSession(db: Db, username: string, ttlHours: number): { token: string; info: SessionInfo } {
@@ -146,7 +205,24 @@ export function createSession(db: Db, username: string, ttlHours: number): { tok
     `INSERT INTO sessions (id, token_hash, username, created_at, last_seen_at, expires_at)
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(token.slice(0, 12), sha256Hex(token), username, at, at, expiresAt);
-  return { token, info: { username, expiresAt } };
+  return { token, info: sessionInfoOf(db, username, expiresAt) };
+}
+
+/**
+ * 把 username + expiresAt 补成完整的 SessionInfo。
+ *
+ * 单独抽出来是因为有三个调用方（createSession / touchSession / requireSession 的
+ * 机器令牌腿以外的路径），而它们必须拿到**同一种形状** —— 漏一处的失败形状是
+ * "某个路径上 req.auth.role 是 undefined"，而 `undefined === 'admin'` 为假，
+ * 于是管理员在**那一条路径**上被当成普通用户挡下。这类 bug 不会让任何测试红，
+ * 除非有一条用例专门打那条路径。
+ */
+function sessionInfoOf(db: Db, username: string, expiresAt: string): SessionInfo {
+  const user = findUser(db, username);
+  // 库里没有这个人（刚被删、或引导前的瞬态）—— 当成未登录，而不是塞一个 admin 进去。
+  // 塞 admin 是一个"默认放行"的失败形状，而那正是授面要防的东西。
+  if (user === null) throw new ApiError('UNAUTHORIZED', '未登录');
+  return { username, expiresAt, role: user.role === 'admin' ? 'admin' : 'user', groupId: user.group_id };
 }
 
 /**
@@ -172,7 +248,10 @@ export function touchSession(db: Db, token: string, ttlHours: number): SessionIn
     expiresAt,
     hash,
   );
-  return { username: row.username, expiresAt };
+  // 用户可能在这一瞬间被删掉（并发删除）。那时不该放行 —— 见 sessionInfoOf 的注释。
+  const user = findUser(db, row.username);
+  if (user === null) return null;
+  return { username: row.username, expiresAt, role: user.role === 'admin' ? 'admin' : 'user', groupId: user.group_id };
 }
 
 export function destroySession(db: Db, token: string): void {

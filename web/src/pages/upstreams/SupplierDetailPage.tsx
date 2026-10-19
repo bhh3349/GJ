@@ -9,7 +9,7 @@
  *   所以 `accountsBalance` / `keysBalance` 是**拆解**、不是额外的一份钱。两者**不相加**。
  * - `totalBalance === null` = 全部未知，**不是 0**。未知 key 数单独一行。
  * - token-plan 类 key 不进金额合计，只单列数量（ADR-0003 规则 1）。
- * - **账号面判据只有 `supplier === 'tierflow'` 一个字段**（§15.12 锚 1）：不 parse `baseUrl`、不猜。
+ * - **账号面判据只有 `hasSupplierAccountPanel(supplier)` 一个函数**（§15.12 锚 1）：不 parse `baseUrl`、不猜、不比某一家。
  * - 「自动同步」是**只读**：开关与间隔来自服务端 `BALANCE_SYNC_MINUTES`，契约里没有写它的端点，
  *   所以这里只显示 + 指路，不造一个点了就 404 的假开关。
  * - 「查余额」不是一次请求（是"被查到的 key 一把一次"的一批，出口预算与数据面共用，§14.7 / §16.7）
@@ -47,6 +47,8 @@ import { keysApi, statsApi, upstreamsApi } from '@/api/endpoints';
 import { useAction, useResource } from '@/api/hooks';
 import { useTaskPolling } from '@/api/useTaskPolling';
 import {
+  hasSupplierAccountPanel,
+  supplierLabel,
   PAGE_SIZE_MAX,
   type BalanceRefreshResult,
   type BalanceSyncUpstreamState,
@@ -353,7 +355,7 @@ export default function SupplierDetailPage() {
     );
   }
 
-  const isSupplier = row.supplier === 'tierflow';
+  const isSupplier = hasSupplierAccountPanel(row.supplier);
   const auto = supplySync.data?.auto;
   const columns = keyColumns({ onToggle: (target, next) => void patchKey(target, next), isPending });
 
@@ -397,7 +399,7 @@ export default function SupplierDetailPage() {
               label: '供应商',
               children: isSupplier ? (
                 <Tag bordered={false} style={{ background: tokens.tint.info, color: tokens.color.info }}>
-                  TierFlow
+                  {supplierLabel(row.supplier)}
                 </Tag>
               ) : (
                 <Text type="secondary">通用</Text>

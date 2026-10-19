@@ -63,11 +63,41 @@ export type ApiErrorCode =
 export interface SessionInfo {
   username: string;
   expiresAt: Iso8601;
+  /**
+   * §19 / ADR-0034（v1.15.0 纯新增可选字段）。前端据此分流工作区：
+   * `admin` → `/admin`（管理面），`user` → `/console`（消费面）。
+   *
+   * **老后端不带的可能**：字段是可选的，所以读它必须容忍 `undefined`。
+   * 但**不能**因此就在本地猜 —— 猜错的形状是"普通用户被送进管理面然后逐个 403"，
+   * 那比留在登录页更糟。缺省按 `admin` 走（历史行为），并由 §19.1 的服务端
+   * 授面兜底：真没有权限的请求会拿到 403，不会看到数据。
+   */
+  role?: UserRole;
 }
+
+/** §19：账号角色。`admin_users.role` 的取值集合（ADR-0034 决策 1）。 */
+export type UserRole = 'admin' | 'user';
 
 export interface LoginRequest {
   username: string;
   password: string;
+}
+
+/**
+ * §1b `POST /api/auth/password` 的请求体（v1.15.9 / ADR-0038 决策 3）。
+ *
+ * **没有 `username` 字段**，这是刻意的：改的恒是**会话本人**那一行。
+ * 带一个用户名参数就得判"你能不能改别人的"，而这一版里那个能力不存在 ——
+ * 少一个参数就是少一类越权面（同一个理由见契约 §19.7：那一页没有"重置密码"
+ * 按钮是因为那个端点不存在）。
+ *
+ * `currentPassword` 必须提供并正确：只判"已登录"是不够的 —— 一条被偷走的会话
+ * 就能改掉口令，把真正的主人锁在门外。改成功后**其他设备的会话会被踢掉**
+ * （这正是改密的动机），当前会话留着（不必马上再登一次）。
+ */
+export interface ChangePasswordRequest {
+  currentPassword: string;
+  newPassword: string;
 }
 
 // ── §2 上游 ───────────────────────────────────────────────────────────────
@@ -194,7 +224,9 @@ export interface Upstream {
   /**
    * §2 `supplier`（v1.4.0）。它存在的唯一目的是让 host **不被当成能力判据** ——
    * 「这个上游有没有账号面」由管理员建上游时就指定，前端**不得**去 parse `baseUrl` 反推。
-   * 判据只有一条：`supplier === 'tierflow'`（§15.12 锚 1）。
+   * 判据只有一条：`supplier ∈ SUPPLIER_ACCOUNT_KINDS`（§15.12 锚 1 / ADR-0018 决策 0）。
+   * 取值**不可穷尽猜测** —— 新增一家供应商就是服务端 enum 多一个值 + 这里多一个 kind，
+   * 判据本身不变（判"是不是账号面供应商"，不是判"是哪一家"）。
    */
   supplier: string | null;
   enabled: boolean;
@@ -234,10 +266,89 @@ export interface UpstreamListQuery extends PageQuery {
 
 /**
  * v1.4.0 起 `supplier` **可写**（§15.6：上游表单多一个可选「供应商」下拉，缺省 = 通用）。
- * 取值只有两个：`null` = 通用上游，`'tierflow'` = 走 §15 账号面。
- * 服务端 schema 是 `enum: [null, 'tierflow']`，写别的值会当场 400。
+ * 取值：`null` = 通用上游，其余每个值 = 一家走 §15 账号面的供应商（ADR-0018 决策 0）。
+ * 服务端 schema 是 `enum: [null, 'tierflow', 'tokenrhythm']`，写别的值会当场 400。
+ *
+ * **这里是前端唯一一份 kind 名单**：UI 任何地方判"有没有账号面"都走
+ * {@link hasSupplierAccountPanel}，不要去写 `=== 'tierflow'` —— 那种写法在接入第二家
+ * 供应商时会**静默漏掉**它（不报错、只是入口不出现），而这正是最难查的一类缺陷。
  */
-export type SupplierKind = 'tierflow';
+export type SupplierKind = 'tierflow' | 'tokenrhythm';
+
+/** 账号面供应商全名单（§15.6）。新增一家：服务端 enum + 这里各加一个值。 */
+export const SUPPLIER_ACCOUNT_KINDS: readonly SupplierKind[] = ['tierflow', 'tokenrhythm'];
+
+/** 供应商在下拉框 / 台账里显示的名字。**显示名只在这里改**，业务判断一律用 kind 字面量。 */
+export const SUPPLIER_LABELS: Record<SupplierKind, string> = {
+  tierflow: 'TierFlow',
+  tokenrhythm: 'TokenRhythm',
+};
+
+/** 把上游的 `supplier` 收成已知 kind；`null` / 未知值 → `null`（= 通用上游）。 */
+export function asSupplierKind(supplier: string | null | undefined): SupplierKind | null {
+  if (supplier === null || supplier === undefined) return null;
+  return (SUPPLIER_ACCOUNT_KINDS as readonly string[]).includes(supplier) ? (supplier as SupplierKind) : null;
+}
+
+/**
+ * §15.12 锚 1：**这个上游有没有账号面**的唯一判据。
+ *
+ * 名字刻意叫 panel（"管理面上有没有那块面板"）而不是 `isSupplier` —— 后者的读法容易被
+ * 写成"是不是 TierFlow"。判据是**集合归属**，与具体哪一家无关。
+ */
+export function hasSupplierAccountPanel(supplier: string | null | undefined): boolean {
+  return asSupplierKind(supplier) !== null;
+}
+
+/** 该 kind 的显示名；未知值原样回显（宁可见到一个陌生字符串，也不要显示成 TierFlow）。 */
+export function supplierLabel(supplier: string | null | undefined): string {
+  const kind = asSupplierKind(supplier);
+  return kind === null ? (supplier ?? '通用') : SUPPLIER_LABELS[kind];
+}
+
+/**
+ * 各供应商**有没有某类概念** —— 只用来决定"这个入口画不画、这个字段显不显"。
+ *
+ * **服务端是权威**：这里写错的后果只是多画或少画一个控件，真发出去该 422 的还是 422
+ * （§15.14 的入口闸就是这样写的，前端这份表是它的镜像，不是替代）。
+ * 所以这张表**必须与 §15.14 的入口闸逐条对齐**：那里放行的字段，这里才允许显示。
+ */
+export interface SupplierCapabilities {
+  /** 有套餐 / 订阅概念（决定「套餐台账」页签与「轮换套餐 key」入口）。 */
+  plans: boolean;
+  /** key 有额度概念（决定建 key 表单的 unlimited / 额度 / 模型白名单三项）。 */
+  keyQuota: boolean;
+  /**
+   * 有没有账号密码登录（决定「导入账号」入口是否存在）。
+   * `false` 的供应商只有会话鉴权，文本导入对它是入口 422 —— 前端不该画一个点了必然失败的按钮。
+   */
+  passwordLogin: boolean;
+  /**
+   * 有没有「粘贴 Cookie」导入（v1.16.4）。与 `passwordLogin` 互斥：一家供应商的凭据
+   * 要么靠密码换会话，要么直接收会话，不存在两条都开的情况。
+   */
+  sessionImport: boolean;
+}
+
+export const SUPPLIER_CAPABILITIES: Record<SupplierKind, SupplierCapabilities> = {
+  // TierFlow：套餐 + 额度 + 模型白名单 + 密码登录俱全。
+  tierflow: { plans: true, keyQuota: true, passwordLogin: true, sessionImport: false },
+  /*
+   * TokenRhythm（§15.14）：**没有**套餐概念（订阅腿是零请求的空数组、rotate 恒 422），
+   * **也没有**额度概念（建 key 只收 `{name}`，限额/白名单字段一并发出去会 422），
+   * **更没有账号密码登录**（站点只有 `tr_session`，§15.14.1 / v1.16.1）——
+   * 入池走「粘贴 Cookie」（v1.16.4，`sessionImport`）—— 它没有密码可登，所以
+   * 不给「导入账号」入口，给的是 Cookie 粘贴框。
+   * 建 key 的 `unlimited` 因此不是"默认开着"而是**唯一合法取值**（见 SupplierModals）。
+   */
+  tokenrhythm: { plans: false, keyQuota: false, passwordLogin: false, sessionImport: true },
+};
+
+/** 该上游的能力位；通用上游（或未知值）→ `null`（没有账号面，也就没有这些入口）。 */
+export function supplierCapabilities(supplier: string | null | undefined): SupplierCapabilities | null {
+  const kind = asSupplierKind(supplier);
+  return kind === null ? null : SUPPLIER_CAPABILITIES[kind];
+}
 
 export interface UpstreamCreateRequest {
   name: string;
@@ -384,10 +495,49 @@ export interface Group {
   dailyQuotaUsed: number;
   todayUsage: GroupUsageToday;
   keyCount: number;
+  /**
+   * 该组授权的模型**名**列表（契约 §4「模型授权」，v1.15.8 / ADR-0037）。
+   * `null` = **不限**（可用全部已启用模型）—— 与 `[]` 同义，服务端出口恒不为 `[]`。
+   *
+   * 列表页那一列读的就是它，所以它是 `Group` 的字段、不是"详情端点专有"。
+   */
+  authorizedModels: string[] | null;
   enabled: boolean;
   revision: number;
   createdAt: Iso8601;
   updatedAt: Iso8601;
+}
+
+/**
+ * `GET/PUT /api/groups/:id/models` 的展开项：授权**落到哪个上游**。
+ *
+ * 与 `models`（可写回的名字列表）并存：名字是开关、展开行是"两条同名档案分得开"。
+ */
+export interface GroupModelEntry {
+  id: string;
+  name: string;
+  upstreamId: string;
+}
+
+/** `GET /api/groups/:id/models` 与 `PUT` 的响应体（契约 §4）。 */
+export interface GroupModels {
+  /** `null` = 不限。写回时 `null` / `[]` 是同一件事。 */
+  models: string[] | null;
+  authorizedModels: GroupModelEntry[];
+}
+
+/**
+ * `PUT /api/groups/:id/models` 的请求体。
+ *
+ * **两格都必填**：`models` 不是可选项 —— 省略表达不了"置回不限"（那正是 `null` 的活），
+ * 服务端对缺格回 400 并指名 `field`。
+ *
+ * `revision` 是**同一个** `Group.revision`（组只有一条版本号）：改授权会推它 +1，
+ * 所以抽屉打开时抓的那一份拿来做保存，别人先改过就必然 409。
+ */
+export interface GroupModelsPutRequest {
+  models: string[] | null;
+  revision: number;
 }
 
 export interface GroupCreateRequest {
@@ -407,23 +557,62 @@ export interface GroupPatchRequest {
 }
 
 /**
- * 建组响应 = Group + 明文 `gatewayKey`（**仅此一次**）。
- * 前端纪律：弹窗关闭即从内存丢弃，不缓存、不写 localStorage。
+ * 建组响应 = Group + `gatewayKey`（**仅此一次**）。前端纪律：弹窗关闭即从内存丢弃，
+ * 不缓存、不写 localStorage。
+ *
+ * **`gatewayKey` 是一个对象（`GroupKeyIssued`），不是字符串** —— 服务端
+ * `createGroup` 返回 `{ group, gatewayKey: issued }`，路由层 `{ ...group, gatewayKey }`
+ * 原样摊平，所以明文在 `gatewayKey.gatewayKey`（与 `POST /api/groups/:id/keys`
+ * 的顶层四格**不同形**）。这里曾写成 `gatewayKey: string`，类型在编译期是绿的、
+ * 运行期把对象直接喂给 `GatewayKeyRevealModal` → React 抛
+ * 「Objects are not valid as a React child」，建组后整页进错误边界（v1.15.7 验收实测）。
  */
 export interface GroupCreateResponse extends Group {
-  gatewayKey: string;
+  gatewayKey: GroupKeyIssued;
 }
 
 export interface GroupKeyIssued {
   id: string;
   gatewayKey: string;
   maskedKey: string;
+  /**
+   * 人类给这把 key 起的名字（v1.15.9，纯新增可空字段）。`null` = 没名字。
+   *
+   * 回的是**库里真正写下的值**（服务端写入时 trim、空串收成 `null`），
+   * 不是"让调用方确认自己传了什么" —— 所以前端拿它直接渲染，不要再 trim 一遍。
+   */
+  label: string | null;
   createdAt: Iso8601;
 }
 
-export interface GroupKeyResetResponse {
-  gatewayKey: string;
+/**
+ * §4 `POST /api/groups/:id/keys/:keyId/reset` 的响应。
+ *
+ * **与 `GroupKeyIssued` 逐字同形**，所以这里是一个别名而不是第二个 interface ——
+ * 契约 §4 两行写的是同一组四格（`id` / `gatewayKey` / `maskedKey` / `createdAt`）。
+ * 此前这里只有两格（少了 `id` / `createdAt`），而**它没有过调用方**，
+ * 所以那个漂移从未产生过一次错误行为，只是账上一笔（ADR-0036 遗留 4）。
+ * 改成别名之后，"两处形状各写一遍、将来漂移"这个可能就不存在了：
+ * `id` 是**新**那把 key 的 id（旧行在同一个事务里被删掉，所以 `:keyId` 那次重置过后就查不到了）。
+ */
+export type GroupKeyResetResponse = GroupKeyIssued;
+
+/**
+ * §4 `GET /api/groups/:id/keys` 的列表项 —— **本端点存在的唯一理由**：
+ * `Group` 只暴露 `gatewayKeyMasked`，前端拿不到 `:keyId`，重置/吊销无从触达。
+ *
+ * 与消费面的 `ConsoleKeyItem` 逐字同形（同一把 key 的掩码视角），但**不是同一个类型**：
+ * 那个端点的授面、归属推导（恒来自会话）与这一个是两件事；共用类型会让
+ * "管理员面这一份多了什么字段"变成看不见的事 —— 而这一份**刻意没有** `updatedAt`
+ * （重置 = 删旧插新，`updated_at` 恒等于 `created_at`，回一个永远相等的字段只会误导）。
+ */
+export interface GroupKeyItem {
+  id: string;
+  /** `****后4位`。 */
   maskedKey: string;
+  /** 这把 key 的名字（v1.15.9）。`null` = 没起名，列表里显示"未命名"。 */
+  label: string | null;
+  createdAt: Iso8601;
 }
 
 // ── §5 模型 ───────────────────────────────────────────────────────────────
@@ -551,7 +740,8 @@ export type TaskType =
   | 'supplier_refresh'
   | 'supplier_keys'
   | 'supplier_keys_sync'
-  | 'supplier_rotate_key';
+  | 'supplier_rotate_key'
+  | 'supplier_import_sessions';
 
 export type TaskStatus = 'queued' | 'running' | 'succeeded' | 'failed';
 
@@ -1213,8 +1403,11 @@ export type AssistantFrame =
 // ── §15 供应商账号面（TierFlow） ───────────────────────────────────────────
 //
 // **消费锚（§15.12，三个字段级事实，判据唯一）**
-// 1. 「这个上游有没有账号面」的唯一判据是 `Upstream.supplier === 'tierflow'`。
-//    **不 parse `baseUrl`、不查域名、不猜** —— 猜错的后果是静默走错驱动器。
+// 1. 「这个上游有没有账号面」的唯一判据是 `Upstream.supplier ∈ SUPPLIER_ACCOUNT_KINDS`
+//    （辅助函数 `hasSupplierAccountPanel`；自 v1.14.0 起该集合含 `'tierflow'` 与 `'tokenrhythm'`）。
+//    **不 parse `baseUrl`、不查域名、不猜**，也**不要**把判据写成对某一家供应商的等值比较 ——
+//    接入第二家时等值比较不会报错，只会让新供应商静默没有入口。
+//    判"是哪一家"（决定按钮文案、表单项）时才用 `asSupplierKind` 取到具体 kind。
 // 2. 批量任务的逐行结论**只读 `result.items`**，且只在**终态**读（`succeeded` / `failed`）。
 //    它最多 500 行，`itemsTotal` 是截断前的真实行数、`truncated` 说明明细被截。
 //    本期**没有**分页，前端不得自己造一个"下一页"。
@@ -1350,6 +1543,18 @@ export interface SupplierImportRequest {
   text?: string;
 }
 
+/**
+ * v1.16.4 `POST /api/supplier-accounts/import-sessions`（仅 TokenRhythm）。
+ *
+ * `text` 每行一枚 `tr_session`。这是唯一把会话明文送进管理面的入口 —— 业主显式接受
+ * "自用项目、值过一次 HTTP"的代价；前端仍不把值写进任何本地存储 / 日志 / 错误提示。
+ */
+export interface SupplierSessionImportRequest {
+  upstreamId: string;
+  /** 每行一枚 Cookie（`tr_session=…; Path=/`、裸 value、`Cookie:` 前缀均可）。 */
+  text?: string;
+}
+
 /** 四个批量端点共用的「打谁」参数。`ids` 省略 = 该上游全部账号。 */
 export interface SupplierBatchRequest {
   upstreamId: string;
@@ -1374,8 +1579,19 @@ export interface SupplierKeysRequest extends SupplierBatchRequest {
   label?: string | null;
 }
 
-/** §15.3 `action` 六值，每个都必须有生产者（不留"枚举里有、没人发"的空值）；`rotate` 见 §15.13。 */
-export type SupplierBatchAction = 'login' | 'relogin' | 'refresh' | 'create' | 'sync' | 'rotate';
+/**
+ * §15.3 `action` 七值，每个都必须有生产者（不留"枚举里有、没人发"的空值）；
+ * `rotate` 见 §15.13，`import` 见 v1.16.4 Cookie 粘贴导入。
+ */
+export type SupplierBatchAction =
+  | 'login'
+  | 'relogin'
+  | 'refresh'
+  | 'create'
+  | 'sync'
+  | 'rotate'
+  /** v1.16.4：只登记会话，没有发生登录。 */
+  | 'import';
 
 /** 逐行结果的一行。**不含任何凭据** —— `keyMasked` 是掩码，`keyId`/`tokenNo` 是内部标识。 */
 export interface SupplierBatchItem {
@@ -1551,4 +1767,224 @@ export interface AccessInfo {
   publicHost: string | null;
   /** `ADMIN_WEB_DIST` 非空即 true；前端据此提示「生产直开 :4001」还是「先起 Vite」。 */
   adminWebDistEnabled: boolean;
+}
+
+// ── §19 消费面 `/api/console/*`（ADR-0034） ────────────────────────────────
+
+/**
+ * §19.2 `GET /api/console/session` 的响应。
+ *
+ * 与 `SessionInfo` **不是同一个东西**，尽管字段有重叠：这个端点只对
+ * `/api/console/**` 前缀生效（§19.1），且多两个消费面专有的字段
+ * （`role` / `groupId`）。`groupId === null` = 账号还没有被分配到组 ——
+ * 此时四个读端点回空/降级 + `assigned: false`，写端点回 `400`（`field=groupId`），
+ * **都不是 500**（ADR-0034 决策 5 / ADR-0038 决策 1）。
+ */
+export interface ConsoleSession {
+  username: string;
+  role: UserRole;
+  groupId: string | null;
+  expiresAt: Iso8601;
+}
+
+/**
+ * §19.3 `GET /api/console/keys` 的响应。元素形状**逐字复用 §4 `GatewayKeyDto`**
+ * （契约 §19.3：不新增字段、不改名）。
+ */
+export interface ConsoleKeys {
+  groupId: string | null;
+  keys: ConsoleKeyItem[];
+  /** `false` = 未分配组（此时 `keys` 恒为空）。前端据此显示"你还没有被分配到组"。 */
+  assigned: boolean;
+  /**
+   * 自助签发的把数上限（v1.15.9 / ADR-0038）。**服务端的事实，不是前端的一条文案**：
+   * 置灰「签发」按钮、算"还能签几把"用的都是这个数。
+   *
+   * 为什么不让前端写死 10：那要求前端复刻同一个数字，两份将来一定漂移 ——
+   * 服务端改成 20 之后前端还按 10 拦，用户看到的是一个"点了必然失败"的按钮；
+   * 反过来前端放宽了则会让人白填一次表单再吃 422。
+   */
+  keyLimit: number;
+}
+
+/**
+ * §19.3 的 key 元素 = §4 那把 key 的**掩码形状**。
+ *
+ * 与管理面的 `GroupKeyIssued` 是**同一个东西少一个字段**：那个类型带
+ * `gatewayKey`（明文，只在签发的 201 里出现一次），这里**没有**它 ——
+ * 不是"前端不展示"，是响应体里压根不存在这一列（§4 铁律 / ADR-0006：
+ * 没有任何"再取回明文"的路径）。所以这不是裁剪出来的子类型，
+ * 是两份不同的 DTO，共用一个 `maskedKey` 口径。
+ */
+export interface ConsoleKeyItem {
+  id: string;
+  /** `****后4位`。 */
+  maskedKey: string;
+  /**
+   * 这把 key 的名字（v1.15.9）。`null` = 没起名。
+   *
+   * 这一格是 v1.15.9 把签发权下放到消费面的**直接后果**：一个组最多 10 把 key，
+   * 而它们共用同一份配额池，用户唯一能分辨"哪把是给哪个客户端的"的东西就是它 ——
+   * 没有它，10 把 `****9f3c` 在界面上是同一种东西的十个副本。
+   */
+  label: string | null;
+  createdAt: Iso8601;
+}
+
+/**
+ * §19.3b `POST /api/console/keys` 的 201 响应（v1.15.9）。
+ *
+ * **这是消费面唯一的明文出口**，形状与 §4 的 `GroupKeyIssued` 逐字相同
+ * （同一把 key 的同一份四格 + `label`）。库里只存 sha256 摘要，
+ * 此后没有任何端点能取回 `gatewayKey` —— 所以调用方必须在**这一帧**把它交给用户。
+ */
+export interface ConsoleKeyIssued {
+  id: string;
+  /** **仅此一次**的明文（以 `gw-` 开头）。不缓存、不落 localStorage。 */
+  gatewayKey: string;
+  maskedKey: string;
+  label: string | null;
+  createdAt: Iso8601;
+}
+
+/**
+ * §19.3b `GET /api/console/quota` 的响应（v1.15.9）。
+ *
+ * **每一格都是 §4 `GroupDto` 那些字段的透传**，消费面不新造第二个口径
+ * （同一件事算两遍 = 两份将来一定漂移的数字）。所以页面上这几个数
+ * 与管理面组列表里同一个组的数**必须一字不差**，包括 `null` = 不限、
+ * `0` = 一点都不能用这两个截然不同的意思。
+ */
+export interface ConsoleQuota {
+  /** `null` = 未分配组，此时其余各格见下（`rpm`/`tpm`/`dailyQuota` 也是 `null`）。 */
+  groupId: string | null;
+  assigned: boolean;
+  /** 每分钟请求数上限。`null` = **不限**（不是 0）。 */
+  rpm: number | null;
+  /** 每分钟 token 上限。`null` = **不限**。 */
+  tpm: number | null;
+  /** 日 token 配额。`null` = **不限**。 */
+  dailyQuota: number | null;
+  /** 今日已用 token（与 `todayUsage.tokens` 同一个数，两格都回是为了不让前端去猜用哪个）。 */
+  dailyQuotaUsed: number;
+  todayUsage: { requests: number; tokens: number; costCents: number };
+}
+
+/**
+ * §19.4 `GET /api/console/usage` 的响应 —— **与 §6 `GET /api/stats/usage` 逐字相同**，
+ * 只多一层"恒按本组收窄"。所以类型直接复用 `UsageStats`，本文件不为它建第二个名字。
+ *
+ * `groupBy` **不接受 `group`**：消费面恒按本组收窄，按组分箱只会得到一根恒等的线
+ * （契约 §19.4；传它 → 400，enum 里没有这个值）。
+ */
+export type ConsoleUsage = UsageStats;
+
+/**
+ * §19.4 的查询参数 —— **`UsageQuery` 少一个枚举值、且没有 `groupId`**。
+ *
+ * 两处裁剪都是契约裁的，不是前端省事：
+ * - `groupBy` 去掉 `group`（消费面恒按本组收窄，按组分箱只会得到一根恒等的线）；
+ * - **没有 `groupId` 字段**。归属恒来自服务端会话，`?groupId=` 传了也被忽略
+ *   （判据：构造别组 id 回的仍是本组）。类型上就没有这个字段，
+ *   调用方就写不出"我想看别组"的代码。
+ *
+ * `from` / `to` / `bucket` 三个必填项与 §6 同口径（`UsageQuery` 是 `Partial`，
+ * 这里把三个必填的重新钉成必填）。
+ */
+export interface ConsoleUsageQuery {
+  from: string;
+  to: string;
+  groupBy: Exclude<UsageGroupBy, 'group'>;
+  bucket: UsageBucket;
+}
+
+/** §19.6 `GET /api/console/models` 的响应。 */
+export interface ConsoleModels {
+  models: ConsoleModel[];
+}
+
+/**
+ * §19.6 的模型元素 —— **刻意不是 §5 `ModelProfile`**。
+ *
+ * 消费面看不到的东西一样都不带：`upstreamId`（上游归属）、`price`（计费口径）、
+ * `availableKeyIds`（谁在服务这个模型）、`revision`（乐观锁语义）全是管理面概念。
+ *
+ * **逐字对齐服务端响应**（v1.15.8 订正）：`{id, name, displayName, type,
+ * capabilities, contextLength}`。两处此前的漂移，都**不是**漏了几个字的形状：
+ * - 曾多写一个 `enabled: boolean` —— 服务端从第一天就没回过它（SQL 判据恒
+ *   `enabled = 1`，回一个恒真字段只会教人处理一个不存在的三态）。而它不 `undefined`
+ *   就为真：页面拿它做的每个判断**全部反转**（每个模型都显示「已停用」、
+ *   「只看可用」把列表清空），**这正是一个会骗人的信号**。
+ * - 曾漏写 `name` —— 而 `name` 恰恰是**唯一有用的那个字段**：`id` 是档案行号
+ *   （`mdl_*`），§10 的请求体 `model` 字段填的是**名字**，网关热路径上没有
+ *   "行号→名字"的映射。少写 `name` 就等于没有可调用的值可给用户。
+ *
+ * **没有 `enabled`，所以页面也不该有"停用"这个概念**：能出现在这里的就是可用的
+ * （集合 = §5 enabled 判据 ∩ 本组授权，§19.6）。
+ * 判据与 §10 `/v1/models` **同一份**：用户端看到的集合必须与网关实际准入的集合一致。
+ */
+export interface ConsoleModel {
+  id: string;
+  /** 调用时 `model` 字段填它（不是 `id`）—— §10 的请求键是模型名。 */
+  name: string;
+  displayName: string | null;
+  type: string;
+  capabilities: string[];
+  contextLength: number | null;
+}
+
+// ── §19.7 管理面用户端点（ADR-0034） ──────────────────────────────────────
+
+/**
+ * §19.7 的用户行。**与 `SessionInfo` / `ConsoleSession` 都不是同一个东西**，
+ * 尽管三个都有 `role`：那两个是"我自己是谁"，这个是"账号表里的某一行"。
+ *
+ * **没有 `password` 也没有 `passwordHash`** —— 不是前端挑了字段显示，是响应体里
+ * 压根没有（服务端读面一律不 SELECT `password_hash`，契约 §19.7）。
+ * 所以这一页**没有"重置密码"入口**。〔v1.15.9 订正那个理由：当时写的是"改口令的端点
+ * 不存在，要换口令只能删了重建"——那前半句已不成立（`POST /api/auth/password` 存在，
+ * 见 §1），后半句仍然成立且**因为另一个理由**：那个端点改的恒是**会话本人**，
+ * 管理员没有任何路径去改别人的口令。所以"管理员帮用户重置密码"这个能力
+ * 在服务端真的没有，而不是"端点没做"—— 前者是订正后仍然正确的判据。
+ * 用户自己改密码的入口在两个外壳的账号菜单里（`ChangePasswordModal`）。〕
+ */
+export interface UserDto {
+  username: string;
+  role: UserRole;
+  /** 归属组 id。`null` = 未分配 —— 该用户进消费面会看到"你还没有被分配到组"。 */
+  groupId: string | null;
+  displayName: string | null;
+  createdAt: Iso8601;
+  updatedAt: Iso8601;
+}
+
+/**
+ * §19.7 `POST /api/users` 的请求体。
+ *
+ * `password` 是**唯一一次**以明文进入系统的机会（§4 同一条纪律）：建完之后
+ * 服务端只留散列，任何端点都取不回。所以表单必须让人**当场抄走** ——
+ * 这也是本页唯一的明文出口，与用户组的 `gatewayKey` 同一形状。
+ */
+export interface UserCreateRequest {
+  username: string;
+  password: string;
+  role: UserRole;
+  groupId?: string | null | undefined;
+  displayName?: string | null | undefined;
+}
+
+/**
+ * §19.7 `PATCH /api/users/:username` 的请求体（v1.15.6 / ADR-0035 决策 2）。
+ *
+ * **只有一个字段，且必填。** `groupId: null` 是一个有意义的值（= 退回未分配），
+ * 与"不发这个字段"不是一回事 —— 后者服务端回 400：省略字段的 PATCH 等于一次
+ * "什么都不做却写一条 `user.update` 审计"的请求，而那条审计会说"有人改了这个用户的
+ * 归属"，其实什么都没改。
+ *
+ * `role` / `password` / `displayName` **刻意不在这里**：类型上就发不出去。
+ * 服务端也会静默忽略它们（schema 只列 `groupId`）—— 两处都不是漏校验，
+ * 是"只开一个字段"这个决定在两个位置各写了一遍。
+ */
+export interface UserUpdateRequest {
+  groupId: string | null;
 }

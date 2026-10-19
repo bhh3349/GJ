@@ -16,7 +16,7 @@
 import { Tooltip, Typography } from 'antd';
 import type { ReactNode } from 'react';
 
-import type { Upstream } from '@/api/types';
+import { supplierCapabilities, type Upstream } from '@/api/types';
 import { BalanceText } from '@/components/BalanceText';
 import { tokens } from '@/theme/tokens';
 import { formatCount, formatTokens } from '@/utils/format';
@@ -111,13 +111,28 @@ export function SupplierPoolFundsCards({ funds, upstream }: SupplierPoolFundsCar
   const basicTotal = funds.complete ? funds.basic.total : null;
   const partialNote = '合计要取回全池才给数';
 
+  /**
+   * 没有套餐概念的供应商（§15.14 TokenRhythm）**只有钱包一个池**：
+   * 另两张卡在那里永远是 0（订阅腿是零请求的空数组），而"永久 0 的套餐额度"会被读成
+   * "这个号套餐用完了" —— 一个不存在的池子比缺一张卡更坏。
+   */
+  const hasPlans = supplierCapabilities(upstream?.supplier ?? null)?.plans === true;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
       <div style={{ display: 'flex', alignItems: 'baseline', gap: tokens.space.sm, flexWrap: 'wrap' }}>
-        <Text style={{ fontSize: 13, fontWeight: 600 }}>账号池三个资金池</Text>
-        <Tooltip title="钱包是上游账号里的钱；高级额度是套餐里的钱；基础额度是套餐赠送的剩余 Token（不是钱）。三笔各自花各自的、两个量纲，网关选用 key 时看的也不是这三个数之和。">
+        <Text style={{ fontSize: 13, fontWeight: 600 }}>
+          {hasPlans ? '账号池三个资金池' : '账号池钱包'}
+        </Text>
+        <Tooltip
+          title={
+            hasPlans
+              ? '钱包是上游账号里的钱；高级额度是套餐里的钱；基础额度是套餐赠送的剩余 Token（不是钱）。三笔各自花各自的、两个量纲，网关选用 key 时看的也不是这三个数之和。'
+              : '这家上游只有账号钱包一笔钱（没有套餐概念，也就没有套餐额度那两个池子）。'
+          }
+        >
           <Text type="secondary" style={{ fontSize: 11 }}>
-            互不相通 · 不可相加
+            {hasPlans ? '互不相通 · 不可相加' : '唯一的钱'}
           </Text>
         </Tooltip>
         {!funds.complete ? (
@@ -148,6 +163,8 @@ export function SupplierPoolFundsCards({ funds, upstream }: SupplierPoolFundsCar
           hint="账号级钱包合计。与 key 级余额是两个口径：这一格的钱不是 key 的余额，两者不相加。"
           pending={walletTotal === null ? partialNote : undefined}
         />
+        {!hasPlans ? null : (
+          <>
         <PoolCard
           size="md"
           label="套餐高级额度"
@@ -184,6 +201,8 @@ export function SupplierPoolFundsCards({ funds, upstream }: SupplierPoolFundsCar
           hint="套餐赠送的基础额度剩余 = Σ(basic_token_total − basic_token_used)，单位是 Token 个数。调用基础模型时扣减；它不是钱，所以不与上面两个资金池相加。"
           pending={basicTotal === null ? partialNote : undefined}
         />
+          </>
+        )}
       </div>
     </div>
   );

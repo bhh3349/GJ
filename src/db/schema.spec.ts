@@ -484,3 +484,106 @@ describe('v1.11.0 加列（models capabilities_source / last_probed_at）', () =
     expect(columnsOf(db, 'models').filter((c) => c === 'last_probed_at')).toHaveLength(1);
   });
 });
+
+/* ---------------- v1.15.0 admin_users 两列（契约 §19.9 / ADR-0034）---------------- */
+
+/**
+ * v1.15.0 之前形态的 `admin_users`：没有 role / group_id / display_name，
+ * 且**已经有一个管理员账号 + 一条会话**（老库的典型状态）。
+ *
+ * 为什么要连 sessions 一起造：ADR-0034 的判据表里有一条是
+ * "老库升级后唯一账号 `role='admin'`"（升级不锁死现有管理员）。
+ * 只建表不建行的话，那条判据测的是空表 —— 而空表上任何默认值都"看起来对"。
+ */
+function seedPreV115AdminUsersDatabase(path: string): void {
+  const legacy = new Database(path);
+  legacy.exec(`
+    CREATE TABLE groups (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE,
+      rpm INTEGER, tpm INTEGER, daily_quota INTEGER,
+      enabled INTEGER NOT NULL DEFAULT 1, revision INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE admin_users (
+      username      TEXT PRIMARY KEY,
+      password_hash TEXT NOT NULL,
+      created_at    TEXT NOT NULL,
+      updated_at    TEXT NOT NULL
+    );
+    CREATE TABLE sessions (
+      id           TEXT PRIMARY KEY,
+      token_hash   TEXT NOT NULL UNIQUE,
+      username     TEXT NOT NULL,
+      created_at   TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      expires_at   TEXT NOT NULL
+    );
+  `);
+  const at = '2026-10-01T00:00:00.000Z';
+  legacy
+    .prepare(
+      'INSERT INTO admin_users (username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?)',
+    )
+    .run('legacy-admin', 'legacy-hash-not-real', at, at);
+  legacy
+    .prepare(
+      'INSERT INTO sessions (id, token_hash, username, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)',
+    )
+    .run('sess_old', 'deadbeef', 'legacy-admin', at, at, '2027-10-01T00:00:00.000Z');
+  legacy
+    .prepare("INSERT INTO groups (id, name, created_at, updated_at) VALUES ('grp_old', '老组', ?, ?)")
+    .run(at, at);
+  legacy.close();
+}
+
+describe('v1.15.0 加列（admin_users role / group_id / display_name，契约 §19.9）', () => {
+  it('新库直接带三列，SCHEMA_VERSION 不递增', () => {
+    const db = open(tempDbPath());
+    expect(columnsOf(db, 'admin_users')).toEqual(
+      expect.arrayContaining(['role', 'group_id', 'display_name']),
+    );
+    // 纯加列 ⇒ 版本号不动。判据是"列在不在"，不是版本号
+    // （同 v1.1.1 / v1.4.x / v1.7.1 / v1.11.0 那几批的一条纪律）
+    expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+  });
+
+  it('老库升级：唯一管理员补 role=admin（升级不锁死自己），会话不受影响', () => {
+    const path = tempDbPath();
+    seedPreV115AdminUsersDatabase(path);
+
+    // 前置断言：种子库确实没有这三列。少了它，"migrate 什么都没做"也可能看起来通过。
+    const legacy = new Database(path);
+    expect(columnsOf(legacy, 'admin_users')).not.toContain('role');
+    expect(columnsOf(legacy, 'admin_users')).not.toContain('group_id');
+    legacy.close();
+
+    const db = open(path);
+    const row = db
+      .prepare('SELECT username, role, group_id FROM admin_users WHERE username = ?')
+      .get('legacy-admin') as { username: string; role: string; group_id: string | null };
+    // **本批最要紧的一条**：老行补 `admin` 而不是 `user`。
+    // 填 `user` 会让升级后的现有管理员落在 `/api/**` 上全部 403，而那时候
+    // 库里可能已经没有第二个 admin 了 —— "升级即锁死自己"，只能改库脱身。
+    expect(row.role).toBe('admin');
+    // 未分配组：NULL = 未分配，不是 '' 也不是某把组的 id
+    expect(row.group_id).toBeNull();
+    // 会话一行不动（§19.9：`sessions` 零变更）
+    const sess = db.prepare('SELECT username FROM sessions WHERE id = ?').get('sess_old') as {
+      username: string;
+    };
+    expect(sess.username).toBe('legacy-admin');
+  });
+
+  it('加列幂等：重复 migrate 不抛 duplicate column name', () => {
+    const path = tempDbPath();
+    seedPreV115AdminUsersDatabase(path);
+    const db = open(path);
+    expect(() => {
+      migrate(db);
+      migrate(db);
+    }).not.toThrow();
+    expect(columnsOf(db, 'admin_users').filter((c) => c === 'role')).toHaveLength(1);
+    expect(columnsOf(db, 'admin_users').filter((c) => c === 'group_id')).toHaveLength(1);
+    expect(columnsOf(db, 'admin_users').filter((c) => c === 'display_name')).toHaveLength(1);
+  });
+});

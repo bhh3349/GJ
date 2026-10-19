@@ -40,26 +40,16 @@ export function parseRetryAfter(header: string | null | undefined, nowMs: number
   return delta > 0 ? delta : undefined;
 }
 
-/** 取 AbortSignal 超时导致的中止（与「客户端主动断开」区分开） */
-export function isAbortError(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'AbortError';
-}
-
-export function isTimeoutError(err: unknown): boolean {
-  return typeof err === 'object' && err !== null && (err as { name?: unknown }).name === 'TimeoutError';
-}
-
-/**
- * 网络层异常 → NETWORK（超时、ECONNRESET、DNS 失败一律同一档冷却）。
- * 注意：调用方必须先判「客户端主动断开」——那种情况不计失败、也不换 key。
- */
-export function classifyNetworkError(_err: unknown): FailureReason {
-  return 'NETWORK';
-}
-
 // 出口级（IP 级）429 的识别缝（`EgressLimitInput` / `EgressLimitDetector` / `neverEgressLimited` /
 // `egressLimitedOnSecondKey`）**已退休**（ADR-0021 影响表 + 决策 10(5)）：归因判据转正进闸内
 //（`src/gateway/egress.ts` 的 `observeLimited`），且只此一处 —— 旁路第二个计数器会让一个
 // 被打空预算的出口拿**自己拒出来的** N 张脸判成「被上游限」再冷掉自己。本文件自此只负责
 // 「状态码 → key 级失败」这一件事。
+//
+// 同批删掉三个**全仓零调用**的导出（2026-10-16 清死代码）：`isAbortError` / `isTimeoutError` /
+// `classifyNetworkError`。它们与上面那条退休同源 —— 那套"网络异常 → NETWORK 冷却"的分派
+// 转正进了引擎（`src/gateway/engine.ts` 直接按 `FailureReason` 记账），这里只剩状态码映射。
+// 留着的风险不是"占地方"，是**下一个人会以为它是活的**：一个导出了却没被调用的分类函数，
+// 看起来像"网关是这样把 ECONNRESET 归成 NETWORK 的"，于是照着它改判据 —— 而真的判据在别处。
+// 需要它们回来时，从 `engine.ts` 的调用点反推即可（git 历史里有逐字原文）。
 

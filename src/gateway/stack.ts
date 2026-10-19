@@ -97,7 +97,9 @@ export function createGatewayStack(options: GatewayStackOptions): GatewayStack {
 
   const engine = createGatewayEngine(built);
 
-  const routes: GatewayRoutesOptions = { engine, auth: options.auth, limiter };
+  // `models` 同时给引擎与路由层（ADR-0039）：引擎用它转发与出列表，路由层用 `typeOf`
+  // 做端点类别准入。同一个实例、不另建，两层看到的类别永远同一份快照。
+  const routes: GatewayRoutesOptions = { engine, models: options.models, auth: options.auth, limiter };
   if (options.errors !== undefined) routes.errors = options.errors;
   if (options.internalToken !== undefined) routes.internalToken = options.internalToken;
   if (options.bodyLimitBytes !== undefined) routes.bodyLimitBytes = options.bodyLimitBytes;

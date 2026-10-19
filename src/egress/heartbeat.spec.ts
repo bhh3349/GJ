@@ -24,7 +24,7 @@ import {
   startHeartbeatProducer,
   type HeartbeatProducer,
 } from './heartbeat.js';
-import { EGRESS_LOCAL_HEADER, EGRESS_LOCAL_VALUE, permissiveEgressGate, type EgressFetchFor, type EgressGate } from './port.js';
+import { EGRESS_ECHO_URL_DEFAULT, EGRESS_LOCAL_HEADER, EGRESS_LOCAL_VALUE, permissiveEgressGate, type EgressFetchFor, type EgressGate } from './port.js';
 
 const HK = { egressId: 'eg_hk1', name: 'hk-1', proxyUrl: 'http://10.0.0.1:8080' } as const;
 const US = { egressId: 'eg_us1', name: 'us-1', proxyUrl: 'http://10.0.0.2:8080' } as const;
@@ -317,5 +317,53 @@ describe('复制代价的判据（两处正则逐字同源）', () => {
     const shape = /^[0-9a-fA-F:.]{3,45}$/.source;
     expect(here).toContain(shape);
     expect(there).toContain(shape);
+  });
+});
+
+/**
+ * ADR-0033：探活端点可配，**缺省只有一份字面量**。
+ *
+ * 这两条判的不是"配置能读进来"（那是 config.spec 的事），而是**两个消费者的缺省必须同一个值**。
+ * 写死两遍的失败形状不是"以后要改两个地方"：面板与心跳可以配不同的端点而毫无症状 ——
+ * 面板说这台出口通（打的是新端点）、心跳说这台出口死了（还打旧的），两边日志都写着"探测正常"。
+ * 用户看到的是"同一条数据两个互相矛盾的真相"。
+ */
+describe('探活端点（ADR-0033）', () => {
+  it('缺省：入口 B 打端口层缺省端点', async () => {
+    const clock = fakeClock(Date.parse('2026-10-10T00:00:00.000Z'));
+    const probe = makeFetch();
+    const hb = startHeartbeatProducer({ gate: makeGate(), nodes: [HK], inboxDir: null, probe: true, fetchFor: probe.fetchFor, now: clock.now });
+    await hb.tick();
+    expect(probe.calls).toEqual([EGRESS_ECHO_URL_DEFAULT]);
+    hb.stop();
+  });
+
+  it('配了 echoUrl：打配置值，缺省端点一次都不碰', async () => {
+    const clock = fakeClock(Date.parse('2026-10-10T00:00:00.000Z'));
+    const probe = makeFetch();
+    const hb = startHeartbeatProducer({
+      gate: makeGate(),
+      nodes: [HK],
+      inboxDir: null,
+      probe: true,
+      fetchFor: probe.fetchFor,
+      echoUrl: 'https://myip.example.com/ip',
+      now: clock.now,
+    });
+    await hb.tick();
+    expect(probe.calls).toEqual(['https://myip.example.com/ip']);
+    expect(probe.calls).not.toContain(EGRESS_ECHO_URL_DEFAULT);
+    hb.stop();
+  });
+
+  it('缺省字面量只存在于 port.ts 一处：两个消费者都不许自己写一遍', async () => {
+    const { readFileSync } = await import('node:fs');
+    for (const rel of ['./heartbeat.ts', '../api/routes/egress.ts']) {
+      const src = readFileSync(new URL(rel, import.meta.url), 'utf8');
+      // 允许出现的唯一形态是 `EGRESS_ECHO_URL_DEFAULT` 这个标识符本身；
+      // 任何一处再出现裸字面量（含注释）都算复制 —— 上面那条"两个消费者"的理由适用。
+      const bare = src.split('EGRESS_ECHO_URL_DEFAULT').join(' ');
+      expect(bare, `${rel} 里仍有裸的 api.ipify.org 字面量`).not.toContain('api.ipify.org');
+    }
   });
 });

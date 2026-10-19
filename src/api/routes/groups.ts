@@ -20,6 +20,7 @@ import {
   resetGatewayKey,
   updateGroup,
 } from '../../db/repo/groups.js';
+import { getGroupModels, setAuthorizedModels } from '../../db/repo/group-models.js';
 import { ApiError } from '../errors.js';
 import { auditWrite } from '../http.js';
 import { idParam, nullableInteger, pageProps, revisionProp } from '../schemas.js';
@@ -231,6 +232,65 @@ export function registerGroupRoutes(app: FastifyInstance, ctx: ApiContext): void
         detail: keyId,
       });
       return reply.code(204).send();
+    },
+  );
+
+  // ── 模型授权（契约 §4「模型授权」/ v1.15.8 / ADR-0037）────────────────────────────────
+  //
+  // `PUT` 而不是 `POST`/`DELETE` 逐项增删：授权是**整组的一个属性**（一个集合的当前值），
+  // 不是可累加的成员列表。整组替换让"当前授权是什么"永远只有一个事实源（一次 PUT 的 body），
+  // 而逐项增删会造出"两个管理员同时编辑"的合并问题 —— 所以 body 带 `revision`（乐观锁，
+  // 与 `PATCH /api/groups/:id` 同一条）。
+
+  app.get<{ Params: { id: string } }>(
+    '/api/groups/:id/models',
+    { schema: { params: idParam } },
+    (req) => getGroupModels(db, req.params.id),
+  );
+
+  app.put<{ Params: { id: string }; Body: { models: string[] | null; revision: number } }>(
+    '/api/groups/:id/models',
+    {
+      schema: {
+        params: idParam,
+        body: {
+          type: 'object',
+          // **两格都必填**，理由各一条：
+          //   · `models` 必填（可为 null）—— 与 `PUT /api/keys/:id/balance` 的 `balance` 同一条：
+          //     `null`（不限）与省略是两件事，省略字段表达不了"置回不限"。
+          //   · `revision` 必填 —— 授权是组行的一个属性，两个管理员同时编辑同一个组时，
+          //     后写者必须知道前面有人写过（与 `PATCH /api/groups/:id` 同一条乐观锁）。
+          required: ['models', 'revision'],
+          properties: {
+            models: {
+              type: ['array', 'null'],
+              items: { type: 'string', minLength: 1, maxLength: 200 },
+              maxItems: 500,
+            },
+            revision: revisionProp,
+          },
+        },
+      },
+    },
+    (req) => {
+      const id = req.params.id;
+      // 审计的 detail 记 `{from, to}` 两个名字列表 —— "授权从什么改成什么"是这条审计
+      // 最有价值的一列（与 `key.balance` 记"置为未知还是具体金额"同一条理由）。
+      // **在写入前读 from**：写完之后再读，from 与 to 就都是新值了。
+      const before = getGroupModels(db, id).models;
+      const result = setAuthorizedModels(db, id, req.body.models, req.body.revision);
+      auditWrite(db, req, config, {
+        action: 'group.models.update',
+        targetType: 'group',
+        targetId: id,
+        detail: JSON.stringify({ from: before, to: result.models }),
+      });
+      // 回三格：`models`/`authorizedModels` 是这次写的**结果**（前端就地更新抽屉），
+      // `group` 是整行新状态（`revision` 已 +1、`authorizedModels` 已变）——
+      // 不给它就等于让前端自己推算组的 revision，那是本仓一贯拒绝的事。
+      const group = getGroup(db, id);
+      if (!group) throw ApiError.notFound('用户组', id);
+      return { ...result, group };
     },
   );
 }

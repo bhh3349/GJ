@@ -31,7 +31,7 @@ import type { KeyConfig, PoolSnapshot } from './types.js';
 
 /* ------------------------------ 测试台 ------------------------------ */
 
-const GROUP: GroupContext = { groupId: 'grp_1', name: '测试组', enabled: true, rpm: null, tpm: null, dailyQuota: null };
+const GROUP: GroupContext = { groupId: 'grp_1', name: '测试组', enabled: true, rpm: null, tpm: null, dailyQuota: null, authorizedModels: null };
 const GATEWAY_KEY = 'gk-ok';
 
 function keyConfig(keyId: string, upstreamId = 'up1', over: Partial<KeyConfig> = {}): KeyConfig {
@@ -115,9 +115,10 @@ async function setup(options: Options = {}): Promise<Harness> {
 
   const models: ModelCatalog = {
     listEnabledModels: async () => [
-      { id: 'gpt-4o', createdAt: '2026-10-06T00:00:00.000Z', ownedBy: 'up1', capabilities: [], contextLength: null, endpointTypes: null },
+      { id: 'gpt-4o', type: 'chat', createdAt: '2026-10-06T00:00:00.000Z', ownedBy: 'up1', capabilities: [], contextLength: null, endpointTypes: null },
     ],
     resolveUpstreamModel: (m) => m,
+    typeOf: (m) => (m === 'gpt-4o' ? 'chat' : null),
   };
 
   const group: GroupContext = { ...GROUP, ...options.group };
@@ -386,6 +387,29 @@ describe('被拒的请求（路由层产）', () => {
     assert.equal(entry.attempts, 0);
     assert.equal(entry.candidates, null, '没走到选路，与 503 的 candidates=0 不是一回事');
     assert.equal(entry.message, 'user group is disabled');
+  });
+
+  it('组未被授权这个模型 → 403 MODEL_NOT_AUTHORIZED，事件**同源**且 0 次真实尝试（v1.15.8 / ADR-0037）', async () => {
+    const h = await setup({ group: { authorizedModels: ['gpt-4o'] } });
+    const res = await post(h, '/v1/chat/completions', chatPayload({ model: 'deepseek-chat', stream: true }));
+
+    assert.equal(res.statusCode, 403);
+    assert.equal((res.json() as { error: { code: string } }).error.code, 'MODEL_NOT_AUTHORIZED');
+    const entry = only(h);
+    // 事件与响应同源（同一个 message、同一个码）—— 这条是"§10 的 0-attempt 判据在授权门上原样成立"的证据
+    assert.equal(entry.status, 403);
+    assert.equal(entry.gatewayCode, 'MODEL_NOT_AUTHORIZED');
+    assert.equal(entry.clientModel, 'deepseek-chat', '授权门在鉴权之后：body 可读，clientModel 必须如实填');
+    assert.equal(entry.stream, true);
+    assert.equal(entry.failureReason, null, '没碰过任何上游：没有"换 key 枚举"可言');
+    assert.equal(entry.keyId, '', '组级拒绝不指向某把 key');
+    assert.equal(entry.upstreamId, '');
+    assert.equal(entry.upstreamStatus, null);
+    assert.equal(entry.attempts, 0, '候选集根本没建');
+    assert.equal(entry.candidates, null, '没走到选路，与 503 的 candidates=0 不是一回事');
+    assert.equal(entry.message, 'model not authorized for this group: deepseek-chat');
+    // 没有一条 fetch 打出去 —— 与断言 attempts=0 是两件事：这个是**真的**没发
+    assert.equal(h.calls.length, 0, '0 次真实尝试：一次上游请求都不许敲');
   });
 
   it('同一个 429 的两种码值如实分开：RPM 限流 vs 日配额用尽', async () => {

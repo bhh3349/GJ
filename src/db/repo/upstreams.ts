@@ -335,6 +335,13 @@ export function deleteUpstream(db: Db, id: string, force: boolean): void {
       for (const keyId of keyIds) appendChange(db, 'key', keyId, 'delete', null);
     }
     if (modelIds.length > 0) {
+      // v1.15.8 / ADR-0037 级联 ②：指向这批档案的组授权行**先删**（models 行的
+      // 子外键），漏掉就是删上游 500（`foreign_keys=ON`，全库无 ON DELETE 子句）。
+      // 模型同步从不删档案（`upsertModelFromSync` 只 INSERT/UPDATE），所以
+      // "授权行指向被删档案"只有这一条成因 —— 授权的消失随档案删除显式发生。
+      db.prepare(
+        `DELETE FROM group_models WHERE model_id IN (${modelIds.map(() => '?').join(', ')})`,
+      ).run(...modelIds);
       db.prepare('DELETE FROM models WHERE upstream_id = ?').run(id);
       for (const modelId of modelIds) appendChange(db, 'model', modelId, 'delete', null);
     }

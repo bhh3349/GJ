@@ -182,6 +182,54 @@ body {
   word-break: keep-all;
 }
 
+/*
+ * 侧栏左下角用户按钮（1panel 那种）。
+ *
+ * 悬浮/按下态放 CSS 而不是内联 style：antd 的 `Dropdown` 会把自己的 props 透传到子节点上，
+ * 内联的 `background` 会在 Cursor 的 HOC 之后落笔、把悬浮态压掉；而 `:hover` 类选择器
+ * 在层叠里更靠后，改写的是同一个属性、不靠 `!important` 也不靠层级运气。
+ * 色值仍与 tokens 同源（`--bg-container-hover` = tokens.color.bgContainerHover）。
+ */
+.account-trigger {
+  transition: background var(--motion-base) var(--motion-easing);
+}
+
+.account-trigger:hover {
+  background: var(--bg-container-hover);
+}
+
+.account-trigger:active {
+  background: var(--border);
+}
+
+/*
+ * 侧栏收起按钮（品牌行右侧的图标按钮）。
+ *
+ * 与 `.account-trigger` 同一条理由：这些状态放 CSS 不放内联 style。
+ * 它是个**裸 `<button>`**，所以还要显式清掉浏览器的默认外观 —— 用 antd 的 `Button`
+ * 会带上 32px 的 `controlHeight` 与内边距，在 56px 高的品牌行里挤得放不下品牌名；
+ * 而这里要的就是一个 28px 的图标格。
+ *
+ * `color` 也写在同一条规则组里（而不是组件的内联 style）：内联样式优先级压得住
+ * `:hover`，两头各写一份必然只有一份生效 —— 实测过一次，悬停前后颜色一模一样。
+ */
+.sider-collapse {
+  color: var(--text-tertiary);
+  background: transparent;
+  transition:
+    background var(--motion-base) var(--motion-easing),
+    color var(--motion-base) var(--motion-easing);
+}
+
+.sider-collapse:hover {
+  background: var(--bg-container-hover);
+  color: var(--text-primary);
+}
+
+.sider-collapse:active {
+  background: var(--border);
+}
+
 :focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 2px;

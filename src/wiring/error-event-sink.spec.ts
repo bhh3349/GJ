@@ -71,6 +71,8 @@ describe('deriveCategory：分型由码值决定，不由状态码推', () => {
       ['UNSUPPORTED_ENDPOINT', 'CLIENT_REQUEST'],
       ['INVALID_API_KEY', 'AUTH_FAILED'],
       ['GROUP_DISABLED', 'AUTH_FAILED'],
+      // v1.15.8 / ADR-0037 决策 5：凭据对了、人（组）不对 —— 与 GROUP_DISABLED 同族。
+      ['MODEL_NOT_AUTHORIZED', 'AUTH_FAILED'],
       ['RATE_LIMITED', 'RATE_LIMITED'],
       ['QUOTA_EXCEEDED', 'QUOTA_EXCEEDED'],
       ['NO_AVAILABLE_KEY', 'NO_AVAILABLE_KEY'],
@@ -80,6 +82,26 @@ describe('deriveCategory：分型由码值决定，不由状态码推', () => {
     for (const [code, category] of table) {
       expect(deriveCategory({ status: 500, gatewayCode: code }), code).toBe(category);
     }
+  });
+
+  /**
+   * v1.15.8 订正一处**既有**漂移（ADR-0037 决策 5），这条用例的注释本身就是记录：
+   *
+   * `NO_AVAILABLE_EGRESS` 自 v1.7.0 进契约 §10 表以来，**从未登进 `error-event-sink.ts`
+   * 的 CODE 映射** —— 于是 503 `NO_AVAILABLE_EGRESS` 事件被 `deriveCategory` 的 default
+   * 一路归成 `INTERNAL`（error 级）。而 §10 那句「§12.1 的 category 仍是 9 值：'出口选不出'
+   * 与'key 选不出'是同一个分诊对象」的**意图本来就是**它归 `NO_AVAILABLE_KEY` 分型。
+   *
+   * 它先于本版存在，本版补上。**不静默改**：判据落在这条断言上，谁去掉映射谁红。
+   */
+  it('v1.15.8 订正：503 NO_AVAILABLE_EGRESS 归 NO_AVAILABLE_KEY，不再落 INTERNAL', () => {
+    expect(deriveCategory({ status: 503, gatewayCode: 'NO_AVAILABLE_EGRESS' })).toBe('NO_AVAILABLE_KEY');
+    // 对照：同一个分型的另一个码，两者必须同归一类（这是"同一个分诊对象"的字面判据）
+    expect(deriveCategory({ status: 503, gatewayCode: 'NO_AVAILABLE_EGRESS' })).toBe(
+      deriveCategory({ status: 503, gatewayCode: 'NO_AVAILABLE_KEY' }),
+    );
+    // 严重级随分型走：修复前它还会因为落到 INTERNAL 而被判成 error（值班被引向"网关内部出错"）
+    expect(deriveSeverity(deriveCategory({ status: 503, gatewayCode: 'NO_AVAILABLE_EGRESS' }))).toBe('error');
   });
 
   it('同为 429，码值不同则分型不同（这是本表存在的全部理由）', () => {

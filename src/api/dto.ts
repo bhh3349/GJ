@@ -191,10 +191,38 @@ export interface GroupDto {
   dailyQuotaUsed: number;
   todayUsage: { requests: number; tokens: number; costCents: number };
   keyCount: number;
+  /**
+   * 该组授权的模型**名**列表（契约 §4「模型授权」/ ADR-0037）。`null` = 不限（可用全部已启用模型）。
+   *
+   * **非破坏新增**（与 `gatewayKeyMasked` 同一呈现层）：管理面列表页要一列"这组能用什么"，
+   * 所以它是 `GroupDto` 的字段，不是"只在详情端点给"。出口恒不为 `[]`（与 `null` 同义，
+   * 见 `src/db/model-limits.ts` 那条冻结口径）。
+   */
+  authorizedModels: string[] | null;
   enabled: boolean;
   revision: number;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * 契约 §4 `GET`/`PUT /api/groups/:id/models` 里 `authorizedModels` 的展开项。
+ *
+ * 为什么和 `models` 并存：`models` 是**可写回的授权名列表**（PUT 的 body 就吃这个形状），
+ * 展开项是**管理面要看的"这条授权落到哪个上游"**。只给展开行，前端得自己拼回名字列表；
+ * 只给名字，界面上两条同名档案分不出来。**不给 `model_id` 裸值**：对界面无意义。
+ */
+export interface GroupModelEntryDto {
+  id: string;
+  name: string;
+  upstreamId: string;
+}
+
+/** 契约 §4 `GET`/`PUT /api/groups/:id/models` 的响应体。 */
+export interface GroupModelsDto {
+  /** null = 不限（与 `[]` 同义，出口恒不为 `[]`） */
+  models: string[] | null;
+  authorizedModels: GroupModelEntryDto[];
 }
 
 /**
@@ -207,19 +235,38 @@ export interface GroupDto {
 export interface GatewayKeyDto {
   id: string;
   maskedKey: string;
+  /**
+   * 人类给这把 key 起的名字（v1.15.9 新增，纯新增可空字段）。`null` = 没名字。
+   *
+   * 为什么现在才加：`gateway_keys.label` 这一列**建表起就在**（`src/db/schema.ts`），
+   * 只是从来没人写、也没人读；而 v1.15.9 把签发权下放到消费面之后，
+   * "我这三把 key 哪把是给哪个客户端的"在界面上必须有个答案 —— 否则用户只能
+   * 靠 `****9f3c` 这四个字符认人，而他要认的是"那把是给我的桌面客户端的"。
+   * 空串与纯空白在写入时归一化成 `null`（`normalizeLabel`），所以这里只有两态。
+   */
+  label: string | null;
   createdAt: string;
 }
 
-/** 契约 §4 建组/签发网关 key 的响应：明文只在这里出现一次 */
+/**
+ * 契约 §4 建组/签发网关 key 的响应：明文只在这里出现一次。
+ *
+ * `label` 与 `GatewayKeyDto` 同义（v1.15.9）。它**不是**"让调用方确认自己传了什么"——
+ * 传进来的值会被 trim、空串会被收成 `null`，所以回的是**库里真正写下的那个值**，
+ * 与随后列表里读到的那一格逐字相同。
+ */
 export interface GatewayKeyIssuedDto {
   id: string;
   gatewayKey: string;
   maskedKey: string;
+  label: string | null;
   createdAt: string;
 }
 
 /** 契约 §5 Model */
 export type ModelType = 'chat' | 'embedding' | 'image' | 'audio' | 'rerank';
+// 与 `src/gateway/ports.ts` 的 `ModelType` 是**两份刻意的重复**（网关不得 import 管理面，AGENTS.md §8），
+// 同 `KeyCategory` 的先例；两处注释互相钉住，改动必须成对。
 export type ModelCapability = 'stream' | 'function_call' | 'vision' | 'json_mode';
 
 /** 契约 §5 `capabilitiesSource`（v1.11.0 / ADR-0024）：能力那格的**写入来源**。 */
@@ -297,6 +344,93 @@ export interface AuditDto {
 export interface SessionDto {
   username: string;
   expiresAt: string;
+  /**
+   * 身份（v1.15.0 / §19 / ADR-0034）。**纯新增可选字段** —— 老前端不读它，
+   * 行为与 v1.15.0 之前逐字节相同。
+   * 登录响应带它，是为了那一刻就能决定跳 `/admin` 还是 `/console`；
+   * 多一次往返只会让"跳错地方"多一个时序窗口。
+   */
+  role?: 'admin' | 'user';
+}
+
+/** 契约 §19.2 消费面会话 */
+export interface ConsoleSessionDto {
+  username: string;
+  role: 'admin' | 'user';
+  /** 归属组；`null` = 未分配（此时四个读端点回空/降级 + `assigned:false`，写端点回 400，都不是 500） */
+  groupId: string | null;
+  expiresAt: string;
+}
+
+/** 契约 §19.3 消费面 key 列表 */
+export interface ConsoleKeysDto {
+  groupId: string | null;
+  /**
+   * 形状逐字复用 §4 `GatewayKeyDto`（含 v1.15.9 的 `label`）——
+   * **只有掩码**，明文只在签发/重置那一次的 201 里出现，此后没有任何取回路径。
+   */
+  keys: GatewayKeyDto[];
+  /** `false` = 未分配组；前端据此显示一句说明，而不是一张空表格 */
+  assigned: boolean;
+  /**
+   * 自助签发的把数上限（v1.15.9）。前端据此把"签发新 key"按钮置灰并说明原因 ——
+   * **上限是服务端的事实，不是前端的一条文案**：前端也能从 `keys.length` 推断出来，
+   * 但那要求前端复刻同一个数字，复刻出来的那份将来一定与这一份漂移
+   * （改了上限前端还按旧数拦，用户看到的是一个"点了必然失败"的按钮）。
+   */
+  keyLimit: number;
+}
+
+/**
+ * 契约 §19.3b 消费面额度（v1.15.9）。
+ *
+ * **每一格都是既有字段的透传**，本面不新造第二个口径：
+ * `rpm` / `tpm` / `dailyQuota` / `dailyQuotaUsed` 与 §4 `GroupDto` 逐字同源
+ * （同一个 `todayUsage()` 的 SQL），`requests` / `tokens` / `costCents` 就是
+ * §4 `todayUsage` 那三格。所以"用量页显示的数字"与"管理面组列表显示的数字"
+ * 是同一句话，不是两份可能对不上的账。
+ */
+export interface ConsoleQuotaDto {
+  /** `null` = 未分配组：此时其余各格是否回 0/`null` 由契约钉定 */
+  groupId: string | null;
+  assigned: boolean;
+  /** 每分钟请求数上限；`null` = 不限 */
+  rpm: number | null;
+  /** 每分钟 token 上限；`null` = 不限 */
+  tpm: number | null;
+  /** 日 token 配额；`null` = 不限 */
+  dailyQuota: number | null;
+  /** 今日已用 token（与 `todayUsage.tokens` 同一个数，单列一格是为了不让前端去算） */
+  dailyQuotaUsed: number;
+  todayUsage: { requests: number; tokens: number; costCents: number };
+}
+
+/** 契约 §19.6 消费面模型列表 */
+export interface ConsoleModelsDto {
+  models: ConsoleModelDto[];
+}
+
+/**
+ * §19.6 模型项。**刻意不带** `upstreamId` / `upstreamName` / 价格 / 余额：
+ * 那些是管理员面的信息，对普通用户无用，且是上游信息的泄漏面。
+ */
+export interface ConsoleModelDto {
+  id: string;
+  name: string;
+  displayName: string | null;
+  type: string;
+  capabilities: string[];
+  contextLength: number | null;
+}
+
+/** 契约 §19.7 用户（管理面建删用） */
+export interface UserDto {
+  username: string;
+  role: 'admin' | 'user';
+  groupId: string | null;
+  displayName: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -694,7 +828,15 @@ export interface SupplierTestParsed {
  * `login` = `import` 里新建账号的首登；`relogin` = 已有账号在 `import`/`refresh`/`keys` 中被重登；
  * `refresh` = `refresh`；`create` = `keys`；`sync` = `keys/sync`；`rotate` = §15.13 套餐 key 轮换。
  */
-export type SupplierBatchAction = 'login' | 'relogin' | 'refresh' | 'create' | 'sync' | 'rotate';
+export type SupplierBatchAction =
+  | 'login'
+  | 'relogin'
+  | 'refresh'
+  | 'create'
+  | 'sync'
+  | 'rotate'
+  /** v1.16.4：Cookie 粘贴导入 —— 只登记会话，没有发生登录。 */
+  | 'import';
 
 /** 一行。**不含任何凭据** —— `keyMasked` 是掩码，`keyId`/`tokenNo` 是内部标识。 */
 export interface SupplierBatchItem {

@@ -50,6 +50,7 @@ import { statsApi, upstreamsApi } from '@/api/endpoints';
 import { useAction, useResource } from '@/api/hooks';
 import { useTaskPolling } from '@/api/useTaskPolling';
 import {
+  hasSupplierAccountPanel,
   PAGE_SIZE_DEFAULT,
   type BalanceRefreshResult,
   type BalanceSyncUpstreamState,
@@ -408,10 +409,12 @@ export default function UpstreamsPage() {
         <Space size={tokens.space.sm}>
           {/*
             账号面入口**只由 `supplier` 这一个字段决定**（§15.12 锚 1）——
-            不解析 Base URL 猜供应商。不是 tierflow 的上游这里连按钮都不出现：
-            画一个点进去全是"不是供应商账号型"的按钮，等于把一次拒绝做成一个功能。
+            不解析 Base URL 猜供应商。判据是**集合归属**（`hasSupplierAccountPanel`），
+            不是与某一家的等值比较：写 `=== 'tierflow'` 会让第二家供应商静默少一个入口。
+            非账号面供应商的上游这里连按钮都不出现：画一个点进去全是"不是供应商账号型"
+            的按钮，等于把一次拒绝做成一个功能。
           */}
-          {row.supplier === 'tierflow' ? (
+          {hasSupplierAccountPanel(row.supplier) ? (
             <Tooltip title="供应商账号池：账号、key、套餐统一管理">
               <Button
                 size="small"

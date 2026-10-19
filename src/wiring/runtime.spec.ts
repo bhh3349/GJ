@@ -22,8 +22,11 @@ import { afterEach, describe, it } from 'vitest';
 import type { AppConfig } from '../config.js';
 import { encryptSecret, sha256Hex } from '../db/crypto.js';
 import { openDatabase, type Db } from '../db/database.js';
-import { createGroup } from '../db/repo/groups.js';
-import { createKey, listKeys } from '../db/repo/keys.js';
+import { bootstrapAdmin, hashPassword } from '../api/auth.js';
+import { buildApp } from '../api/app.js';
+import { createGroup, deleteGroup } from '../db/repo/groups.js';
+import { createUser, findUser } from '../db/repo/users.js';
+import { batchSetEnabled, createKey, listKeys } from '../db/repo/keys.js';
 import { upsertModelFromSync, getModel, updateModel } from '../db/repo/models.js';
 import { createUpstream } from '../db/repo/upstreams.js';
 import { permissiveEgressGate } from '../egress/port.js';
@@ -82,6 +85,9 @@ function makeConfig(dbPath: string): AppConfig {
     adminToken: null,
     readonlyToken: null,
     logRetentionDays: 30,
+    auditRetentionDays: 180,
+    taskRetentionDays: 7,
+    changeLogKeepRows: 10_000,
     healthSnapshotRetentionDays: 90,
     maxAttempts: 3,
     maxConcurrencyPerKey: 4,
@@ -89,6 +95,7 @@ function makeConfig(dbPath: string): AppConfig {
     // 新增必填配置项（契约 §13 `ASSISTANT_MODEL`）的测试取值：本套用例不涉及助手
     assistantModel: null,
     egressHeartbeatInboxDir: null,
+    egressEchoUrl: null,
     // 同上，契约 §14 新增两项：测试里关掉自动同步，不引后台定时器
     balanceSyncMinutes: 0,
     balanceSnapshotRetentionDays: 90,
@@ -109,8 +116,11 @@ const COMPLETION = { id: 'cmpl_1', object: 'chat.completion', choices: [], usage
 
 interface Harness {
   db: Db;
+  dbPath: string;
   runtime: GatewayRuntime;
   gatewayKey: string;
+  /** 默认那个接入组的 id —— 组授权用例要拿它写 `group_models`（v1.15.8） */
+  groupId: string;
   keyPlain1: string;
   keyPlain2: string;
   keyId1: string;
@@ -143,7 +153,9 @@ async function setup(script?: Script, gate: EgressGate = permissiveEgressGate): 
     price: { inputPer1k: 100, outputPer1k: 200 },
   });
 
-  const gatewayKey = createGroup(db, { name: '接入组' }).gatewayKey.gatewayKey;
+  const created = createGroup(db, { name: '接入组' });
+  const gatewayKey = created.gatewayKey.gatewayKey;
+  const groupId = created.group.id;
 
   const calls: Call[] = [];
   const fetchImpl: FetchLike = async (url, init) => {
@@ -162,11 +174,41 @@ async function setup(script?: Script, gate: EgressGate = permissiveEgressGate): 
     db.close();
   });
 
-  return { db, runtime, gatewayKey, keyPlain1, keyPlain2, keyId1, keyId2, upstreamId, modelId: model.id, calls };
+  return { db, dbPath, runtime, gatewayKey, groupId, keyPlain1, keyPlain2, keyId1, keyId2, upstreamId, modelId: model.id, calls };
 }
 
 function auth(h: Harness): Record<string, string> {
   return { authorization: `Bearer ${h.gatewayKey}` };
+}
+
+/** 直接往 `group_models` 写授权行（绕过管理面 API —— 本文件测的是网关侧读这条授权）。 */
+function authorize(h: Harness, groupId: string, modelIds: readonly string[]): void {
+  h.db.prepare('DELETE FROM group_models WHERE group_id = ?').run(groupId);
+  for (const id of modelIds) {
+    h.db.prepare('INSERT INTO group_models (group_id, model_id) VALUES (?, ?)').run(groupId, id);
+  }
+}
+
+/** 再建一个组（默认组之外的第二个身份），返回它的 id 与网关 key 明文。 */
+function addGroup(h: Harness, tag: string): { groupId: string; gatewayKey: string } {
+  const created = createGroup(h.db, { name: `组-${tag}` });
+  return { groupId: created.group.id, gatewayKey: created.gatewayKey.gatewayKey };
+}
+
+/**
+ * 新建一把带**模型白名单**的 key（§15.2 的真写入路径，会自己发 `change_log` 行）。
+ *
+ * 为什么不用裸 SQL 改 `model_limits`：网关读的是**快照**，快照只在 `change_log`
+ * 出现相关实体时重建（`wiring/store.ts` 文件头那条纪律）。裸改库不发广播，
+ * `refreshNow()` 就返回 false，用例会误判成"白名单不生效"。
+ */
+function addKeyWithModels(
+  h: Harness,
+  upstreamId: string,
+  tag: string,
+  models: readonly string[],
+): string {
+  return createKey(h.db, { upstreamId, key: probeSecret(tag), category: 'balance', models: [...models] }, MASTER_KEY).id;
 }
 
 function chat(h: Harness, body: Record<string, unknown> = {}): Promise<{ statusCode: number; headers: Record<string, unknown>; body: string; json: () => unknown }> {
@@ -424,6 +466,236 @@ describe('/v1/models 与内部观测口', () => {
     });
     assert.equal(h.runtime.refreshNow(), true);
     assert.equal(h.runtime.store.poolSnapshot().upstreams[0]?.models?.length, 2);
+  });
+});
+
+/* ------------- 组模型授权：真库 → 真适配器 → 真路由（v1.15.8 / ADR-0037） ------------- */
+
+/**
+ * 这一组用例钉的**只有**真链路才看得见的那几件事：
+ *   - 授权是**实时读**的（`wiring/auth.ts` 每请求一次），改库 ⇒ 下一个请求变，不重启；
+ *   - `/v1/models` 与 `/api/console/models` 报的是**同一个集合**（同源三角，决策 6）；
+ *   - 组授权与 key 白名单是**交集**（背景表）—— 只加组这一层不会绕过 key 那层。
+ *
+ * 「403 的响应体/事件字段」在 `src/gateway/routes.spec.ts` 与 `error-events.spec.ts` 里钉，
+ * 这里不重复；这里值钱的是**真 SQLite 行**驱动的行为。
+ */
+describe('组模型授权（v1.15.8 / ADR-0037）', () => {
+  const listModels = async (
+    h: Harness,
+    gatewayKey: string,
+  ): Promise<{ statusCode: number; ids: string[] }> => {
+    const res = await h.runtime.app.inject({
+      method: 'GET',
+      url: '/v1/models',
+      headers: { authorization: `Bearer ${gatewayKey}` },
+    });
+    const body = res.json() as { data?: { id: string }[] };
+    return { statusCode: res.statusCode, ids: (body.data ?? []).map((m) => m.id).sort() };
+  };
+
+  it('改授权后**下一个请求**即按新授权判（实时读库，不重启、不等轮询）', async () => {
+    const h = await setup();
+    upsertModelFromSync(h.db, {
+      upstreamId: h.upstreamId,
+      name: 'gpt-4o-mini',
+      displayName: null,
+      type: 'chat',
+      capabilities: [],
+      contextLength: null,
+      price: null,
+    });
+    // 新档案要进**快照**才算"该上游有这个模型"（`/v1/models` 是实时读库，选路不是）。
+    // 授权面（本用例的判据）与快照无关，这一步只为让"未收窄时能打通"这一侧成立。
+    assert.equal(h.runtime.refreshNow(), true);
+
+    // 未授权收缩（没有授权行）= 逐项同改版前：两个模型都能打（升级零行为变更）
+    assert.equal((await chat(h, { model: 'gpt-4o-mini' })).statusCode, 200);
+    assert.deepEqual((await listModels(h, h.gatewayKey)).ids, ['gpt-4o', 'gpt-4o-mini']);
+
+    // 授权只留 gpt-4o：下一个请求就该拒 gpt-4o-mini
+    authorize(h, h.groupId, [h.modelId]);
+    const denied = await chat(h, { model: 'gpt-4o-mini' });
+    assert.equal(denied.statusCode, 403);
+    assert.equal((denied.json() as { error: { code: string } }).error.code, 'MODEL_NOT_AUTHORIZED');
+    assert.equal(h.calls.length, 1, '被授权门拒掉的请求一次上游都不许敲');
+    assert.equal((await chat(h, { model: 'gpt-4o' })).statusCode, 200);
+    assert.deepEqual((await listModels(h, h.gatewayKey)).ids, ['gpt-4o']);
+
+    // 撤销授权（清空行）→ 同一把 key 立即恢复全量，**不重启进程**
+    h.db.prepare('DELETE FROM group_models WHERE group_id = ?').run(h.groupId);
+    assert.equal((await chat(h, { model: 'gpt-4o-mini' })).statusCode, 200);
+    assert.deepEqual((await listModels(h, h.gatewayKey)).ids, ['gpt-4o', 'gpt-4o-mini']);
+  });
+
+  it('按组收窄互不干扰：组 A 授权一条、组 B 不限 → 两把 key 各看到各自的集合', async () => {
+    const h = await setup();
+    const a = addGroup(h, 'auth-a');
+    const b = addGroup(h, 'auth-b');
+    // 上游再加一条档案：收窄的组只看见一条，不限的组看见两条 —— 差别才看得见
+    upsertModelFromSync(h.db, {
+      upstreamId: h.upstreamId,
+      name: 'probe-extra',
+      displayName: null,
+      type: 'chat',
+      capabilities: [],
+      contextLength: null,
+      price: null,
+    });
+    assert.equal(h.runtime.refreshNow(), true);
+
+    // 组 A 只授权默认那条档案；组 B 一个授权行都没有 = 不限
+    authorize(h, a.groupId, [h.modelId]);
+
+    assert.deepEqual((await listModels(h, a.gatewayKey)).ids, ['gpt-4o']);
+    assert.deepEqual((await listModels(h, b.gatewayKey)).ids, ['gpt-4o', 'probe-extra']);
+
+    // 强制门同样是按组的：同一个请求体，两把 key 两种结局 —— 唯一变量是组
+    const post = async (key: string, model: string) =>
+      h.runtime.app.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: { authorization: `Bearer ${key}` },
+        payload: { model, messages: [{ role: 'user', content: 'hi' }] },
+      });
+
+    assert.equal((await post(a.gatewayKey, 'gpt-4o')).statusCode, 200);
+    // A 授权名单里没有 probe-extra ⇒ 403（策略拒绝），不是 503（档案里没有）
+    const denied = await post(a.gatewayKey, 'probe-extra');
+    assert.equal(denied.statusCode, 403);
+    assert.equal((denied.json() as { error: { code: string } }).error.code, 'MODEL_NOT_AUTHORIZED');
+    // B 不限 ⇒ 同一条档案放行，真打到上游
+    assert.equal((await post(b.gatewayKey, 'probe-extra')).statusCode, 200);
+  });
+
+  it('组授权 ∩ key 白名单 = 交集：组放行而 key 白名单不含它 → 503，不是 200', async () => {
+    const h = await setup();
+    // 这一层是 **key 白名单**（§15.2 / §16.3 冻结件），归组管不到它。
+    // 走真写入路径建一把"只认别的模型"的 key（裸 SQL 不发 change_log ⇒ 快照不重建），
+    // 并把默认那两把挪开 —— 否则它们照样认 gpt-4o，这条用例就永远打不出那一声 503。
+    const keyId = addKeyWithModels(h, h.upstreamId, 'wl', ['some-other-model']);
+    assert.equal(batchSetEnabled(h.db, [h.keyId1, h.keyId2], false), 2);
+    assert.equal(h.runtime.refreshNow(), true);
+    // 白名单**真的**进了快照、默认两把**真的**不在可用集里 —— 否则下面那条 503 可能是别的原因
+    // （用例就成了假绿：断言"没打通"，而没打通的理由并不是本用例要证的那一条）
+    const snapshot = h.runtime.store.poolSnapshot();
+    assert.deepEqual(snapshot.keys.find((k) => k.keyId === keyId)?.models, ['some-other-model']);
+    assert.deepEqual(
+      snapshot.keys.filter((k) => k.status === 'enabled').map((k) => k.keyId),
+      [keyId],
+    );
+
+    authorize(h, h.groupId, [h.modelId]); // 组**授权了** gpt-4o
+    const res = await chat(h, { model: 'gpt-4o' });
+
+    // 授权门放行（名字在授权列表里），但候选集为空 ⇒ 503 NO_AVAILABLE_KEY。
+    // 这条用例存在的理由：只加"组"这一层不构成对 key 白名单的替代 —— 两层是交集。
+    assert.equal(res.statusCode, 503);
+    const body = res.json() as { error: { code: string } };
+    assert.equal(body.error.code, 'NO_AVAILABLE_KEY');
+    assert.equal(h.calls.length, 0);
+  });
+
+  it('同源三角：同组会话的 /api/console/models 与该组 key 的 /v1/models 逐项 0 差异', async () => {
+    const h = await setup();
+    upsertModelFromSync(h.db, {
+      upstreamId: h.upstreamId,
+      name: 'gpt-4o-mini',
+      displayName: null,
+      type: 'chat',
+      capabilities: [],
+      contextLength: null,
+      price: null,
+    });
+    authorize(h, h.groupId, [h.modelId]); // 只授权 gpt-4o
+
+    // 管理面/消费面挂在同一个 db 上（线上是同一进程两个监听口，这里两个实例同一个库）
+    const admin = buildApp({
+      db: h.db,
+      config: makeConfig(h.dbPath),
+      balanceSync: false,
+      healthSnapshots: false,
+      adminWebDist: null,
+    });
+    live.push(async () => {
+      await admin.close();
+    });
+    createUser(h.db, {
+      username: 'tri-user',
+      passwordHash: hashPassword('tri-user-pass-1'),
+      role: 'user',
+      groupId: h.groupId,
+    });
+    const login = await admin.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { username: 'tri-user', password: 'tri-user-pass-1' },
+      headers: { 'x-requested-with': 'fetch' },
+    });
+    assert.equal(login.statusCode, 200, login.body);
+    const raw = login.headers['set-cookie'];
+    const cookie = String(Array.isArray(raw) ? raw[0] : raw).split(';')[0] ?? '';
+
+    const consoleRes = await admin.inject({
+      method: 'GET',
+      url: '/api/console/models',
+      headers: { cookie },
+    });
+    assert.equal(consoleRes.statusCode, 200, consoleRes.body);
+    const consoleIds = (consoleRes.json() as { models: { name: string }[] }).models
+      .map((m) => m.name)
+      .sort();
+
+    assert.deepEqual(consoleIds, (await listModels(h, h.gatewayKey)).ids);
+    // 收窄**真的发生了**（否则上面那条等式在"两边都返回全量"时也成立 —— 那是最没价值的绿）
+    assert.deepEqual(consoleIds, ['gpt-4o']);
+  });
+
+  it('未分配组的会话（groupId=null）不受任何授权影响：照旧看到全部已启用模型', async () => {
+    const h = await setup();
+    upsertModelFromSync(h.db, {
+      upstreamId: h.upstreamId,
+      name: 'gpt-4o-mini',
+      displayName: null,
+      type: 'chat',
+      capabilities: [],
+      contextLength: null,
+      price: null,
+    });
+    authorize(h, h.groupId, [h.modelId]); // 那个组被收窄了
+
+    const admin = buildApp({
+      db: h.db,
+      config: makeConfig(h.dbPath),
+      balanceSync: false,
+      healthSnapshots: false,
+      adminWebDist: null,
+    });
+    live.push(async () => {
+      await admin.close();
+    });
+    createUser(h.db, {
+      username: 'no-group-user',
+      passwordHash: hashPassword('no-group-pass-1'),
+      role: 'user',
+      groupId: null,
+    });
+    const login = await admin.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { username: 'no-group-user', password: 'no-group-pass-1' },
+      headers: { 'x-requested-with': 'fetch' },
+    });
+    const raw = login.headers['set-cookie'];
+    const cookie = String(Array.isArray(raw) ? raw[0] : raw).split(';')[0] ?? '';
+
+    const res = await admin.inject({ method: 'GET', url: '/api/console/models', headers: { cookie } });
+    assert.equal(res.statusCode, 200, res.body);
+    // 没有组就没有"这个组授权了什么"可言 —— 收窄的判据挂在组上，不挂在"有人被收窄了"上
+    assert.deepEqual(
+      (res.json() as { models: { name: string }[] }).models.map((m) => m.name).sort(),
+      ['gpt-4o', 'gpt-4o-mini'],
+    );
   });
 });
 
@@ -774,5 +1046,190 @@ describe('出口代理接线：绑出口的 key 真从代理层出去（缺口 A
     assert.equal(r.statusCode, 200);
     assert.equal(h.calls.length, 1);
     assert.notEqual((h.calls[0]?.init as unknown as Record<string, unknown>).dispatcher, undefined);
+  });
+});
+
+/*
+  ── 开箱即用端到端：管理员的账号能真的用路由（v1.15.6 / ADR-0035 判据）──
+
+  这一条是 Bo 那句「管理员的账号无法使用路由」的**可执行反面**，所以它刻意跨三层：
+  首启引导（`bootstrapAdmin` 建组 + 把管理员放进去）→ 网关鉴权（`key_hash` → 组上下文）
+  → 真路由（`/v1/models` 出 200）。断在中间任何一层的"表里有条记录"都不算数 ——
+  组存在、key 存在、`group_id` 也指对了，而链子断在鉴权上的形状完全可能
+  （那正是本版要修的故障：每一环都在，整条链不可达）。
+
+  它跑在**闸门之后**（网关面只需要一把 key，不需要任何会话），这是唯一一条能证明
+  "管理员这个账号拿到了能用的凭据"的判据。
+*/
+describe('开箱即用：首启引导的管理员能用自己的 key 打 /v1/*（ADR-0035）', () => {
+  it('引导时签发的 key 打 /v1/models → 200（跨引导 / 鉴权 / 路由三层）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wiring-boot-'));
+    dirs.push(dir);
+    const dbPath = join(dir, 'gateway.db');
+    const db = openDatabase({ path: dbPath });
+
+    // 与线上 `src/server.ts` 同序：先引导（这时库空），再装配网关。
+    const boot = bootstrapAdmin(db, { ADMIN_USERNAME: 'admin', ADMIN_PASSWORD: 'boot-pass-1234' });
+    assert.equal(boot.created, true);
+    assert.equal(boot.adminGroup?.name, '管理组');
+    assert.ok(boot.adminGatewayKey, '引导必须交出管理组那把 key 的明文（唯一一次）');
+
+    // 归属真的落库了 —— 否则下面 200 的成因说不清（可能只是"key 恰好有效"）
+    assert.equal(findUser(db, 'admin')?.group_id, boot.adminGroup?.id);
+
+    upsertModelFromSync(db, {
+      upstreamId: createUpstream(db, { name: 'up-boot', baseUrl: 'https://boot.example.com' }).id,
+      name: 'gpt-4o-mini',
+      displayName: null,
+      type: 'chat',
+      capabilities: [],
+      contextLength: null,
+      price: null,
+    });
+
+    const runtime = createGatewayRuntime({ db, config: makeConfig(dbPath), egress: permissiveEgressGate });
+    await mountGatewayRoutes(runtime);
+    await runtime.app.ready();
+    live.push(async () => {
+      await runtime.stop();
+      await runtime.app.close();
+      db.close();
+    });
+
+    const res = await runtime.app.inject({
+      method: 'GET',
+      url: '/v1/models',
+      headers: { authorization: `Bearer ${boot.adminGatewayKey ?? ''}` },
+    });
+    assert.equal(res.statusCode, 200);
+    const body = res.json() as { data: Array<{ id: string }> };
+    assert.deepEqual(
+      body.data.map((m) => m.id),
+      ['gpt-4o-mini'],
+    );
+
+    // 明文只在返回值里；库里只有散列（§4 铁律，顺手钉一下这条路径没破它）
+    const stored = db.prepare('SELECT key_hash FROM gateway_keys').all() as { key_hash: string }[];
+    assert.equal(stored.length, 1);
+    assert.notEqual(stored[0]?.key_hash, boot.adminGatewayKey);
+  });
+
+  it('老库（升级上来的、已有账号且没有组）引导 → 零动作：不建组、不签发 key、不改归属', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wiring-boot-old-'));
+    dirs.push(dir);
+    const dbPath = join(dir, 'gateway.db');
+    const db = openDatabase({ path: dbPath });
+    live.push(async () => {
+      db.close();
+    });
+
+    // 造一个**真的老库**：v1.15.6 之前的账号行就是这个样子 ——
+    // 有 `admin_users` 行、没有组、也没有 `groupId` 这一说。
+    // 刻意不走 `bootstrapAdmin` 来造它：那会顺手把管理组种进去，
+    // 于是"有没有被种"就测不出来了（这正是本用例要测的东西）。
+    const at = new Date().toISOString();
+    db.prepare('INSERT INTO admin_users (username, password_hash, created_at, updated_at) VALUES (?, ?, ?, ?)').run(
+      'legacy',
+      'scrypt$1$1$1$AAAA$AAAA',
+      at,
+      at,
+    );
+
+    const groupsBefore = (db.prepare('SELECT COUNT(*) AS n FROM groups').get() as { n: number }).n;
+    const keysBefore = (db.prepare('SELECT COUNT(*) AS n FROM gateway_keys').get() as { n: number }).n;
+    assert.equal(groupsBefore, 0);
+
+    const again = bootstrapAdmin(db, { ADMIN_USERNAME: 'someone-else', ADMIN_PASSWORD: 'other-pass-1234' });
+    // 上面那就是 `server.ts` 每次启动都会走的一步 —— 老库上必须整段 no-op。
+    // 不替用户做"给你补一个组"这个配额决策：那是一次会改变他账单的行为，
+    // 而它发生在一个没人要求过的地方（启动日志里还不会有任何痕迹）。
+    assert.equal(again.created, false);
+    assert.equal(again.adminGatewayKey, undefined);
+    assert.equal(again.adminGroup, undefined);
+
+    assert.equal((db.prepare('SELECT COUNT(*) AS n FROM groups').get() as { n: number }).n, groupsBefore);
+    assert.equal((db.prepare('SELECT COUNT(*) AS n FROM gateway_keys').get() as { n: number }).n, keysBefore);
+    // 老账号的归属没被动过，也没多出 `someone-else` 这个人
+    const row = db.prepare('SELECT username, group_id FROM admin_users').all() as {
+      username: string;
+      group_id: string | null;
+    }[];
+    assert.deepEqual(row, [{ username: 'legacy', group_id: null }]);
+  });
+
+  it('删掉种出来的管理组 → 管理员还在、归属退回 NULL、那把 key 一起失效（组是普通组）', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wiring-boot-del-'));
+    dirs.push(dir);
+    const dbPath = join(dir, 'gateway.db');
+    const db = openDatabase({ path: dbPath });
+
+    const boot = bootstrapAdmin(db, { ADMIN_USERNAME: 'admin', ADMIN_PASSWORD: 'boot-pass-1234' });
+    const groupId = boot.adminGroup?.id ?? '';
+    const key = boot.adminGatewayKey ?? '';
+
+    upsertModelFromSync(db, {
+      upstreamId: createUpstream(db, { name: 'up-del', baseUrl: 'https://del.example.com' }).id,
+      name: 'gpt-4o-mini',
+      displayName: null,
+      type: 'chat',
+      capabilities: [],
+      contextLength: null,
+      price: null,
+    });
+
+    const runtime = createGatewayRuntime({ db, config: makeConfig(dbPath), egress: permissiveEgressGate });
+    await mountGatewayRoutes(runtime);
+    await runtime.app.ready();
+    live.push(async () => {
+      await runtime.stop();
+      await runtime.app.close();
+      db.close();
+    });
+
+    // 删组**不走 HTTP**：本用例钉的是仓储层的成员处置（路由层的删组已有回归）。
+    // 也是刻意的：管理组没有任何特权，它必须能被普通地删掉 ——
+    // 否则"管理"就成了一种藏在别处的身份（ADR-0035 决策 3 要防的正是这个）。
+    deleteGroup(db, groupId);
+
+    // 三件事各自成立，缺一条这个"删"就不是干净的：
+    //   ① 账号还在（删组不该顺带销毁登录身份，那是用户管理页的职责）
+    const user = findUser(db, 'admin');
+    assert.equal(user?.username, 'admin');
+    assert.equal(user?.group_id, null); // ② 归属退回 NULL = 合法可读的降级，不是报错
+    //   ③ 那把 key 一起没了 —— 留着就是一把"能过鉴权但找不到组"的凭据
+    assert.equal((db.prepare('SELECT COUNT(*) AS n FROM gateway_keys').get() as { n: number }).n, 0);
+
+    // 而它确实打不通了：**用旧 key 打 /v1/models**。
+    // 这是"key 真的失效"与"表里少了一行"的区别 —— 前者才是调用方感受到的事实。
+    const res = await runtime.app.inject({
+      method: 'GET',
+      url: '/v1/models',
+      headers: { authorization: `Bearer ${key}` },
+    });
+    assert.equal(res.statusCode, 401);
+  });
+
+  it('引导幂等：同一个新库连引导两次，只有第一次建组签发', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wiring-boot-twice-'));
+    dirs.push(dir);
+    const db = openDatabase({ path: join(dir, 'gateway.db') });
+    live.push(async () => {
+      db.close();
+    });
+
+    const first = bootstrapAdmin(db, { ADMIN_USERNAME: 'admin', ADMIN_PASSWORD: 'boot-pass-1234' });
+    assert.equal(first.created, true);
+
+    // 第二次：库里有账号了 → 整段 no-op。判据是**组与 key 的计数不变**，
+    // 不只是返回值好看 —— 一个"每次启动都多给管理组发一把 key"的实现
+    // 会让库里每次重启多一份可用凭据，而它同样可以返回 `{created:false}`。
+    const groups = (db.prepare('SELECT COUNT(*) AS n FROM groups').get() as { n: number }).n;
+    const keys = (db.prepare('SELECT COUNT(*) AS n FROM gateway_keys').get() as { n: number }).n;
+
+    const second = bootstrapAdmin(db, { ADMIN_USERNAME: 'admin', ADMIN_PASSWORD: 'boot-pass-1234' });
+    assert.equal(second.created, false);
+    assert.equal(second.adminGatewayKey, undefined);
+    assert.equal((db.prepare('SELECT COUNT(*) AS n FROM groups').get() as { n: number }).n, groups);
+    assert.equal((db.prepare('SELECT COUNT(*) AS n FROM gateway_keys').get() as { n: number }).n, keys);
   });
 });

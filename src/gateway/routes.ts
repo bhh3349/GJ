@@ -21,10 +21,22 @@ import { REQUEST_ID_HEADER, resolveRequestId } from '../util/request-id.js';
 import type { GatewayEngine } from './engine.js';
 import { GATEWAY_ERROR_CODES, GatewayError, openAIError } from './errors.js';
 import type { RateLimiter } from './limiter.js';
-import type { ErrorEventSink, GatewayAuth, GroupContext } from './ports.js';
+import type { ErrorEventSink, GatewayAuth, GroupContext, ModelCatalog, ModelType } from './ports.js';
 
 export interface GatewayRoutesOptions {
   engine: GatewayEngine;
+  /**
+   * 模型档案只读视图（ADR-0039）。**必填**，虽然引擎也持有同一个 catalog。
+   *
+   * 为什么同一份 catalog 要给两层：用途不同。引擎用它转发（`resolveUpstreamModel` 改模型名、
+   * `listEnabledModels` 出列表）；本层用 `typeOf` 做**端点类别准入** —— 那是与
+   * `GROUP_DISABLED` / 模型授权同一族的准入判定，按 ADR-0037 决策 4 的结构理由必须判在**路由层**：
+   * 判在引擎等于把内部助手（`wiring/assistant-invoker.ts` 直接调引擎、不过路由层）卷进判定。
+   *
+   * 要求必填而不给缺省：缺省实现只有两种写法（恒放行 = 静默失效，或恒拒绝 = 全部打不通），
+   * 两种都把「忘了接」伪装成「故意这么配」。同 `stack.ts` 对 `egressSelectable` 的那条纪律。
+   */
+  models: ModelCatalog;
   auth: GatewayAuth;
   limiter?: RateLimiter;
   /**
@@ -42,8 +54,16 @@ export interface GatewayRoutesOptions {
 /** 建了档案但接口不实现的端点：501，而不是 404（契约 §10） */
 const UNSUPPORTED_PREFIXES: readonly string[] = ['/v1/images/', '/v1/audio/', '/v1/rerank', '/v1/moderations', '/v1/files', '/v1/fine_tuning'];
 
+/**
+ * 两个服务端点的路径字面量。**只为准入拒绝的文案**（ADR-0039）而抽出：
+ * 文案里要报端点名，而 `app.post('/v1/chat/completions', …)` 的路径串在 handler 里再抄一遍
+ * 就是第二处实现 —— 抄错一个字符时，注册与文案会各说各话。
+ */
+const CHAT_ENDPOINT = '/v1/chat/completions';
+const EMBEDDINGS_ENDPOINT = '/v1/embeddings';
+
 export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOptions): Promise<void> {
-  const { engine, auth, limiter } = opts;
+  const { engine, auth, limiter, models } = opts;
   const errors = opts.errors;
 
   /** 事件里只记路径：`?x=1` 是每次调用都不同的噪声，聚合时只会把同一个端点拆成无数条 */
@@ -236,6 +256,86 @@ export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOpt
   }
 
   /**
+   * 组模型授权检查（契约 §4「模型授权」/ §10 v1.15.8 / ADR-0037 决策 4）；通过后返回 true。
+   *
+   * **为什么判在路由层**（这是本版最要紧的一个位置选择，三个候选逐一否过）：
+   *   - **不在引擎**：`engine.forward()` 是转发路径，已经建好候选集、算过限流，在那里拒等于
+   *     让"授权失败"长得像"转发失败"。更硬的理由是**助手** —— `wiring/assistant-invoker.ts`
+   *     直接调引擎、不过路由层，引擎层强制会把内部助手卷进授权判定（它的合成组该授什么模型？）；
+   *     放在路由层，助手**天然豁免**，与它"不参与限流、零 usage 落库"同一条结构事实。
+   *   - **不在 key 池**：`getAvailableKeys(model)` 的签名是冻结件，且它管的是"哪把 key 可用"
+   *     （有候选集），而授权是**非黑即白的准入**，判在候选集建立之前。
+   *   - **在路由层**：与 `GROUP_DISABLED` / 限流是**同一类拒绝**（凭据/策略侧、0 次真实尝试、
+   *     候选集根本不建），§10 的 0-attempt 判据原样成立（`failureReason: null`、不计 key 健康、
+   *     不碰冷却）；`reportRejection` + `authedFacts` 就在旁边，事件（§12.1）与响应同源。
+   *
+   * **不特判 `*`**：授权列表按字面匹配。通配符归 key 白名单的既有语义（§16.3 `matchesModel`），
+   * 两层不混 —— 在授权层再实现一次通配，等于让"组授权"与"key 白名单"有两套不同的匹配规则。
+   *
+   * **`/v1/models` 不走这道门**：它是读面，调用方需要它来发现自己能用什么；按组收窄（见那个
+   * handler）已经够了，对它 403 只会把"你被授权了什么"变成猜谜。
+   */
+  function requireModelAuthorized(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    group: GroupContext,
+    model: string,
+  ): boolean {
+    if (group.authorizedModels === null || group.authorizedModels.includes(model)) return true;
+    const message = `model not authorized for this group: ${model}`;
+    reportRejection(
+      request,
+      reply,
+      { status: 403, gatewayCode: GATEWAY_ERROR_CODES.MODEL_NOT_AUTHORIZED, message },
+      authedFacts(request),
+    );
+    void reply
+      .code(403)
+      .send(openAIError(GATEWAY_ERROR_CODES.MODEL_NOT_AUTHORIZED, message, 'authentication_error', 'model'));
+    return false;
+  }
+
+  /**
+   * 端点类别准入（契约 §10 / ADR-0039）；通过后返回 true。
+   *
+   * **修的是什么**：在此之前 `models.type` 只活在建档与展示里，服务路径一次都不读它 ——
+   * 网关有「模型类别」也有「端点」，却从不把两者对上。于是把任何登记过的 chat 名字
+   * 打到 `/v1/embeddings`，请求会被原样转发给上游的 `/embeddings` 路径，上游的 404
+   * 被当成一次**正常调用**落库（`usage_logs` 多一行、`x-gateway-attempts: 1`、
+   * 而 `todayUsage()` 不带状态过滤 ⇒ 两端看到的 `requests` 都虚高）。类别是**网关侧**的
+   * 登记事实，上游没有向量模型是**本网关**要回答的问题，不是推给上游的 404。
+   *
+   * **为什么判在路由层**：与 `requireModelAuthorized` 逐条同构 ——
+   *   · 判在引擎会把内部助手（`wiring/assistant-invoker.ts` 直调引擎、不过路由层）卷进判定；
+   *   · 判在 key 池则要动冻结签名 `getAvailableKeys(model)`，且那是"哪把 key 可用"的层
+   *     （已经建了候选集，太晚了）；
+   *   · 判在这里 = 与 `GROUP_DISABLED` / 授权 / 限流同一族：**0 次真实尝试**、候选集根本不建、
+   *     不碰 key 健康、不进冷却，事件（§12.1）与响应共用同一份文案。
+   *
+   * **未登记的名字本闸不表态**（`typeOf` → `null` ⇒ 放行）：存在性不是本层要回答的问题，
+   * 它由引擎侧的候选集回答（既有 503 `NO_AVAILABLE_KEY`，同样是 0 次真实尝试）。
+   * 这也保证本闸**永远不会拒掉一个路由器还能路由的名字** —— 否则就成了另一种"列表里有、打过去不通"。
+   *
+   * **码选 400 `INVALID_REQUEST` + `param=model`**，零新增码：这是"你把这个名字用在了不服务它的端点上"，
+   * 属于 §10 `INVALID_REQUEST` 的原义（调用方参数错），与授权/组停用那类"人不对"（401/403）分开。
+   */
+  function requireModelCategory(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    model: string,
+    endpoint: string,
+    accepted: ModelType,
+  ): boolean {
+    const type = models.typeOf(model);
+    if (type === null || type === accepted) return true;
+    const message =
+      `model \`${model}\` is registered as category \`${type}\`, which \`${endpoint}\` does not serve ` +
+      `(this endpoint serves \`${accepted}\` only); use a \`${accepted}\` model here`;
+    void rejectInvalid(request, reply, message, 'model');
+    return false;
+  }
+
+  /**
    * 参数校验失败：400 `INVALID_REQUEST`，事件与响应共用同一份文案。
    * `param` 只进响应体（§12.1 的事件没有这个字段），排障侧靠 message 定位字段。
    */
@@ -293,7 +393,7 @@ export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOpt
       .send(toNodeReadable(result.body));
   }
 
-  app.post('/v1/chat/completions', async (request, reply) => {
+  app.post(CHAT_ENDPOINT, async (request, reply) => {
     const group = await requireGroup(request, reply);
     if (group === null) return;
     if (!passLimiter(request, reply, group)) return;
@@ -306,6 +406,11 @@ export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOpt
     if (model === null) {
       return rejectInvalid(request, reply, '`model` is required and must be a non-empty string', 'model');
     }
+    // 授权门排在"模型名字合法"之后、"body 其余部分"之前：名字都读不出来时该报 400 而不是 403，
+    // 而授权是**策略**判定，比 messages/input 这类形状校验更早（形状错的东西不该先过策略）。
+    if (!requireModelAuthorized(request, reply, group, model)) return;
+    // 类别门与授权门同排（ADR-0039）：chat 端点只服务 chat 类 —— 判在引擎之前，0 次真实尝试
+    if (!requireModelCategory(request, reply, model, CHAT_ENDPOINT, 'chat')) return;
     if (body.messages === undefined) {
       return rejectInvalid(request, reply, '`messages` is required', 'messages');
     }
@@ -328,7 +433,7 @@ export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOpt
     }
   });
 
-  app.post('/v1/embeddings', async (request, reply) => {
+  app.post(EMBEDDINGS_ENDPOINT, async (request, reply) => {
     const group = await requireGroup(request, reply);
     if (group === null) return;
     if (!passLimiter(request, reply, group)) return;
@@ -341,6 +446,11 @@ export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOpt
     if (model === null) {
       return rejectInvalid(request, reply, '`model` is required and must be a non-empty string', 'model');
     }
+    if (!requireModelAuthorized(request, reply, group, model)) return;
+    // 同一个门的第二处（两处都要有，漏一个就是绕过 —— 与既有 embeddings 授权用例同一条纪律）：
+    // embeddings 端点只服务 embedding 类。这正是本次要修的缺陷现场：登记为 chat 的名字
+    // 此前会被原样转发到上游 `/embeddings`，上游 404 反而被当成一次正常调用落库。
+    if (!requireModelCategory(request, reply, model, EMBEDDINGS_ENDPOINT, 'embedding')) return;
     if (body.input === undefined) {
       return rejectInvalid(request, reply, '`input` is required', 'input');
     }
@@ -360,9 +470,18 @@ export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOpt
     if (!passLimiter(request, reply, group)) return;
 
     const models = await engine.listModels();
+    // 按组收窄（契约 §10 v1.15.8 改口 / ADR-0037 决策 6）：集合 = 档案 enabled 判据 **∩ 该组授权**。
+    // 收窄在**这里**（服务端、网关侧），与 /api/console/models 同一条判据 —— 两个面报的是
+    // 同一个集合，否则又是"列表里有它、打过去 403"那种会骗人的信号（§19.6）。
+    // **未授权收缩的组（null）逐项不变**：这就是升级的零行为变更（既有验收 4 对存量组原样成立）。
+    // 过滤在 engine.listModels() 之后、映射之前：引擎不知道授权（它不该知道，决策 4）。
+    const visible =
+      group.authorizedModels === null
+        ? models
+        : models.filter((m) => group.authorizedModels?.includes(m.id) === true);
     return void reply.send({
       object: 'list',
-      data: models.map((m) => ({
+      data: visible.map((m) => ({
         id: m.id,
         object: 'model',
         created: createdSeconds(m.createdAt),
@@ -372,6 +491,10 @@ export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOpt
         capabilities: m.capabilities,
         contextLength: m.contextLength,
         endpointTypes: m.endpointTypes,
+        // v1.15.10 只加字段（ADR-0039）：**调用方要的正是这一格** —— 准入闸按类别把关之后，
+        // 不把类别说出来就等于让调用方盲试端点（打错了收 400，还得回来问"那我该打哪个"）。
+        // 与档案卡 `ModelDto.type` 同源（同一份 `models.type` 列），口径逐字一致。
+        type: m.type,
       })),
     });
   });

@@ -116,3 +116,28 @@ export function finishTask(
     id,
   );
 }
+
+/**
+ * 保留策略：删掉**已终态**且 `finished_at` 早于 `retentionDays` 天前的任务行。
+ *
+ * 两个谓词都不能省：
+ *
+ * 1. **`finished_at IS NOT NULL`** —— 在跑的（`queued` / `running`）任务没有 `finished_at`，
+ *    一个都没写。少了它，`finished_at < cutoff` 对它们恒为假（SQL 的 NULL 比较），
+ *    所以这条**现在**恰好是安全的；但那是撞上的，不是设计出来的。
+ *    2026-10-16 用变异验证把这句话钉死了：整条谓词删掉，`retention.spec.ts` 的那条
+ *    "在跑的任务无论多老都不删"**依然绿**（NULL 比较兜住了）；但把谓词换成注释里点名的
+ *    那次"优化"—— `COALESCE(finished_at, started_at)` —— 同一条**立刻红**。
+ *    也就是说它拦的是"有人嫌 NULL 比较别扭、补一个 started_at 兜底"那一次改写，
+ *    而那一次会让在跑的任务按开始时间被无声删掉，`getTask` 开始给轮询的前端回 404。
+ *    显式写出来，是为了让"只删终态"成为判据而不是巧合。
+ *
+ * 2. **`< cutoff`**（不是 `<=`）：与 `pruneLogs` / `pruneAudit` / 三个快照 prune 逐字一致。
+ *
+ * 删了之后**没有级联**：`tasks` 没有子表，`GET /api/tasks/:id` 对已删的 id 回 404 ——
+ * 那是正确语义（"这个作业记录已经不在保留期内了"），不是数据丢失。
+ */
+export function pruneTasks(db: Db, retentionDays: number, now: Date = new Date()): number {
+  const cutoff = new Date(now.getTime() - retentionDays * 86_400_000).toISOString();
+  return db.prepare('DELETE FROM tasks WHERE finished_at IS NOT NULL AND finished_at < ?').run(cutoff).changes;
+}

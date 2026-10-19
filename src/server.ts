@@ -1,4 +1,5 @@
 // 进程入口：读配置 → 开库 → 建管理员 → 起**两个**监听（网关面 / 管理面）→ 挂维护定时器。
+// 维护定时器负责五张表的保留策略（总表见下方定时器那段），另两张由各自的写入方自己扫。
 //
 // 启动顺序是有讲究的，不能调换：
 //   1. loadConfig 先跑。MASTER_KEY 缺失或长度不对会在这一步抛错，进程直接起不来 ——
@@ -17,15 +18,19 @@
 //   - 管理面（config.hostAdmin:portAdmin）跑 `/api/*` + 前端，默认只回环。
 //   两个 Fastify 实例共用一个 `Db` 句柄：本项目是单写者模型，一个句柄才谈得上单写者。
 //
-// 维护定时器（清过期会话 / 裁日志 / 清限速表）在**同一个进程**里跑：
-// 再起一个 cron 进程去写库，就同时有两个写者了。
+// 维护定时器（清过期会话 / 裁日志 / 裁审计 / 裁任务 / 裁错误事件 / 裁广播 / 清限速表）
+// 在**同一个进程**里跑：再起一个 cron 进程去写库，就同时有两个写者了。
 
 import { buildApp } from './api/app.js';
 import { unwiredAssistantInvoker } from './api/assistant-port.js';
 import { LoginRateLimiter, bootstrapAdmin, purgeExpiredSessions } from './api/auth.js';
 import { loadConfig } from './config.js';
 import { openDatabase } from './db/database.js';
+import { pruneAudit } from './db/repo/audit.js';
+import { pruneChanges } from './db/repo/change-log.js';
+import { pruneGatewayErrorEvents } from './db/repo/gateway-events.js';
 import { pruneLogs } from './db/repo/logs.js';
+import { pruneTasks } from './db/repo/tasks.js';
 import { listEgressProxies } from './db/repo/egress.js';
 import { EGRESS_BUDGET_PLACEHOLDER, createEgressGate } from './gateway/egress.js';
 import { startHeartbeatProducer } from './egress/heartbeat.js';
@@ -47,7 +52,31 @@ async function main(): Promise<void> {
   const db = openDatabase({ path: config.dbPath });
 
   // 首次启动没有管理员且没给 ADMIN_PASSWORD 时会在这里抛错并退出（fail-fast）
-  bootstrapAdmin(db, process.env);
+  const boot = bootstrapAdmin(db, process.env);
+
+  /*
+    首次建库时把管理组的网关 key 明文打一行到标准输出（ADR-0035 遗留 1）。
+
+    **这一行与本文件上面那句"凭据不进日志"的纪律是矛盾的，我是明知代价选的它。**
+    两个凭据的**替代路径**不一样：管理员口令他能记得、能存密码管理器；
+    而网关 key 明文**没有任何其它路径** —— §4 铁律决定了它只在签发响应里出现一次，
+    不打日志就等于那把 key 从诞生起就不可知，"管理员的账号无法使用路由"原样保留
+    （那正是本版要修的故障）。缓解只有三条：只在首次建库打、明确标注"仅此一次"、
+    并指明轮换办法（管理面里重置那把 key）。
+    代价写在这里而不是藏起来：这一行会进容器日志，任何能读日志的人都能拿到它。
+    **所以管理组的配额是本版刻意留空的**（ADR-0035 遗留 2）—— 建站后第一件事
+    应当是去管理面给它设限，或者重置这把 key。
+  */
+  if (boot.adminGatewayKey !== undefined && boot.adminGroup !== undefined) {
+    process.stdout.write(
+      [
+        `已创建「${boot.adminGroup.name}」，并把首个管理员放进它。`,
+        `网关 Base URL: http://<本机地址>:${config.portGateway}/v1`,
+        `网关 key（仅此一次显示，库内只存散列；可在管理面「用户组」里重置）: ${boot.adminGatewayKey}`,
+        '',
+      ].join('\n'),
+    );
+  }
 
   const loginLimiter = new LoginRateLimiter();
 
@@ -146,6 +175,9 @@ async function main(): Promise<void> {
   //      入口 B 的探活也扣同一张 management 预算表（决策 4c）。
   //   3. `inboxDir` 取自 config（空/缺省 = null = 入口 A 关）。入口 B（`probe`）**默认关**：
   //      它吃 management 预算（成本口径写在 heartbeat.ts 文件头），开启要另有一笔明确决策。
+  //   4. `echoUrl` 与 `/api/egress/:id/test` **同源**（ADR-0033）：两边都从 `config.egressEchoUrl`
+  //      取，缺省回落 `EGRESS_ECHO_URL_DEFAULT`（端口层唯一字面量）。各配一个值会让面板说
+  //      "这台通"而心跳说"这台死了" —— 两边的日志还都写着"探测正常"。
   // `nodes` 为空数组时生产者照跑：`poolSnapshot()` 回 `[]`，发射面据此发「未配置出口」的空池帧。
   const egressProducer = startHeartbeatProducer({
     gate: egress,
@@ -153,6 +185,7 @@ async function main(): Promise<void> {
       .filter((row) => row.status === 'active')
       .map((row) => ({ egressId: row.id, name: row.name, proxyUrl: row.url })),
     inboxDir: config.egressHeartbeatInboxDir,
+    ...(config.egressEchoUrl === null ? {} : { echoUrl: config.egressEchoUrl }),
     onLog: (line) => gateway.app.log.info({ egressHeartbeat: line }, '出口心跳证据'),
   });
 
@@ -183,6 +216,18 @@ async function main(): Promise<void> {
 
   // 维护任务一律 try/catch 吞掉异常：清垃圾失败不该把整台服务带走，
   // 下一次 tick 还会再来一遍。
+  //
+  // 保留策略总表（为什么分散在四个文件里而不是一个"清理器"）：
+  //   · `usage_logs`        —— 本文件，`LOG_RETENTION_DAYS`（30d）
+  //   · `audit_log`         —— 本文件，`AUDIT_RETENTION_DAYS`（180d，**独立**于上面那个）
+  //   · `tasks`             —— 本文件，`TASK_RETENTION_DAYS`（7d）
+  //   · `gateway_error_events` —— 本文件，与 `usage_logs` 同口径（契约 §12.1 明文）
+  //   · `change_log`        —— 本文件，**按行数**不按天数（`CHANGE_LOG_KEEP_ROWS`）
+  //   · `gateway_health_snapshots` —— `src/api/health-snapshot-writer.ts` 自己的节拍
+  //   · `balance_snapshots` —— `src/api/balance-sync.ts` 自己的节拍（与同步开关无关）
+  // 后两张表留在原地不是懒：它们的写入方已经有自己的定时器，再挂一个全局清理器
+  // 就成了"同一个表两个节拍"，而两边的保留期一旦配得不一样，谁先跑谁后跑决定库的大小。
+  // 本文件只收**没有其它写入方**的五张表。
   const timers: NodeJS.Timeout[] = [
     setInterval(() => {
       try {
@@ -198,6 +243,39 @@ async function main(): Promise<void> {
         if (n > 0) app.log.info({ removed: n, retentionDays: config.logRetentionDays }, '裁剪历史日志');
       } catch (err) {
         app.log.error({ err }, '裁剪历史日志失败');
+      }
+    }, 6 * HOUR_MS),
+    // 审计 / 任务 / 错误事件 / 广播表四条挂同一个 6h 节拍。**不为它们各起一个定时器**：
+    // 四张表的量级都不大（审计按管理动作计、任务按批量动作计、错误事件按失败计、
+    // 广播按管理写计），一天扫四次与一小时扫一次在库大小上没有可测差别，
+    // 而多三个定时器就多三条可能在关停时漏清的尾巴。
+    setInterval(() => {
+      try {
+        const n = pruneAudit(db, config.auditRetentionDays);
+        if (n > 0) app.log.info({ removed: n, retentionDays: config.auditRetentionDays }, '裁剪历史审计');
+      } catch (err) {
+        app.log.error({ err }, '裁剪历史审计失败');
+      }
+      try {
+        const n = pruneTasks(db, config.taskRetentionDays);
+        if (n > 0) app.log.info({ removed: n, retentionDays: config.taskRetentionDays }, '裁剪历史任务');
+      } catch (err) {
+        app.log.error({ err }, '裁剪历史任务失败');
+      }
+      try {
+        // 与 usage_logs 同口径（契约 §12.1 明文）。保留期取 logRetentionDays 而不是新配一个：
+        // 契约已经把两者钉在同一个配置上，拆开只会让"为什么错误事件比用量明细活得久"变成疑问。
+        const n = pruneGatewayErrorEvents(db, config.logRetentionDays);
+        if (n > 0) app.log.info({ removed: n, retentionDays: config.logRetentionDays }, '裁剪历史错误事件');
+      } catch (err) {
+        app.log.error({ err }, '裁剪历史错误事件失败');
+      }
+      try {
+        // 广播信道按**行数**裁，不是按天数 —— 判据是"消费者的 seq 追到哪了"。
+        // 裁剪安全性分析见仓储层的注释（为什么 10000 行追不上 1s 节拍的消费者）。
+        pruneChanges(db, config.changeLogKeepRows);
+      } catch (err) {
+        app.log.error({ err }, '裁剪变更广播失败');
       }
     }, 6 * HOUR_MS),
     setInterval(() => {

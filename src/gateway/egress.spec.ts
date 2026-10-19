@@ -47,7 +47,7 @@ const tick = (ms: number): void => {
   clock += ms;
 };
 
-const GROUP: GroupContext = { groupId: 'grp_1', name: '测试组', enabled: true, rpm: null, tpm: null, dailyQuota: null };
+const GROUP: GroupContext = { groupId: 'grp_1', name: '测试组', enabled: true, rpm: null, tpm: null, dailyQuota: null, authorizedModels: null };
 const REQUEST_ID = 'req-egress-spec-0001';
 
 function keyConfig(keyId: string, upstreamId = 'up1', over: Partial<KeyConfig> = {}): KeyConfig {
@@ -138,7 +138,7 @@ function makeHarness(options: HarnessOptions) {
       return target;
     },
   };
-  const models: ModelCatalog = { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m };
+  const models: ModelCatalog = { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m, typeOf: () => null };
 
   const gate = options.gate ?? createEgressGate({ now });
   const { fetchImpl, calls } = scriptedFetch(options.steps);
@@ -676,7 +676,7 @@ describe('引擎：出口级 429 的归因上移（§16.7 / 决策 10）', () =>
         return { upstreamId: up, baseUrl, apiKey: `sk-${keyId}`, egressId: egressIdOfUrl(baseUrl), accountId: null };
       },
     };
-    const models: ModelCatalog = { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m };
+    const models: ModelCatalog = { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m, typeOf: () => null };
     const { fetchImpl, calls } = scriptedFetch([OK]);
     const engine = createGatewayEngine({ pool, secrets, models, fetchImpl, now, egress: gate });
 
@@ -731,7 +731,7 @@ describe('引擎：未接线/默认时行为零漂移（决策 7）', () => {
         return { upstreamId: 'up1', baseUrl, apiKey: `sk-${keyId}`, egressId: egressIdOfUrl(baseUrl), accountId: null };
       },
     };
-    const models: ModelCatalog = { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m };
+    const models: ModelCatalog = { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m, typeOf: () => null };
     const { fetchImpl, calls } = scriptedFetch([EGRESS_429, OK]);
     const engine = createGatewayEngine({ pool, secrets, models, fetchImpl, now });
 
@@ -790,6 +790,7 @@ describe('引擎：未接线/默认时行为零漂移（决策 7）', () => {
           lastFailureReason: null,
           lastLatencyMs: null,
           inflight: 0,
+          autoDisabled: false,
         },
       ],
     };
@@ -1014,7 +1015,7 @@ describe('引擎：本地预算拒绝（标记头 ⇒ 不换 key、不记失败�
     const secrets: SecretResolver = {
       resolve: () => ({ upstreamId: 'up1', baseUrl: 'https://up1.example.com/v1', apiKey: 'sk-k1', egressId: 'up1.example.com', accountId: null }),
     };
-    const models: ModelCatalog = { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m };
+    const models: ModelCatalog = { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m, typeOf: () => null };
     const pool: KeyPoolInternal = createKeyPool({ now });
     pool.applySnapshot({
       revision: 1,
@@ -1063,6 +1064,60 @@ describe('引擎：503 出口选择器（egressSelectable 判据缝，装配层�
     assert.equal(result.error.retryAfterSec, undefined, '码值级不变量 v10①：503 NO_AVAILABLE_EGRESS 永不带 Retry-After');
     assert.equal(h.calls.length, 0, '不回落宿主直连 —— 决策 9(5)：回落 = 无人看得见的静默故障');
     assert.equal(result.attempts, 0, '0 次真实尝试（终态形状与决策 4b 同款）');
+  });
+
+  // 审计项 B：上面那条 503 用例只验了「终态对不对」，没验「并发位还没还没有还」。
+  // 本分支曾经漏 `pool.endAttempt()` —— `beginAttempt` 占了位，判出死绑定后直接 continue。
+  // 后果不是多等一会儿：inflight 只增不减，`isUsable` 的 `inflight >= cap` 恒真，
+  // 这把 key 从此再也选不出来（哪怕出口随后被重新激活），只能重启进程。
+  it('死绑定跳过必须归还并发位（审计项 B）：打满 maxConcurrency 后 inflight 归零', async () => {
+    const pool = createKeyPool({ now });
+    pool.applySnapshot({
+      revision: 1,
+      upstreams: [{ upstreamId: 'up1', enabled: true, models: null }],
+      keys: [keyConfig('k1')],
+    });
+    const h = makeHarness({
+      keys: [keyConfig('k1')],
+      pool,
+      steps: [],
+      egressIds: { up1: 'egr_dead' },
+      selectable: () => false,
+    });
+
+    // 连续打 4 个请求（默认 maxConcurrency = 4），全部撞死绑定
+    for (let i = 0; i < 4; i += 1) {
+      const result = await run(h);
+      assert.equal(result.kind, 'error');
+      if (result.kind === 'error') assert.equal(result.error.body.error.code, 'NO_AVAILABLE_EGRESS');
+    }
+
+    assert.equal(runtimeOf(pool, 'k1').inflight, 0, '4 个请求全部返回后并发位必须归零');
+  });
+
+  it('死绑定跳过归还并发位后，出口恢复即可重新入选（审计项 B 的另一半）', async () => {
+    const pool = createKeyPool({ now });
+    pool.applySnapshot({
+      revision: 1,
+      upstreams: [{ upstreamId: 'up1', enabled: true, models: null }],
+      keys: [keyConfig('k1')],
+    });
+    let selectable = false;
+    const h = makeHarness({
+      keys: [keyConfig('k1')],
+      pool,
+      steps: [OK, OK],
+      egressIds: { up1: 'egr_x' },
+      selectable: (id) => (id === 'egr_x' ? selectable : true),
+    });
+
+    const dead = await call(h);
+    assert.equal(dead.error.body.error.code, 'NO_AVAILABLE_EGRESS');
+    assert.equal(runtimeOf(pool, 'k1').inflight, 0, '死绑定没有钉死并发位');
+
+    selectable = true; // 管理员重新激活出口
+    const alive = await run(h);
+    assert.equal(alive.kind, 'json', '出口恢复后同一把 key 立刻能重新入选（漏 endAttempt 时这里恒 NO_AVAILABLE_KEY）');
   });
 
   it('死绑定候选被跳过、活出口照常服务 —— 死绑定不污染瞬态分型也不拖垮活出口', async () => {

@@ -179,6 +179,23 @@ describe('其余项仍然 fail-fast', () => {
     assert.equal(loadConfig(env({ PUBLIC_HOST: ' gw.example.com ' })).publicHost, 'gw.example.com');
   });
 
+  /**
+   * EGRESS_ECHO_URL（ADR-0033 / 契约 §16.7）：出口探活的回显端点。
+   * 空串按"未配置"处理（同 ADMIN_WEB_DIST / PUBLIC_HOST / ASSISTANT_MODEL）——
+   * `EGRESS_ECHO_URL=` 是部署脚本里最常见的"这行先留着"写法。**不校验 URL 语法**：
+   * 一个连不上的端点就是一次失败的探测（那正是探测的职责），而拒绝启动会让填错
+   * 别名的用户在启动阶段看到一句与网络无关的报错。
+   */
+  it('EGRESS_ECHO_URL：空串 / 空白是 null（= 用缺省端点），其余原样透出（trim）', () => {
+    assert.equal(loadConfig(env()).egressEchoUrl, null);
+    assert.equal(loadConfig(env({ EGRESS_ECHO_URL: '' })).egressEchoUrl, null);
+    assert.equal(loadConfig(env({ EGRESS_ECHO_URL: '   ' })).egressEchoUrl, null);
+    assert.equal(
+      loadConfig(env({ EGRESS_ECHO_URL: ' https://myip.example.com/ip ' })).egressEchoUrl,
+      'https://myip.example.com/ip',
+    );
+  });
+
   it('十进制整数照旧生效（收紧不误伤正常写法，两侧空白仍去）', () => {
     assert.equal(loadConfig(env({ PORT_GATEWAY: '8080' })).portGateway, 8080);
     assert.equal(loadConfig(env({ PORT_ADMIN: ' 4002 ' })).portAdmin, 4002);

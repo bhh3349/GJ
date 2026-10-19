@@ -41,7 +41,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { createEgressFetch, isLocalEgressReject } from './fetch-gate.js';
-import { egressIdOfUrl, type EgressFetchFor, type EgressGate } from './port.js';
+import { EGRESS_ECHO_URL_DEFAULT, egressIdOfUrl, type EgressFetchFor, type EgressGate } from './port.js';
 import { toIso } from '../util/time.js';
 
 /** 心跳节奏（契约 §7 的 30s；接线层经 `setIntervalMs` / 环境变量改节奏）。 */
@@ -267,7 +267,12 @@ export interface HeartbeatProducerDeps {
   probe?: boolean;
   /** 绑定 fetch 工厂；缺省 = 按**同一个闸**造（`createEgressFetch(gate)`），探活扣 management 预算 */
   fetchFor?: EgressFetchFor;
-  /** 探活端点；缺省 ipify（与 `pool-probe.sh` 缺省同源） */
+  /**
+   * 探活端点。缺省 `EGRESS_ECHO_URL_DEFAULT`（端口层唯一字面量，ADR-0033）。
+   *
+   * 接线层传 `config.egressEchoUrl ?? undefined`：配置层空串已经是 `null`，
+   * 这里只认"给了字符串就用它、否则回落缺省"，于是**缺省值的解释仍只有一处**。
+   */
   echoUrl?: string;
   /** 注入日志（生产接线传 gateway/app 的 logger；缺省静默） */
   onLog?: (line: HeartbeatLogLine) => void;
@@ -351,7 +356,7 @@ export function startHeartbeatProducer(deps: HeartbeatProducerDeps): HeartbeatPr
     const controller = new AbortController();
     const killer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
     try {
-      const res = await call(deps.echoUrl ?? 'https://api.ipify.org', { signal: controller.signal });
+      const res = await call(deps.echoUrl ?? EGRESS_ECHO_URL_DEFAULT, { signal: controller.signal });
       if (isLocalEgressReject(res)) {
         state.localRejects += 1;
         return null;

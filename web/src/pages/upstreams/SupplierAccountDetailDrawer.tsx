@@ -34,6 +34,7 @@ import { supplierAccountsApi } from '@/api/endpoints';
 import { describeError, isApiError } from '@/api/http';
 import { useAction, useResource } from '@/api/hooks';
 import {
+  supplierCapabilities,
   SUPPLIER_STATUS_TEXT,
   type SupplierAccount,
   type SupplierCredentialSource,
@@ -106,6 +107,11 @@ export interface SupplierAccountDetailDrawerProps {
   onChanged: () => void;
   /** 重置套餐 key 已提交（`202 {taskId}`）→ 父组件打开批量结果浮层并轮询。 */
   onRotateTask: (taskId: string) => void;
+  /**
+   * 该账号所属上游的 `supplier`（父组件手里已有，不另取）。只用来问一句
+   * 「这家有没有套餐概念」—— 没有就不画「重置套餐 key」（§15.14：那是入口 422）。
+   */
+  supplier: string | null;
 }
 
 export function SupplierAccountDetailDrawer({
@@ -114,6 +120,7 @@ export function SupplierAccountDetailDrawer({
   onClose,
   onChanged,
   onRotateTask,
+  supplier,
 }: SupplierAccountDetailDrawerProps) {
   const { message, modal } = App.useApp();
   const { run, isPending } = useAction();
@@ -359,15 +366,18 @@ export function SupplierAccountDetailDrawer({
           >
             连接自测
           </Button>
-          <Button
-            size="small"
-            loading={isPending('rotate')}
-            onClick={() => {
-              rotateKey();
-            }}
-          >
-            重置套餐 key
-          </Button>
+          {/* §15.14：没有套餐概念的供应商不画这个入口（恒 422），与批量按钮同一张能力表。 */}
+          {supplierCapabilities(supplier)?.plans === true ? (
+            <Button
+              size="small"
+              loading={isPending('rotate')}
+              onClick={() => {
+                rotateKey();
+              }}
+            >
+              重置套餐 key
+            </Button>
+          ) : null}
           <Tooltip title="删账号不删 key：名下的 key 会解除归属并继续可用。">
             <Button size="small" danger loading={removing} onClick={() => remove(false)}>
               删除账号

@@ -911,12 +911,17 @@ describe('判据 9 / 10 —— 热路径零回退与零新增枚举', () => {
     // 故这里的绝对值随之 15 → 16 —— **加的是别人那一版的，不是本版的**。
     // v1.7.0 再各加一枚（ADR-0021 决策 9，契约 §0.4 / §10 同批登记）：16 → 17（`EGRESS_HAS_ACCOUNTS`）、
     // 10 → 11（`NO_AVAILABLE_EGRESS`）—— 同样**不是本版（余额同步）加的**。
+    // v1.15.8 再各加一枚（ADR-0037 决策 5，契约 §10 同批登记）：11 → 12（`MODEL_NOT_AUTHORIZED`）
+    // —— 同样**不是本版（余额同步）加的**。`ERROR_CODES` 零新增（管理面复用既有码）。
     // 改动这里时请一并确认：新增的那个码有契约与 ADR 背书，不是因为顺手。
     expect(ERROR_CODES).toHaveLength(17);
     expect(ERROR_CODES).toContain('ACCOUNT_HAS_KEYS');
     expect(ERROR_CODES).toContain('EGRESS_HAS_ACCOUNTS');
-    expect(Object.keys(GATEWAY_ERROR_CODES)).toHaveLength(11);
+    expect(Object.keys(GATEWAY_ERROR_CODES)).toHaveLength(12);
+    expect(GATEWAY_ERROR_CODES.MODEL_NOT_AUTHORIZED).toBe('MODEL_NOT_AUTHORIZED');
     expect(GATEWAY_ERROR_CODES.NO_AVAILABLE_EGRESS).toBe('NO_AVAILABLE_EGRESS');
+    // v1.15.8 的 `group_models` 是**纯加表**（同 gateway_error_events / balance_snapshots）：
+    // 只加一张表不递增版本号，所以这条断言在本版之后仍是 2。
     expect(SCHEMA_VERSION).toBe(2);
 
     // 漂移码的地位同 `hintCode`：进码表就等于给它开了 HTTP 状态与拦截能力

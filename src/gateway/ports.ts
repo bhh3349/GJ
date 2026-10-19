@@ -52,10 +52,47 @@ export interface ModelCatalog {
   listEnabledModels(): Promise<ModelDescriptor[]>;
   /** 客户端模型名 → 上游真实模型名；未登记则原样透传 */
   resolveUpstreamModel(clientModel: string): string;
+  /**
+   * 客户端模型名 → 登记类别；**未登记**（或档案/上游已停用）返回 `null`。
+   *
+   * 与 `listEnabledModels()` 的差别是刻意的，两个就读口径各有各的验收：
+   *   · `listEnabledModels` **实时读库**（验收 4 要求改一个 enabled 后 `/v1/models` 立刻变）；
+   *   · `typeOf` **走快照**，因为它是**转发路径上的准入判据**，而快照就是选路判据
+   *     （`UpstreamConfig.models` = 「谁登记了谁才可能被选到」）。热路径上不许有 SQL
+   *     （`wiring/store.ts` 的明文/热路径纪律）。
+   *
+   * 两者**不会**打架：调用方拿到的名字如果因为 1s 窗口还没进快照，这里返回 `null` ⇒ 本闸放行，
+   * 而同一个窗口里 `pool.getAvailableKeys(name)` 也建不出候选集 ⇒ 503。也就是说
+   * **本闸永远不会拒掉一个路由器还能路由的名字**，只是那一秒退回旧行为（上游 404 透传），
+   * 而不是收窄成"列表里有、打过去 400"。
+   *
+   * 同步签名是硬要求（同 `resolveUpstreamModel`）：把异步实现留给适配层，
+   * 转发线程上一次 await 就是一次可观测的 TTFB 增量（验收 6）。
+   */
+  typeOf(clientModel: string): ModelType | null;
 }
+
+/**
+ * 模型类别（契约 §5；库内闭集 `models.type` 的 CHECK 与之一字不差）。
+ *
+ * 为什么在网关侧**再写一份**而不 import 管理面的 `ModelType`：AGENTS.md §8 ——
+ * `src/gateway` 不得 import `src/api`。与本文件同族的先例是 `KeyCategory`
+ * （`types.ts` 与管理面 dto 各有一份，注释互相指名）。两处口径靠本句与
+ * `src/api/dto.ts` 的对应注释互相钉住：改一处漏另一处，契约 §5 与本行的闭集就会打架。
+ *
+ * 值为 `image` / `audio` / `rerank` 的档案**建得出来但端点不实现**（501，见 routes.ts
+ * 的 `UNSUPPORTED_PREFIXES`）—— 它们在这里出现只是因为 CHECK 允许，不代表可服务。
+ */
+export type ModelType = 'chat' | 'embedding' | 'image' | 'audio' | 'rerank';
 
 export interface ModelDescriptor {
   id: string;
+  /**
+   * 模型类别（契约 §5 / ADR-0039）。路由层按 `(端点, 类别)` 准入的唯一依据 ——
+   * 在此之前 `type` 只活在建档与展示里，从不进服务路径，于是任何登记过的名字
+   * 都会被原样转发到上游的 `/embeddings`。
+   */
+  type: ModelType;
   /** 建档时间 ISO8601 UTC */
   createdAt: string;
   /** 归属，默认取上游名；仅用于 /v1/models 的 owned_by 字段 */
@@ -85,6 +122,19 @@ export interface GroupContext {
   rpm: number | null;
   tpm: number | null;
   dailyQuota: number | null;
+  /**
+   * 该组授权的模型**名**列表（契约 §4「模型授权」/ ADR-0037）；`null` = 不限（可用全部已启用模型）。
+   *
+   * 三件事写在这里，因为它们是这个字段的设计而不是实现细节：
+   *   1. **实时读库**（`src/wiring/auth.ts`），**不进快照** —— group / gateway_key 本来就被
+   *      刻意排除在 `SNAPSHOT_ENTITIES` 之外，鉴权与限流走实时点查，换来"改授权下一个请求生效"。
+   *      授权是同一性质的属性，跟着 `GroupContext` 走。
+   *   2. **判定按名字、不特判 `*`**：授权列表按字面匹配；通配符归 key 白名单的既有语义
+   *      （§16.3 `matchesModel`），两层不混。
+   *   3. **与 key 白名单是交集，不是替代**：组授权了 A、key 白名单没含 A，照样打不通。
+   *      本字段只管"这一组的人许不许用"，管不到"哪把 key 能跑"（那是 `KeyConfig.models`）。
+   */
+  authorizedModels: readonly string[] | null;
 }
 
 /** 网关 key 明文 → 用户组上下文；未命中返回 null（实现侧用 sha256 摘要比对） */

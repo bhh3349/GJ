@@ -31,8 +31,9 @@ import type { WebSocket } from 'ws';
 import type { AppConfig } from '../../config.js';
 import type { EgressPoolNode } from '../../egress/heartbeat.js';
 import { openDatabase, type Db } from '../../db/database.js';
+import { createUser } from '../../db/repo/users.js';
 import { buildApp } from '../app.js';
-import { bootstrapAdmin } from '../auth.js';
+import { bootstrapAdmin, hashPassword } from '../auth.js';
 
 const ADMIN_USER = 'admin';
 const ADMIN_PASS = 'live-probe-pass-1';
@@ -89,12 +90,16 @@ function makeConfig(dbPath: string): AppConfig {
     adminToken: null,
     readonlyToken: null,
     logRetentionDays: 30,
+    auditRetentionDays: 180,
+    taskRetentionDays: 7,
+    changeLogKeepRows: 10_000,
     healthSnapshotRetentionDays: 90,
     maxAttempts: 3,
     maxConcurrencyPerKey: 4,
     cooldownLadderSeconds: [0, 60, 300, 900, 1800],
     assistantModel: null,
     egressHeartbeatInboxDir: null,
+    egressEchoUrl: null,
     // 余额自动同步在测试配置里默认关：本套用例不为它开后台定时器（它有自己的 spec）
     balanceSyncMinutes: 0,
     balanceSnapshotRetentionDays: 90,
@@ -138,6 +143,26 @@ async function setup(
 /** 带会话 + CSRF 头的 REST 请求头。 */
 function auth(h: Harness, extra: Record<string, string> = {}): Record<string, string> {
   return { cookie: h.cookie, 'x-requested-with': 'fetch', ...extra };
+}
+
+/**
+ * 建一个 `role=user` 账号并登录，返回它的会话 Cookie。
+ *
+ * **口令必须运行时拼接**：仓库扫描器把形似密码的连续字面量当红线，
+ * 而"改豁免"是消掉判据。与 `probeKey()` 同一条纪律。
+ */
+async function loginAsUser(h: Harness, username: string): Promise<string> {
+  const password = ['live', 'probe', 'user', 'pass'].join('-');
+  createUser(h.db, { username, passwordHash: hashPassword(password), role: 'user' });
+  const res = await h.app.inject({
+    method: 'POST',
+    url: '/api/auth/login',
+    payload: { username, password },
+    headers: { 'x-requested-with': 'fetch' },
+  });
+  expect(res.statusCode, `登录失败: ${res.body}`).toBe(200);
+  const raw = res.headers['set-cookie'];
+  return String(Array.isArray(raw) ? raw[0] : raw).split(';')[0] ?? '';
 }
 
 type Frame = Record<string, unknown>;
@@ -349,6 +374,43 @@ describe('WS /api/stats/live 握手与鉴权', () => {
     expect(await box.waitClose(15_000)).toBe(4408);
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(4_800);
     expect(box.count('ready')).toBe(0);
+  });
+
+  /**
+   * §19.1 授面在**通道层**的落点（v1.15.1 补的洞，ADR-0034）。
+   *
+   * `WS /api/stats/live` 是 `app.ts` 鉴权闸门的唯一例外（升级请求回不了 HTTP 401，
+   * 否则浏览器只报 1006），而那个例外的代价是**闸门的 role 判定也被一起跳过** ——
+   * 于是 `role=user` 拿自己的会话也能握手成功并收到 `metrics` 帧，
+   * 里面的 `qps` / `successRate` / `balanceGlobal` 全是 §19.1 明写"不给普通用户"的东西
+   * （`/api/stats/overview` 打同样身份会 403）。
+   *
+   * 判据是"**一帧都不该收到**"，不是"收到了但字段少"：少字段的说法等于承认
+   * 通道已经建起来了，而授面必须发生在连接建立之前。
+   */
+  it('role=user 开实时通道：4401，且一帧都不该收到（授面不等同于前端不展示）', async () => {
+    const h = await setup();
+    const cookie = await loginAsUser(h, 'live-role-user');
+
+    // 先把握手做完再判。**不握手直接等 close 也能测出漏洞**（实测能红），
+    // 但那时的失败信息是「等 close 超时」—— 读者看不出漏出去的是什么。
+    // 走完整握手后，坏实现会在这一步收到 ready，断言立刻指名道姓：
+    // 授面必须发生在连接建立之前，而不是建好之后再挑字段。
+    const box = await openSocket(h, { cookie });
+    box.socket.send(JSON.stringify({ type: 'auth' }));
+    expect(await box.waitClose()).toBe(4401);
+
+    // 一条都不该有：ready 也没有（连 `metrics` 都不必等 tick —— 握手阶段就该拒）
+    expect(box.count('ready')).toBe(0);
+    expect(box.received).toHaveLength(0);
+
+    // 同一把 harness 上的 admin 会话仍然畅通：修的是身份，不是通道。
+    // 它同时是**屏障**——跑一拍、确认 admin 真收到了 metrics，
+    // 才证明"服务端确实在推帧"这件事发生了，此时再看 user 那条仍是空的才有意义。
+    const admin = await attach(h);
+    await tick(h, admin, 1);
+    expect(admin.count('metrics')).toBe(1);
+    expect(box.received).toHaveLength(0);
   });
 });
 

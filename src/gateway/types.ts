@@ -71,6 +71,14 @@ export interface KeyRuntimeState {
   lastFailureReason: FailureReason | null;
   lastLatencyMs: number | null;
   inflight: number;
+  /**
+   * 连续 AUTH_INVALID 触发自动禁用（v1.1 §四.2）。与 `status='disabled'` 是两件事：
+   * 后者是管理端的配置意图，前者是网关自己的保护动作。
+   *
+   * **不进 `key_runtime` 镜像、不落库**（与 `failCount` 同族）：重启即归零。
+   * 归零是安全的降级方向 —— 最坏"重启后重新吃 5 次 401"，而被永久钉死是无界损失。
+   */
+  autoDisabled: boolean;
 }
 
 /** 上报失败的可选项：429 的 Retry-After 由此进入，签名向后兼容 */

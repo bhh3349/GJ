@@ -109,10 +109,6 @@ export function requireEgressProxy(db: Db, id: string): EgressProxyDto {
   return found;
 }
 
-export function countEgressAccounts(db: Db, id: string): number {
-  return countAccounts(db, id);
-}
-
 export function normalizeEgressUrl(raw: string): string {
   const text = raw.trim();
   let parsed: URL;

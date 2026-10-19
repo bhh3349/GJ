@@ -16,6 +16,7 @@
 
 import { sha256Hex } from '../db/crypto.js';
 import { findGroupByGatewayKeyHash } from '../db/repo/groups.js';
+import { listAuthorizedModelNames } from '../db/repo/group-models.js';
 import type { Db } from '../db/database.js';
 import type { GatewayAuth, GroupContext } from '../gateway/ports.js';
 
@@ -26,6 +27,13 @@ export function createDbGatewayAuth(db: Db): GatewayAuth {
       if (gatewayKey === '') return null;
       const row = findGroupByGatewayKeyHash(db, sha256Hex(gatewayKey));
       if (row === null) return null;
+      // 模型授权（v1.15.8 / ADR-0037 决策 1）：与鉴权同一次实时读库 —— 管理端改了授权，
+      // **下一个请求**即生效（撤销 key 立即生效的同一条）。每请求一次
+      // `SELECT ... FROM group_models WHERE group_id = ?`：主键前缀查、微秒级，
+      // 在一次 LLM 调用面前可忽略；不放缓存 —— 缓存会重新引入"改授权不立即生效"的窗口，
+      // 那是本决策明确否掉的东西（见 ADR-0037 遗留 3：真到千行量级再按实时性论证重裁）。
+      // `repo/group-models.ts` 的出口恒不出现 `[]`，这里透传即可，不再造一份转换。
+      const authorizedModels = listAuthorizedModelNames(db, row.id);
       return {
         groupId: row.id,
         name: row.name,
@@ -33,6 +41,7 @@ export function createDbGatewayAuth(db: Db): GatewayAuth {
         rpm: row.rpm,
         tpm: row.tpm,
         dailyQuota: row.daily_quota,
+        authorizedModels,
       };
     },
   };

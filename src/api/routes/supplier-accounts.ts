@@ -1,10 +1,14 @@
-// 供应商账号路由。契约 §15.2 的 11 个端点全在这里。
+// 供应商账号路由。契约 §15.2 的 12 个端点全在这里（v1.16.4 加 `import-sessions`）。
 //
 // 分成两半，读的时候可以分开看：
 //   - **不打上游**的五个（列表 / 详情 / 扁平套餐 / 导出 / 删除）：直接读仓储层，今天就是真数据；
-//   - **要打上游管理面**的六个（import / refresh / :id/login / :id/test / keys / keys/sync）：
-//     全部经 `src/supplier/tierflow.ts` 驱动器，本文件只做「解析请求 → 建任务 → 写审计」——
-//     没有一行 HTTP 细节，也没有一行加解密。
+//   - **要打上游管理面**的七个（import / import-sessions / refresh / :id/login / :id/test /
+//     keys / keys/sync）：全部经 `src/supplier/tierflow.ts` 驱动器，本文件只做
+//     「解析请求 → 建任务 → 写审计」——没有一行 HTTP 细节，也没有一行加解密。
+//
+// `import-sessions`（v1.16.4）是唯一收**会话明文**的端点：业主显式接受"粘贴值过一次
+// 管理面 HTTP"的代价，换取 TokenRhythm 账号不必登终端导入。其余纪律不变：不落日志、
+// 不回显、只落密文（§15.9 / ADR-0040 决策 7）。
 //
 // 订正一句此前写在这里的话：那六个等的是**凭据**（真实的手机号+密码 / 会话），不是"协议没定"。
 // 管理面协议 §15 一直都在（端点、信封、quota 单位、掩码规则都成文），悬空的 §16.1.1 是**数据面**
@@ -20,7 +24,7 @@
 // 鉴权/CSRF 不在这里写：`app.ts` 的 onRequest 闸门已经覆盖 `/api/*` 全量，
 // 这正是把闸门放在钩子而不是散在各 handler 里的目的（新加一个路由不会漏判）。
 //
-// 路由顺序：`subscriptions` / `export` / `import` / `refresh` / `keys` / `keys/sync` 这些**静态**段
+// 路由顺序：`subscriptions` / `export` / `import` / `import-sessions` / `refresh` / `keys` / `keys/sync` 这些**静态**段
 // 统统写在 `:id` 之前。find-my-way 本身按静态优先匹配、不依赖注册顺序，但读的人不该需要知道
 // 这件事才能确认 `/api/supplier-accounts/export` 不会被当成 `:id = "export"`。
 
@@ -41,6 +45,7 @@ import { idParam, pageProps, revisionProp } from '../schemas.js';
 import {
   loginSupplierAccount,
   startSupplierImport,
+  startSupplierSessionImport,
   startSupplierKeys,
   startSupplierKeysSync,
   startSupplierRefresh,
@@ -129,13 +134,18 @@ function batchDetail(result: SupplierBatchResult): string {
  *
  * **不带 `task=<id>`**：那句话的字面是"只放计数"，任务号是第一个非计数字段，
  * 而任务行自己带着起止时间，顺着 `ts` 对得上。要维护的是一个能被当作事实的形状。
+ *
+ * `result === null` = 任务本身失败了（`startTask` 的 `.catch` 支），此时没有计数可写。
+ * 早先这里直接收 `SupplierBatchResult`，于是"任务失败"这一支在类型上无处可去 ——
+ * 那正是审计项 E 的形状：回调跑在 `work()` 里面，一次抛错就把跑完的批量倒置成 failed。
  */
 function auditBatch(
   ctx: ApiContext,
   who: { actor: string; ip: string },
   action: string,
   upstreamId: string,
-  result: SupplierBatchResult,
+  result: SupplierBatchResult | null,
+  failed: boolean,
 ): void {
   appendAudit(ctx.db, {
     actor: who.actor,
@@ -143,8 +153,10 @@ function auditBatch(
     action,
     targetType: 'upstream',
     targetId: upstreamId,
-    result: 'ok',
-    detail: batchDetail(result),
+    // 批量跑完但逐项有失败 ⇒ 仍是 'ok'（§15.7：detail 的计数说明一切）；
+    // 只有任务本身炸了（result 拿不到）才算这次审计动作失败。
+    result: failed || result === null ? 'fail' : 'ok',
+    detail: result === null ? 'task failed' : batchDetail(result),
   });
 }
 
@@ -277,7 +289,43 @@ export function registerSupplierAccountRoutes(app: FastifyInstance, ctx: ApiCont
       const who = captureAuditActor(req, config);
       const upstreamId = req.body.upstreamId ?? '';
       const task = startSupplierImport(supplier, req.body, {
-        onFinish: (result) => auditBatch(ctx, who, 'supplier.import', upstreamId, result),
+        onFinish: (result, failed) => auditBatch(ctx, who, 'supplier.import', upstreamId, result, failed),
+      });
+      return reply.code(202).send({ taskId: task.id });
+    },
+  );
+
+  /**
+   * Cookie 粘贴导入（v1.16.4，仅 TokenRhythm）。
+   *
+   * `text` = 每行一枚 `tr_session`（`tr_session=…; Path=/`、裸 value、`Cookie:` 前缀均可）。
+   * 每行会发一次 `GET /api/me` 解析身份，再加密落库；逐行结果复用
+   * `SupplierBatchResult`（`action="import"`），前端批次抽屉无需第二套渲染。
+   *
+   * **这是唯一收会话明文的端点**。它存在是因为业主明确接受"自用项目、粘贴值过一次
+   * HTTP"的代价（§15.9 v1.16.4 / ADR-0040 决策 7）：值不写日志、不进审计 detail、
+   * 不回显，落库即密文。TierFlow 在服务层入口 422 —— 它有自己的密码/离线通路。
+   */
+  app.post<{ Body: ImportBody }>(
+    '/api/supplier-accounts/import-sessions',
+    {
+      schema: {
+        body: {
+          type: 'object',
+          required: ['upstreamId'],
+          properties: {
+            upstreamId: { type: 'string', minLength: 1, maxLength: 64 },
+            text: { type: 'string' },
+          },
+        },
+      },
+    },
+    (req, reply) => {
+      const who = captureAuditActor(req, config);
+      const upstreamId = req.body.upstreamId ?? '';
+      const task = startSupplierSessionImport(supplier, req.body, {
+        // 复用 `supplier.import` 动作：审计只记计数，值本身从不进 detail。
+        onFinish: (result, failed) => auditBatch(ctx, who, 'supplier.import', upstreamId, result, failed),
       });
       return reply.code(202).send({ taskId: task.id });
     },
@@ -308,7 +356,7 @@ export function registerSupplierAccountRoutes(app: FastifyInstance, ctx: ApiCont
       const who = captureAuditActor(req, config);
       const upstreamId = req.body.upstreamId ?? '';
       const task = startSupplierRefresh(supplier, req.body, {
-        onFinish: (result) => auditBatch(ctx, who, 'supplier.refresh', upstreamId, result),
+        onFinish: (result, failed) => auditBatch(ctx, who, 'supplier.refresh', upstreamId, result, failed),
       });
       return reply.code(202).send({ taskId: task.id });
     },
@@ -349,7 +397,7 @@ export function registerSupplierAccountRoutes(app: FastifyInstance, ctx: ApiCont
       const who = captureAuditActor(req, config);
       const upstreamId = req.body.upstreamId ?? '';
       const task = startSupplierKeys(supplier, req.body, {
-        onFinish: (result) => auditBatch(ctx, who, 'supplier.keys.create', upstreamId, result),
+        onFinish: (result, failed) => auditBatch(ctx, who, 'supplier.keys.create', upstreamId, result, failed),
       });
       return reply.code(202).send({ taskId: task.id });
     },
@@ -379,7 +427,7 @@ export function registerSupplierAccountRoutes(app: FastifyInstance, ctx: ApiCont
       const who = captureAuditActor(req, config);
       const upstreamId = req.body.upstreamId ?? '';
       const task = startSupplierKeysSync(supplier, req.body, {
-        onFinish: (result) => auditBatch(ctx, who, 'supplier.keys.sync', upstreamId, result),
+        onFinish: (result, failed) => auditBatch(ctx, who, 'supplier.keys.sync', upstreamId, result, failed),
       });
       return reply.code(202).send({ taskId: task.id });
     },
@@ -415,7 +463,7 @@ export function registerSupplierAccountRoutes(app: FastifyInstance, ctx: ApiCont
       const who = captureAuditActor(req, config);
       const upstreamId = req.body.upstreamId ?? '';
       const task = startSupplierRotateKey(supplier, req.body, {
-        onFinish: (result) => auditBatch(ctx, who, 'supplier.rotate-key', upstreamId, result),
+        onFinish: (result, failed) => auditBatch(ctx, who, 'supplier.rotate-key', upstreamId, result, failed),
       });
       return reply.code(202).send({ taskId: task.id });
     },

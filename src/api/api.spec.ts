@@ -87,6 +87,9 @@ function makeConfig(dbPath: string): AppConfig {
     adminToken: null,
     readonlyToken: null,
     logRetentionDays: 30,
+    auditRetentionDays: 180,
+    taskRetentionDays: 7,
+    changeLogKeepRows: 10_000,
     healthSnapshotRetentionDays: 90,
     maxAttempts: 3,
     maxConcurrencyPerKey: 4,
@@ -94,6 +97,7 @@ function makeConfig(dbPath: string): AppConfig {
     // 助手未接线：本套用例只覆盖管理面 REST，助手端点有自己的 spec（routes/assistant.spec.ts）
     assistantModel: null,
     egressHeartbeatInboxDir: null,
+    egressEchoUrl: null,
     // 余额自动同步在测试配置里默认关：本套用例不为它开后台定时器（它有自己的 spec）
     balanceSyncMinutes: 0,
     balanceSnapshotRetentionDays: 90,
@@ -725,6 +729,90 @@ describe('用户组与网关 key（契约 §4，C1）', () => {
     expect(del.statusCode, del.body).toBe(204);
     const gone = await h.app.inject({ method: 'GET', url: `/api/groups/${groupId}`, headers: auth(h) });
     expect(gone.statusCode).toBe(404);
+    await closeHarness(h);
+  });
+
+  /**
+   * **组里挂着成员时删组** —— 上面四条都只用「无成员的组」验删组，缺的正是这一条。
+   *
+   * 指向 `groups(id)` 的外键有两处：`gateway_keys.group_id` 与 `admin_users.group_id`
+   * （`schema.ts` 刻意都不设 ON DELETE，把"谁受什么影响"留给仓储层显式决定）。
+   * 曾经的 `deleteGroup` 只解开了前者，于是**只要组里有一个成员**（`admin_users.group_id`
+   * 指着这个组），`DELETE FROM groups` 就撞 `SQLITE_CONSTRAINT_FOREIGNKEY` →
+   * 整条端点恒 500。用户看到的正是"点了删除、条目还在、刷新网页也不掉"——
+   * 因为服务端根本没删成，前端 `reload()` 拿到的是**没变的数据**，前端此刻是对的。
+   *
+   * 判据两条，缺一不可：
+   *   1. 组真消失、网关 key 一起走（同前一条用例的锚）；
+   *   2. **成员的登录身份必须留下，只把 `group_id` 置回 NULL（未分配）**。
+   *      级联删账号是错误修法 —— 删组不该销毁登录身份（那是用户管理页的职责），
+   *      而 §19.2 / ADR-0034 决策 5 已把 `NULL` 定义为合法可读的降级。
+   *      所以这里同时钉住"成员还在"与"他能继续登录"。
+   */
+  it('组里挂着成员时删组 204：组消失、成员保留且被置回未分配', async () => {
+    const h = await setup();
+    const { groupId, first } = await groupWithTwoKeys(h, 'probe-group-del-member');
+
+    // 建一个归属该组的普通用户：这正是 `role=user` 的常规形状，
+    // 也是"管理员的账号无法使用路由"之外的另一个必然存在成员。
+    const member = await h.app.inject({
+      method: 'POST',
+      url: '/api/users',
+      headers: auth(h),
+      payload: { username: 'probe-group-member', password: 'probe-pass-123456', role: 'user', groupId },
+    });
+    expect(member.statusCode, member.body).toBe(201);
+
+    const del = await h.app.inject({
+      method: 'DELETE',
+      url: `/api/groups/${groupId}`,
+      headers: auth(h),
+    });
+    expect(del.statusCode, del.body).toBe(204);
+
+    // 组与它的 key 一起消失（同前一条用例的锚）
+    const gone = await h.app.inject({ method: 'GET', url: `/api/groups/${groupId}`, headers: auth(h) });
+    expect(gone.statusCode).toBe(404);
+    const keyRows = h.db
+      .prepare('SELECT COUNT(*) AS n FROM gateway_keys WHERE group_id = ?')
+      .get(groupId) as { n: number };
+    expect(keyRows.n).toBe(0);
+
+    // 成员**没被删**，只是被置回未分配
+    const row = h.db
+      .prepare('SELECT role, group_id AS groupId FROM admin_users WHERE username = ?')
+      .get('probe-group-member') as { role: string; groupId: string | null } | undefined;
+    expect(row, '删组不该把成员账号一起删掉').toBeDefined();
+    expect(row?.role).toBe('user');
+    expect(row?.groupId).toBeNull();
+
+    // 而且他还能登录 —— 置回未分配是"降级"不是"封号"
+    const login = await h.app.inject({
+      method: 'POST',
+      url: '/api/auth/login',
+      payload: { username: 'probe-group-member', password: 'probe-pass-123456' },
+      // 登录也是写请求，同样要过 CSRF 第三层（契约 §0.5）
+      headers: { 'x-requested-with': 'fetch' },
+    });
+    expect(login.statusCode, login.body).toBe(200);
+
+    // 消费面读面按 §19.2 的承诺回"未分配到组"，不是 500
+    const cookie = String(login.headers['set-cookie']).split(';')[0] ?? '';
+    const sess = await h.app.inject({
+      method: 'GET',
+      url: '/api/console/session',
+      headers: { cookie },
+    });
+    expect(sess.statusCode, sess.body).toBe(200);
+    expect((sess.json() as { groupId: string | null }).groupId).toBeNull();
+
+    // §19.3：key 列表端点明确回 `assigned:false`（前端据此显示一句说明，而不是一张空表格）
+    const keys = await h.app.inject({ method: 'GET', url: '/api/console/keys', headers: { cookie } });
+    expect(keys.statusCode, keys.body).toBe(200);
+    expect((keys.json() as { assigned: boolean }).assigned).toBe(false);
+
+    // 删掉的那把 key 摘要不该还能解析出组（幽灵凭据）
+    expect(findGroupByGatewayKeyHash(h.db, sha256Hex(first.gatewayKey))).toBeNull();
     await closeHarness(h);
   });
 

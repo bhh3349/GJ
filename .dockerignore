@@ -1,0 +1,50 @@
+# Docker 构建上下文排除。**动机不只是"缩小上下文"**：上下文里有什么，
+# `COPY . .` 就会把什么搬进镜像层。`.env` 与 `data/` 必须在这里挡住 ——
+# `.env` 含真实上游凭据、`data/` 是运行态 SQLite（含真实账号），
+# 两者进镜像等于把凭据烧进一个可 `docker push` 的层里。
+#
+# 顺序有意义：先挡"绝不能进的"，再挡"进了也没用的"。
+
+# --- 凭据与运行态数据（绝不进镜像）---
+.env
+.env.local
+.env.*.local
+.env.production
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+logs/
+*.log
+
+# --- 依赖与构建产物（镜像内自己生成；host 的 node_modules 是 glibc/musl 相关的 .node，
+#     拷进去会盖掉容器内编译的那份 —— 这是最隐蔽的一条：构建不报错，
+#     但运行时 ERR_DLOPEN_FAILED）---
+node_modules/
+**/node_modules/
+dist/
+web/dist/
+.pnpm-store/
+*.tsbuildinfo
+
+# --- 版本库与工作树 ---
+.git/
+.worktrees/
+.ekko-tmp/
+
+# --- 测试与覆盖率（不进生产镜像）---
+coverage/
+.vitest/
+
+# --- 文档与报告（不进镜像；改文档不该炸后端镜像层）---
+docs/
+*.md
+!README.md
+
+# --- 编辑器 / OS ---
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

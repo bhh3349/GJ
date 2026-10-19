@@ -59,7 +59,10 @@ export interface ShutdownTarget {
   app: AsyncClosable;
   /** 共享 SQLite 句柄：**全局最后一个**被关的东西 */
   db: SyncClosable;
-  /** 维护定时器（清过期会话 / 裁日志 / 清限速表） */
+  /**
+   * 维护定时器。当前共五个（`src/server.ts`）：清过期会话(1h) / 裁日志(6h) / 裁审计+任务+
+   * 错误事件+广播(6h，同一个) / 清登录限速表(5min)。
+   */
   timers: readonly NodeJS.Timeout[];
   /**
    * 有显式 `stop()` 的周期任务（PM 裁定 2 的落点）：与 `timers` **同处冻结顺序第 1 步**。

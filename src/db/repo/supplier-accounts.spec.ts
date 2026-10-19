@@ -28,11 +28,14 @@ import { openDatabase, type Db } from '../database.js';
 import { newId } from '../ids.js';
 import { createKey, deleteKey } from './keys.js';
 import {
+  backfillSubscriptionTokenPlan,
   findSupplierAccountByIdentifierHash,
   getSupplierAccount,
   listSupplierAccounts,
+  replaceSupplierSubscriptions,
   requireSupplierAccount,
   setSupplierAccountEgress,
+  upsertSupplierSubscription,
 } from './supplier-accounts.js';
 import { createEgressProxy, retireEgressProxy } from './egress.js';
 import { createUpstream, deleteUpstream } from './upstreams.js';
@@ -152,11 +155,11 @@ function seedSubscription(
 function seedPooledKey(
   db: Db,
   upstreamId: string,
-  opts: { unlimited?: boolean; label?: string } = {},
+  opts: { unlimited?: boolean; label?: string; balance?: number } = {},
 ): string {
   const key = createKey(
     db,
-    { upstreamId, key: 'sk-probe-' + 'B'.repeat(24), category: 'balance', label: opts.label },
+    { upstreamId, key: 'sk-probe-' + 'B'.repeat(24), category: 'balance', label: opts.label, balance: opts.balance },
     MASTER_KEY,
   );
   if (opts.unlimited === true) {
@@ -601,5 +604,395 @@ describe('账号绑出口（§16.7 Tier 2 写路径，v1.13.0 / ADR-0029）', ()
     } catch (err) {
       expect((err as { code?: string }).code).toBe('NOT_FOUND');
     }
+  });
+});
+
+/**
+ * 套餐余量回填（ADR-0022 承诺的"后续"腿 / 本次新增）。
+ *
+ * 本组钉的是**上游字段名与单位的翻译**，错一格不会报错、只会给出错数：
+ *   · `basic_token_*` 是 **Token 个数**，除一次 500000 就从 800 万变成 16 分；
+ *   · 上游没给 `basic_token_used` 时它是"用了 0"还是"不知道"？
+ *     这里取前者（余量 = total），因为**总额给了而单项没给**在套餐语义里只能是没用过；
+ *   · 余量只会递减，所以不能用 `COALESCE` 那套"只填空"的写法。
+ */
+describe('套餐余量回填 token_plan_remaining（ADR-0022 的"后续"腿）', () => {
+  const END_AT = '2026-11-16T00:00:00.000Z';
+
+  /**
+   * 一把已入池的套餐 key（`token-plan`，池内无余额列 —— 见 keys.ts 的落库规则）。
+   *
+   * 返回**库内真实的 `masked_key`**，让每个用例都拿它去建台账行、当上游掩码。
+   * 手写掩码是这条用例组里最肥的坑：`createKey({ key: 'sk-probe-a1b2' })` 落库的是
+   * `****a1b2`（后 4 位，无 `sk-` 前缀），手写成 `sk-****a1b2` 就对不上 ——
+   * 而"对不上"在这条路径上的表现是"什么都没写"，看起来像实现错了。
+   */
+  function seedTokenPlanKey(db: Db, upstreamId: string, tail: string): { keyId: string; masked: string } {
+    const key = createKey(db, { upstreamId, key: `sk-probe-${tail}`, category: 'token-plan' }, MASTER_KEY);
+    const masked = (db.prepare('SELECT masked_key AS m FROM upstream_keys WHERE id = ?').get(key.id) as { m: string }).m;
+    return { keyId: key.id, masked };
+  }
+
+  /** 台账行：这把池内 key 属于这个账号（回填按 `masked_key` 定位它）。 */
+  function seedLedgerRow(db: Db, accountId: string, pooledKeyId: string, maskedKey: string): void {
+    const at = '2026-10-07T00:00:00.000Z';
+    db.prepare(
+      `INSERT INTO supplier_account_keys (id, account_id, masked_key, pooled_key_id, note, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run(`sak_seed_${++rowSeq}`, accountId, maskedKey, pooledKeyId, null, at, at);
+  }
+
+  function tokenPlanOf(db: Db, keyId: string): { remaining: number | null; expiresAt: string | null } {
+    const row = db
+      .prepare('SELECT token_plan_remaining AS r, token_plan_expires_at AS e FROM upstream_keys WHERE id = ?')
+      .get(keyId) as { r: number | null; e: string | null };
+    return { remaining: row.r, expiresAt: row.e };
+  }
+
+  const balanceChangeCount = (db: Db, keyId: string): number =>
+    (
+      db
+        .prepare("SELECT COUNT(*) AS n FROM change_log WHERE entity = 'balance' AND entity_id = ?")
+        .get(keyId) as { n: number }
+    ).n;
+
+  it('余量 = basic_token_total - basic_token_used，单位是 **Token 个数**（不是钱）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-tf', baseUrl: 'https://tf.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    const { keyId, masked } = seedTokenPlanKey(db, up.id, 'a1b2');
+    seedLedgerRow(db, acc, keyId, masked);
+
+    backfillSubscriptionTokenPlan(db, acc, [
+      { subNo: 'SB1', basicTokenTotal: 8_000_000, basicTokenUsed: 2_666_169, endAt: END_AT, keyMasked: masked },
+    ]);
+
+    // 800 万 - 266 万 = 533 万 Token。若误走 quotaToCents（÷500000）会得到 10 ——
+    // 那条错值在网关侧等于"这把 key 只剩 10 个 token"，一次请求就把它踢出选路。
+    expect(tokenPlanOf(db, keyId)).toEqual({ remaining: 5_333_831, expiresAt: END_AT });
+  });
+
+  it('basic_token_used 缺失 ⇒ 整行跳过：不是"按 0 算"，NULL 保持未知', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-tf', baseUrl: 'https://tf.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    const { keyId, masked } = seedTokenPlanKey(db, up.id, 'c3d4');
+    seedLedgerRow(db, acc, keyId, masked);
+    const before = balanceChangeCount(db, keyId);
+
+    // 只给了总额，没说用了多少。早先这里按 `?? 0` 算成"没用过"，
+    // 于是写进去一个**全额**（800 万）—— 一个"上游没说"的值变成了"我们查过了"。
+    backfillSubscriptionTokenPlan(db, acc, [{ subNo: 'SB1', basicTokenTotal: 8_000_000, endAt: END_AT, keyMasked: masked }]);
+
+    expect(tokenPlanOf(db, keyId)).toEqual({ remaining: null, expiresAt: null });
+    // 什么都没写 ⇒ 广播也不发（同"总额未知"那条：一次空转不该叫醒网关清零乐观扣减）。
+    expect(balanceChangeCount(db, keyId)).toBe(before);
+  });
+
+  it('总额未知 ⇒ 一个字都不写：NULL 是"未知"，写 0 会让 key 被静默排除出选路', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-tf', baseUrl: 'https://tf.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    const { keyId, masked } = seedTokenPlanKey(db, up.id, 'e5f6');
+    seedLedgerRow(db, acc, keyId, masked);
+    const before = balanceChangeCount(db, keyId);
+
+    backfillSubscriptionTokenPlan(db, acc, [
+      { subNo: 'SB1', basicTokenTotal: null, basicTokenUsed: null, endAt: END_AT, keyMasked: masked },
+    ]);
+
+    expect(tokenPlanOf(db, keyId)).toEqual({ remaining: null, expiresAt: null });
+    // 什么都没改 ⇒ 不发广播。`applySnapshot` 会把 token-plan 的乐观扣减清零，
+    // 一次空转换来的是一次无意义的重置。
+    expect(balanceChangeCount(db, keyId)).toBe(before);
+  });
+
+  it('余量可以递减：第二次同步写更小的数必须真的写进去（COALESCE 会静默失效）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-tf', baseUrl: 'https://tf.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    const { keyId, masked } = seedTokenPlanKey(db, up.id, 'a1b2');
+    seedLedgerRow(db, acc, keyId, masked);
+
+    backfillSubscriptionTokenPlan(db, acc, [
+      { subNo: 'SB1', basicTokenTotal: 8_000_000, basicTokenUsed: 0, endAt: END_AT, keyMasked: masked },
+    ]);
+    expect(tokenPlanOf(db, keyId).remaining).toBe(8_000_000);
+
+    // 用掉 500 万之后
+    backfillSubscriptionTokenPlan(db, acc, [
+      { subNo: 'SB1', basicTokenTotal: 8_000_000, basicTokenUsed: 5_000_000, endAt: END_AT, keyMasked: masked },
+    ]);
+    expect(tokenPlanOf(db, keyId).remaining).toBe(3_000_000);
+  });
+
+  it('每把命中的 key 各收到一条 change_log 广播（快照只认 SNAPSHOT_ENTITIES 里的实体）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-tf', baseUrl: 'https://tf.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    const a = seedTokenPlanKey(db, up.id, 'a1b2');
+    const b = seedTokenPlanKey(db, up.id, 'c3d4');
+    seedLedgerRow(db, acc, a.keyId, a.masked);
+    seedLedgerRow(db, acc, b.keyId, b.masked);
+    const before = { a: balanceChangeCount(db, a.keyId), b: balanceChangeCount(db, b.keyId) };
+
+    backfillSubscriptionTokenPlan(db, acc, [
+      { subNo: 'SB1', basicTokenTotal: 8_000_000, basicTokenUsed: 100, endAt: END_AT, keyMasked: a.masked },
+      { subNo: 'SB2', basicTokenTotal: 8_000_000, basicTokenUsed: 200, endAt: END_AT, keyMasked: b.masked },
+    ]);
+
+    expect(balanceChangeCount(db, a.keyId)).toBe(before.a + 1);
+    expect(balanceChangeCount(db, b.keyId)).toBe(before.b + 1);
+  });
+
+  it('掩码撞号 / 找不到 ⇒ 那一行不动（宁可留 NULL，也不把 A 套餐的余量写到 B 的 key 上）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-tf', baseUrl: 'https://tf.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    // 撞号 = **两把池内 key 的 masked_key 相同**（同尾部明文被 rotate 了两次）。
+    // 注意掩码取自 key 行（`listLinkedPooledKeyMasks` 是 JOIN `upstream_keys` 取的），
+    // 台账行里写什么掩码不影响判定 —— 这也是为什么下面两行用同一个 tail。
+    const a = seedTokenPlanKey(db, up.id, 'a1b2');
+    const b = seedTokenPlanKey(db, up.id, 'a1b2');
+    expect(b.masked).toBe(a.masked);
+    seedLedgerRow(db, acc, a.keyId, a.masked);
+    seedLedgerRow(db, acc, b.keyId, b.masked);
+    const before = balanceChangeCount(db, a.keyId);
+
+    backfillSubscriptionTokenPlan(db, acc, [
+      { subNo: 'SB1', basicTokenTotal: 8_000_000, basicTokenUsed: 100, endAt: END_AT, keyMasked: a.masked },
+      // 这把不在台账里（没 rotate 过 / 换了掩码）
+      { subNo: 'SB2', basicTokenTotal: 8_000_000, basicTokenUsed: 200, endAt: END_AT, keyMasked: '****zzzz' },
+    ]);
+
+    expect(tokenPlanOf(db, a.keyId).remaining).toBeNull();
+    expect(tokenPlanOf(db, b.keyId).remaining).toBeNull();
+    expect(balanceChangeCount(db, a.keyId)).toBe(before);
+  });
+
+  it('余额类 key 不被回填：套餐余量落到余额 key 上会让两套计费池混在一起', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-tf', baseUrl: 'https://tf.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    const keyId = seedPooledKey(db, up.id, { balance: 1000 });
+    // 台账里的掩码与套餐行对得上，但 key 本身是 balance 类
+    const masked = (db.prepare('SELECT masked_key AS m FROM upstream_keys WHERE id = ?').get(keyId) as { m: string }).m;
+    seedLedgerRow(db, acc, keyId, masked);
+
+    backfillSubscriptionTokenPlan(db, acc, [
+      { subNo: 'SB1', basicTokenTotal: 8_000_000, basicTokenUsed: 100, endAt: END_AT, keyMasked: masked },
+    ]);
+
+    expect(tokenPlanOf(db, keyId).remaining).toBeNull();
+    // 余额 key 的钱一分没动（也没被写成 7999900 这种 token 数）
+    const row = db.prepare('SELECT balance_cents AS b FROM upstream_keys WHERE id = ?').get(keyId) as { b: number };
+    expect(row.b).toBe(1000);
+  });
+
+  it('used > total 的瞬态夹到 0：库里不留负数（网关侧同样会归一成 0 = 不可用）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-tf', baseUrl: 'https://tf.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    const { keyId, masked } = seedTokenPlanKey(db, up.id, 'a1b2');
+    seedLedgerRow(db, acc, keyId, masked);
+
+    backfillSubscriptionTokenPlan(db, acc, [
+      { subNo: 'SB1', basicTokenTotal: 8_000_000, basicTokenUsed: 8_000_500, endAt: END_AT, keyMasked: masked },
+    ]);
+
+    expect(tokenPlanOf(db, keyId).remaining).toBe(0);
+  });
+
+  it('账号名下没有池内 key / 没有套餐 ⇒ 直接返回，零写入零广播', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-tf', baseUrl: 'https://tf.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    const before = (db.prepare('SELECT COUNT(*) AS n FROM change_log').get() as { n: number }).n;
+
+    backfillSubscriptionTokenPlan(db, acc, []);
+    backfillSubscriptionTokenPlan(db, acc, [
+      { subNo: 'SB1', basicTokenTotal: 8_000_000, basicTokenUsed: 1, endAt: END_AT, keyMasked: 'sk-****a1b2' },
+    ]);
+
+    expect((db.prepare('SELECT COUNT(*) AS n FROM change_log').get() as { n: number }).n).toBe(before);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// upsertSupplierSubscription 的写窄（审计项 C）
+// ---------------------------------------------------------------------------
+
+describe('upsertSupplierSubscription：只写 has_key / key_masked 两格（审计项 C）', () => {
+  /**
+   * 直读库内那一行的**全部业务列**。
+   *
+   * 为什么必须读库而不是读 DTO：DTO 的 `subscriptions[]` 是读面投影，
+   * 而这里要证的是"写侧没有把上一轮的列抹掉" —— 那正是投影看不出来的那类破坏
+   * （抹成 NULL 后前端显示"上游没给"，与真没给长得一样）。
+   */
+  function rowOf(db: Db, accountId: string, subNo: string): Record<string, unknown> {
+    return db
+      .prepare(
+        `SELECT plan_title, plan_slug, amount_total_cents, amount_used_cents, paid_cents,
+                basic_token_total, basic_token_used, status, source, start_at, end_at,
+                auto_renew, has_key, key_masked
+           FROM supplier_account_subscriptions WHERE account_id = ? AND sub_no = ?`,
+      )
+      .get(accountId, subNo) as Record<string, unknown>;
+  }
+
+  /** 上一轮 refresh 写进去的完整套餐行（金额 / 到期 / 三态 auto_renew 全都有值）。 */
+  function seedFullRow(db: Db, accountId: string, subNo: string): void {
+    replaceSupplierSubscriptions(db, accountId, [
+      {
+        subNo,
+        planTitle: '轻享版',
+        planSlug: 'light',
+        amountTotalCents: 9900,
+        amountUsedCents: 1200,
+        paidCents: 9900,
+        basicTokenTotal: 8_000_000,
+        basicTokenUsed: 2_666_169,
+        status: 'active',
+        source: 'buy',
+        startAt: '2026-10-01T00:00:00.000Z',
+        endAt: '2026-11-16T00:00:00.000Z',
+        autoRenew: true,
+        hasKey: true,
+        keyMasked: 'sk-****iHLd',
+      },
+    ]);
+  }
+
+  it('side-check 失败（手里没有套餐字段）⇒ 只更新 key 两格，其余列原样不动', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-tf', baseUrl: 'https://tf.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    seedFullRow(db, acc, 'SB1');
+    const before = rowOf(db, acc, 'SB1');
+
+    // `rotateOne` ④ 的真实形状：重置成功、顺带的 /api/subscription/self 失败 ⇒ `plan = null`，
+    // 于是除了 subNo / hasKey / keyMasked 三格，其余字段一个值都没有。
+    upsertSupplierSubscription(db, acc, {
+      subNo: 'SB1',
+      planTitle: null,
+      planSlug: null,
+      amountTotalCents: null,
+      amountUsedCents: null,
+      paidCents: null,
+      basicTokenTotal: null,
+      basicTokenUsed: null,
+      status: null,
+      source: null,
+      startAt: null,
+      endAt: null,
+      autoRenew: null,
+      hasKey: true,
+      keyMasked: 'sk-****5w2l',
+    });
+
+    const after = rowOf(db, acc, 'SB1');
+    // 两格**确实换了**（否则这条用例会因为"什么都没做"而恒绿）
+    expect(after.key_masked).toBe('sk-****5w2l');
+    expect(after.has_key).toBe(1);
+    // 其余十一格**逐列原样**。早先这里是一条 `ON CONFLICT DO UPDATE SET <全部列>`，
+    // 于是上一轮写实的金额 / 到期 / auto_renew 全被抹成 NULL —— 症状是
+    // "重置了一次 key，套餐的金额与到期日凭空消失"，而前端看不出它是丢了。
+    for (const col of [
+      'plan_title',
+      'plan_slug',
+      'amount_total_cents',
+      'amount_used_cents',
+      'paid_cents',
+      'basic_token_total',
+      'basic_token_used',
+      'status',
+      'source',
+      'start_at',
+      'end_at',
+      'auto_renew',
+    ]) {
+      expect(after[col], `列 ${col} 不该被这次 upsert 抹掉`).toBe(before[col]);
+    }
+  });
+
+  it('行不存在 ⇒ 全量插入（新行没有旧值可保护，两个字段都要收下）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-tf', baseUrl: 'https://tf.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+
+    upsertSupplierSubscription(db, acc, {
+      subNo: 'SB9',
+      planTitle: '新套餐',
+      amountTotalCents: 1990,
+      basicTokenTotal: 8_000_000,
+      endAt: '2026-12-01T00:00:00.000Z',
+      autoRenew: false,
+      hasKey: true,
+      keyMasked: 'sk-****zz99',
+    });
+
+    // INSERT 分支仍然是全量：把它写窄会让"上游第一次给套餐时"丢掉字段，
+    // 而那一条路上根本没有旧行可以回退。
+    expect(rowOf(db, acc, 'SB9')).toEqual({
+      plan_title: '新套餐',
+      plan_slug: null,
+      amount_total_cents: 1990,
+      amount_used_cents: null,
+      paid_cents: null,
+      basic_token_total: 8_000_000,
+      basic_token_used: null,
+      status: null,
+      source: null,
+      start_at: null,
+      end_at: '2026-12-01T00:00:00.000Z',
+      auto_renew: 0,
+      has_key: 1,
+      key_masked: 'sk-****zz99',
+    });
+  });
+
+  it('连续两次 upsert 幂等：第二遍同样的入参不产生第二行，也不改业务列', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-tf', baseUrl: 'https://tf.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    seedFullRow(db, acc, 'SB1');
+
+    const body = {
+      subNo: 'SB1',
+      planTitle: null,
+      planSlug: null,
+      amountTotalCents: null,
+      amountUsedCents: null,
+      paidCents: null,
+      basicTokenTotal: null,
+      basicTokenUsed: null,
+      status: null,
+      source: null,
+      startAt: null,
+      endAt: null,
+      autoRenew: null,
+      hasKey: true,
+      keyMasked: 'sk-****5w2l',
+    };
+    upsertSupplierSubscription(db, acc, body);
+    const once = rowOf(db, acc, 'SB1');
+    upsertSupplierSubscription(db, acc, body);
+
+    expect(rowOf(db, acc, 'SB1')).toEqual(once);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM supplier_account_subscriptions WHERE account_id = ?').get(acc) as { n: number }).n).toBe(1);
+  });
+
+  it('hasKey 缺省 ⇒ has_key 落 0，而不是把上一轮的 1 留着', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-tf', baseUrl: 'https://tf.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    seedFullRow(db, acc, 'SB1');
+
+    upsertSupplierSubscription(db, acc, { subNo: 'SB1', keyMasked: null });
+
+    expect(rowOf(db, acc, 'SB1').has_key).toBe(0);
+    // 业务列照旧不动
+    expect(rowOf(db, acc, 'SB1').amount_total_cents).toBe(9900);
   });
 });

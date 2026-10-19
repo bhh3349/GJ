@@ -7,6 +7,7 @@ import {
   KeyOutlined,
   RobotOutlined,
   TeamOutlined,
+  UserSwitchOutlined,
   ApiOutlined,
 } from '@ant-design/icons';
 import type { ReactNode } from 'react';
@@ -47,6 +48,14 @@ export const navItems: readonly NavItem[] = [
     label: '用户组',
     icon: <TeamOutlined />,
     description: '建组、发 key、配额设置',
+  },
+  {
+    // 「谁在用什么身份登录」。放在「用户组」后面：两页强相关（一个组下挂着
+    // 若干用户），而这一页的多数操作都发生在刚建完组之后。
+    path: '/users',
+    label: '用户管理',
+    icon: <UserSwitchOutlined />,
+    description: '建普通用户账号、分配归属组',
   },
   {
     path: '/models',

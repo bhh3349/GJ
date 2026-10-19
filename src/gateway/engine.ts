@@ -410,10 +410,15 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
         continue;
       }
 
-      // 死绑定分型（决策 9(5)，方案 A 判据缝）：装配层判「这个出口还在不在活集」。放在并发
-      // 占位**之前**——永远选不出的候选不占 `beginAttempt`/`endAttempt`；判据纯只读、零副作用。
+      // 死绑定分型（决策 9(5)，方案 A 判据缝）：装配层判「这个出口还在不在活集」。
+      // 判据纯只读、零副作用，但**并发位必须归还**：本分支在 `beginAttempt` 之后
+      // （上面那个满并发跳过才是"没占到"的那个分支）。漏这一行的后果不是多等一会儿，
+      // 是这把 key 被永久钉死在满并发（`isUsable` 的 `inflight >= cap` 恒真）——
+      // 表现与 ADR-0011 点名的"池里还有 key 但选不出来"同形，且只能重启进程恢复
+      // （审计项 B：4 个请求泄漏 4 个并发位，之后出口恢复也选不出 key）。
       if (target.egressId !== null && !egressSelectable(target.egressId)) {
         skippedEgressDead += 1;
+        pool.endAttempt(candidate.keyId);
         emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'skipped' });
         continue;
       }

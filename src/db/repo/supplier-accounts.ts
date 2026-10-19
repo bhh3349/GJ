@@ -344,11 +344,57 @@ export function findSupplierAccountByIdentifierHash(
   db: Db,
   upstreamId: string,
   identifierHash: string,
-): { id: string } | null {
+): { id: string; identifier: string } | null {
   return (
     (db
-      .prepare('SELECT id FROM supplier_accounts WHERE upstream_id = ? AND identifier_hash = ?')
-      .get(upstreamId, identifierHash) as { id: string } | undefined) ?? null
+      .prepare('SELECT id, identifier FROM supplier_accounts WHERE upstream_id = ? AND identifier_hash = ?')
+      .get(upstreamId, identifierHash) as { id: string; identifier: string } | undefined) ?? null
+  );
+}
+
+/**
+ * 按**上游 uid** 找行。cookie-only 导入（§15.9）的唯一稳定身份：
+ * 手里只有会话时拿不到真值手机号/邮箱，`identifier_hash` 无法按原有口径算，
+ * 只能先问上游 `GET /api/me` 拿 `data.id`，再用它判重。
+ *
+ * 一个 uid 在同一上游理应只有一行；历史上若有重复（手工塞过数据），取最早建的那行，
+ * 保证同一批导入命中的是同一行，而不是随机行。
+ */
+export function findSupplierAccountByUid(
+  db: Db,
+  upstreamId: string,
+  uid: string,
+): { id: string; identifier: string } | null {
+  return (
+    (db
+      .prepare(
+        `SELECT id, identifier FROM supplier_accounts
+          WHERE upstream_id = ? AND uid = ?
+          ORDER BY created_at, id LIMIT 1`,
+      )
+      .get(upstreamId, uid) as { id: string; identifier: string } | undefined) ?? null
+  );
+}
+
+/**
+ * 按**掩码列**找行。cookie-only 导入的第二道判重：上游 `/api/me` 回的 `phoneMasked`
+ * 与既有行（当初按真值手机号导入、`uid` 尚未回填）的 `identifier` 是同一形态。
+ *
+ * 掩码不是唯一身份（同尾号可能撞），所以只在 uid 查不到时用；命中多行时取最早的一行。
+ */
+export function findSupplierAccountByIdentifier(
+  db: Db,
+  upstreamId: string,
+  identifier: string,
+): { id: string; identifier: string } | null {
+  return (
+    (db
+      .prepare(
+        `SELECT id, identifier FROM supplier_accounts
+          WHERE upstream_id = ? AND identifier = ?
+          ORDER BY created_at, id LIMIT 1`,
+      )
+      .get(upstreamId, identifier) as { id: string; identifier: string } | undefined) ?? null
   );
 }
 
@@ -657,6 +703,17 @@ export interface UpdateSupplierAccountInput {
   balanceCurrency?: string | null | undefined;
   /** 只在**真查到**余额时给（§14.2：查失败不动它，否则会渲染成"刚查过"） */
   balanceUpdatedAt?: string | null | undefined;
+  /**
+   * 站点换算比（`/api/user/self → data.quota_per_unit`）与读到它的时刻。
+   *
+   * **两格必须一起给**：只给比值不给时刻，`quota_read_at IS NULL` 这条"该不该信它"的
+   * 判据就失效了，一个过期比值会被当成刚读到的。同 `balanceCents` / `balanceUpdatedAt`
+   * 那一对，只是这里存的是**比例**而不是金额（§15.1：它是比例，不是钱）。
+   *
+   * 只在**真读到**时给（查失败不动）—— 见 DDL 里"可空无默认"的理由。
+   */
+  quotaPerUnit?: number | null | undefined;
+  quotaReadAt?: string | null | undefined;
 }
 
 export function updateSupplierAccount(db: Db, id: string, patch: UpdateSupplierAccountInput): void {
@@ -678,6 +735,8 @@ export function updateSupplierAccount(db: Db, id: string, patch: UpdateSupplierA
   if (patch.balanceCents !== undefined) put('balance_cents', patch.balanceCents);
   if (patch.balanceCurrency !== undefined) put('balance_currency', patch.balanceCurrency);
   if (patch.balanceUpdatedAt !== undefined) put('balance_updated_at', patch.balanceUpdatedAt);
+  if (patch.quotaPerUnit !== undefined) put('quota_per_unit', patch.quotaPerUnit);
+  if (patch.quotaReadAt !== undefined) put('quota_read_at', patch.quotaReadAt);
 
   // 一次空 patch 直接返回：写一条 `UPDATE ... SET revision = revision + 1` 会让
   // 一个"什么都没改"的调用把乐观锁版本推进一格，前端下次提交就撞 REVISION_MISMATCH。
@@ -784,6 +843,15 @@ export interface SupplierCredential {
   password: string | null;
   session: string | null;
   tfUser: string | null;
+  /**
+   * 站点换算比（`quota_per_unit`）与读到它的时刻。**`null` = 从没读到过**，
+   * 不是 500000 —— 这两件事在取值上都表现为"用默认值"，但一个是"不知道"、
+   * 一个是"知道是 500000"，建 key 时只有前者该落回默认（审计项 D）。
+   *
+   * 与凭据**同一次 SELECT** 出来：它只是一列，不为它多发一次查询。
+   */
+  quotaPerUnit: number | null;
+  quotaReadAt: string | null;
 }
 
 interface CredRow {
@@ -793,6 +861,8 @@ interface CredRow {
   identifier_hash: string;
   encrypted_password: Buffer | null;
   encrypted_session: Buffer | null;
+  quota_per_unit: number | null;
+  quota_read_at: string | null;
 }
 
 /**
@@ -806,7 +876,8 @@ interface CredRow {
 export function readSupplierCredential(db: Db, id: string, masterKey: Buffer): SupplierCredential | null {
   const row = db
     .prepare(
-      `SELECT id, upstream_id, identifier, identifier_hash, encrypted_password, encrypted_session
+      `SELECT id, upstream_id, identifier, identifier_hash, encrypted_password, encrypted_session,
+              quota_per_unit, quota_read_at
          FROM supplier_accounts WHERE id = ?`,
     )
     .get(id) as CredRow | undefined;
@@ -840,6 +911,10 @@ export function readSupplierCredential(db: Db, id: string, masterKey: Buffer): S
     password,
     session,
     tfUser,
+    // 换算比不是凭据，跟着一起读出来（审计项 D：建 key 要用它换算 quotaCents）。
+    // `quota_per_unit` 可空 —— 老库里这一列可能是 NULL（从没读到过），照原样传出。
+    quotaPerUnit: row.quota_per_unit ?? null,
+    quotaReadAt: row.quota_read_at ?? null,
   };
 }
 
@@ -975,6 +1050,20 @@ export function latestSubscriptionSubNo(db: Db, accountId: string): string | nul
  * （顺带对账那一次请求失败时 `mapped` 为空）—— 拿一份部分快照去整批替换，会把其余套餐行**删掉**：
  * `subscriptionCount` 变小、到期排序里少行，且**没有任何报错可追**。
  * 于是这里只动一行，且只把**本次确知为真**的两格（`has_key` / `key_masked`）写实。
+ *
+ * ## 为什么 UPDATE 分支只碰两列（审计项 C）
+ *
+ * 早先是一条 `ON CONFLICT … DO UPDATE SET <全部列>`。调用方（`rotateOne` ④）在顺带对账
+ * **失败**时手里没有任何套餐字段，只能整批填 `null` 进来 —— 而 `DO UPDATE` 那句
+ * `plan_title = excluded.plan_title` 会把**上一轮 refresh 写实的 `plan_title` /
+ * `amount_total_cents` / `end_at` / `auto_renew` …** 一并抹成 NULL。
+ * 症状是"重置了一次 key，这个套餐的金额与到期日凭空消失"，而前端看不出它是丢了
+ * （NULL 与"上游没给"在界面上是同一副样子）。
+ *
+ * 现在拆成两条语句：INSERT 仍然收全量（**新行本来就没有旧值可保护**），
+ * UPDATE 只写 `has_key` / `key_masked` —— 也就是本函数真正知道的那两格。
+ * 代价是行已存在时其余列**永远不在这里更新**；那正是我们要的：
+ * 那些列的唯一事实源是 `replaceSupplierSubscriptions`（整批替换，一次上游快照）。
  */
 export function upsertSupplierSubscription(
   db: Db,
@@ -982,29 +1071,25 @@ export function upsertSupplierSubscription(
   sub: SupplierSubscriptionWrite,
 ): void {
   const at = nowIso();
-  db.prepare(
+  const insert = db.prepare(
     `INSERT INTO supplier_account_subscriptions (
        id, account_id, sub_no, plan_title, plan_slug, amount_total_cents, amount_used_cents,
        paid_cents, basic_token_total, basic_token_used, status, source, start_at, end_at,
        auto_renew, has_key, key_masked, updated_at
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT (account_id, sub_no) DO UPDATE SET
-       plan_title         = excluded.plan_title,
-       plan_slug          = excluded.plan_slug,
-       amount_total_cents = excluded.amount_total_cents,
-       amount_used_cents  = excluded.amount_used_cents,
-       paid_cents         = excluded.paid_cents,
-       basic_token_total  = excluded.basic_token_total,
-       basic_token_used   = excluded.basic_token_used,
-       status             = excluded.status,
-       source             = excluded.source,
-       start_at           = excluded.start_at,
-       end_at             = excluded.end_at,
-       auto_renew         = excluded.auto_renew,
-       has_key            = excluded.has_key,
-       key_masked         = excluded.key_masked,
-       updated_at         = excluded.updated_at`,
-  ).run(
+     ON CONFLICT (account_id, sub_no) DO NOTHING`,
+  );
+  const stamp = db.prepare(
+    `UPDATE supplier_account_subscriptions
+        SET has_key = ?, key_masked = ?, updated_at = ?
+      WHERE account_id = ? AND sub_no = ?`,
+  );
+
+  // 先插（新行 = 全量）。冲突时 DO NOTHING，再走 UPDATE 只动两格。
+  // 用 `changes === 0` 而不是 `rowid` 判在不在：better-sqlite3 的 `run()` 回的就是
+  // 实际改动行数，而"插进去"与"已存在"在这里都要走同一条 UPDATE 路径
+  // —— 刚插进去的那行 `has_key` / `key_masked` 已经是入参值，再 stamp 一次是幂等的。
+  insert.run(
     newId('supplierSubscription'),
     accountId,
     sub.subNo,
@@ -1025,6 +1110,7 @@ export function upsertSupplierSubscription(
     sub.keyMasked ?? null,
     at,
   );
+  stamp.run(sub.hasKey === true ? 1 : 0, sub.keyMasked ?? null, at, accountId, sub.subNo);
 }
 
 /** 台账行（写侧形态）。`pooledKeyId` 非空 = 已入池，空 = 只拿到掩码。 */
@@ -1032,6 +1118,117 @@ export interface SupplierAccountKeyWrite {
   maskedKey: string;
   pooledKeyId?: string | null | undefined;
   note?: string | null | undefined;
+}
+
+/**
+ * 套餐行（读侧形态，回填用）。
+ *
+ * 只取**回填真正需要的四格**：`basicTokenTotal` / `basicTokenUsed` 算出余量，
+ * `endAt` 定到期，`keyMasked` 定位池里的那把 key。`SupplierSubscriptionWrite` 本身
+ * 就能表达这四格，但回填在**读侧**调用（`syncForAccount` 手里是刚写进去的那批），
+ * 拿写侧类型当入参会把"这个值可能是上游没给的 null"这件事讲混。
+ */
+export interface SupplierSubscriptionBackfill {
+  subNo: string;
+  basicTokenTotal?: number | null | undefined;
+  basicTokenUsed?: number | null | undefined;
+  endAt?: string | null | undefined;
+  keyMasked?: string | null | undefined;
+}
+
+/**
+ * 把上游套餐的**基础 Token 余量**回填给池内那把套餐 key（`token-plan`）。
+ *
+ * ## 为什么必须有这一步
+ *
+ * ADR-0022 落库时刻意把 `token_plan_remaining` 留 `NULL`（余量未知 ≠ 0），
+ * 承诺"由后续 `keys/sync` / 余额刷新回填"。**本函数就是那个"后续"** ——
+ * 不填的话，`KeyPool.remainingQuotaOf` 对 `NULL` 返回哨兵值，套餐 key
+ * 永远排在余额 key 后面，而用户要的恰恰相反（先烧套餐）。
+ *
+ * ## 三条取值纪律（每一条都对着一个具体的错法）
+ *
+ * 1. **单位是 Token 个数，不是钱**。`basic_token_total` / `basic_token_used`
+ *    上游给的是**Token 数**（轻享版 8,000,000 = 800 万），绝不能过 `quotaToCents`
+ *    （那会把 800 万除成 16 分）。套餐的**高级**额度 `amount_*` 才是 quota。
+ *    所以这里直接相减，一次换算都不做。
+ * 2. **两个都取不到就整行跳过**。`null` 表示"上游没说"，不是 0。
+ *    写 0 会让网关把这把 key 当成"额度耗尽"直接排除出选路 ——
+ *    而那把 key 明明还能用，这是把"未知"伪装成"确定的无"。
+ *    **`basicTokenUsed` 缺失同样跳过**（不是按 0 算）：理由见实现里那段。
+ *    跳过的代价不是这把 key 不可用，是它在选路键 2 上落在"未知"那一档
+ *    （`UNKNOWN_PLAN_QUOTA`）—— 仍排在余额 key 前，只是不参与精确排序。
+ * 3. **余量可以递减**，所以这里**不能**用 `applyTemplateTokenPlan`：那个函数用
+ *    `COALESCE(?, token_plan_remaining)` 防止模板覆盖手工值，代价是
+ *    **永远写不进一个更小的数**。而套餐余量只会越用越少 —— 用 COALESCE 的话
+ *    第一次同步之后就再也不更新了，前端会一直显示 800 万。
+ *
+ * ## 匹配口径
+ *
+ * 按 `key_masked`（`****` + 后 4 位）在台账里找**唯一**一把已入池的 key。
+ * 撞号 / 找不到 ⇒ 这一行不动（同 §15.2 `KEY_MASK_AMBIGUOUS` 的取向：
+ * 宁可留一个 NULL，也不把 A 套餐的余量写到 B 套餐的 key 上）。
+ *
+ * 匹配到的 key 若不是 `token-plan` 类（理论上不该发生：套餐 key 由 rotate 建，
+ * 必然是 `token-plan`），照样跳过 —— 把套餐余量写到一把余额 key 上，
+ * 会让 `KeyPool` 把它当套餐 key 排序，两套计费池就此混在一起。
+ */
+export function backfillSubscriptionTokenPlan(
+  db: Db,
+  accountId: string,
+  subs: readonly SupplierSubscriptionBackfill[],
+): void {
+  const linked = listLinkedPooledKeyMasks(db, accountId);
+  if (linked.length === 0 || subs.length === 0) return;
+
+  const at = nowIso();
+  const update = db.prepare(
+    `UPDATE upstream_keys
+       SET token_plan_remaining = ?, token_plan_expires_at = ?, balance_updated_at = ?, updated_at = ?
+     WHERE id = ? AND category = 'token-plan' AND deleted_at IS NULL`,
+  );
+
+  const touched = new Set<string>();
+  db.transaction(() => {
+    for (const sub of subs) {
+      // 纪律 1 + 2：先算余量。**任一格未知 ⇒ 这一行没有可写的数。**
+      //
+      // `basicTokenUsed` 缺失时**不能按 0 算**（这里早先是 `?? 0`，是文档漂移）：
+      // `null` 的语义是"上游没说用了多少"，按 0 算等于替上游下一个它没下过的结论
+      // （"这个套餐一点没用过"）。而这一减会产出一个**具体的数**（= 全额），
+      // 它接着进网关的选路键 2、进 `balance_updated_at`、进前端那一格 ——
+      // 一个"我们并不知道"的数从此以"我们查过了"的面目存在。
+      //
+      // 留 NULL 的代价**不是**这把 key 被踢出选路：`KeyPool.remainingQuotaOf`
+      // 对 NULL 回 `UNKNOWN_PLAN_QUOTA`（= 1），仍然排在余额 key 之前 ——
+      // 用户要的"先烧套餐"一点没变，只是这把 key 不参与精确排序。那是正确的代价：
+      // 宁可排序粗一格，也不要编一个余量。
+      if (sub.basicTokenTotal === null || sub.basicTokenTotal === undefined) continue;
+      if (sub.basicTokenUsed === null || sub.basicTokenUsed === undefined) continue;
+      const remaining = sub.basicTokenTotal - sub.basicTokenUsed;
+      // 上游的 used 可能大于 total（并发计费的瞬时态）。负余量在网关侧会被
+      // `remainingQuotaOf` 的 `Math.max(0, …)` 归一成 0 = 不可用，那是**正确**的
+      // （池子确实空了）；但存一个负数进库会让前端显示"-200"，所以这里就夹到 0。
+      const remainingTokens = Math.max(0, remaining);
+
+      const masked = sub.keyMasked;
+      if (masked === null || masked === undefined || masked === '') continue;
+      const hits = linked.filter((row) => row.maskedKey === masked);
+      if (hits.length !== 1) continue; // 撞号 / 找不到：不动
+      const pooledKeyId = hits[0]?.pooledKeyId;
+      if (pooledKeyId === undefined) continue;
+
+      update.run(remainingTokens, sub.endAt ?? null, at, at, pooledKeyId);
+      touched.add(pooledKeyId);
+    }
+
+    // 广播与写入同一事务（同 `replaceSupplierAccountKeyLedger`）：崩在中间会让
+    // "库里有新余量、网关还在用旧快照"成为**永久**状态 —— 而快照里那把 key 的
+    // `tokenPlanRemainingTokens` 正是选路键 2 与可用性判据。`'balance'` 与 `'key'`
+    // 都在 `SNAPSHOT_ENTITIES` 里，两个都能叫醒网关；取 `'balance'` 是因为这一动
+    // 改的是**额度**那一族列（`token_plan_remaining` / `token_plan_expires_at`）。
+    for (const pooled of touched) appendChange(db, 'balance', pooled, 'update', null);
+  })();
 }
 
 /**

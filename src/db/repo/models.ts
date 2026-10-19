@@ -345,6 +345,16 @@ export interface EnabledGatewayModel {
   id: string;
   /** 客户端可见名，也是 /v1/models 的 id */
   name: string;
+  /**
+   * 模型类别（契约 §5 / ADR-0039）。
+   *
+   * 这一列进服务路径是 v1.15.10 的修复：在此之前网关有「模型类别」也有「端点」，
+   * 却从不把两者对上 —— 任何登记过的 chat 名字都被原样转发到上游的 `/embeddings`，
+   * 上游的 404 再被当成一次正常调用落库。类别是**网关侧**的登记事实（谁建的档谁填），
+   * 不是上游必须提供的东西：上游没有向量模型时，正确行为是网关在**出站之前**拒绝，
+   * 而不是把问题推给上游。
+   */
+  type: ModelType;
   upstreamId: string;
   /** 归属上游名，直接作为 /v1/models 的 owned_by */
   upstreamName: string;
@@ -364,14 +374,16 @@ export interface EnabledGatewayModel {
  * 「已启用」集合的唯一判据（验收 4）：`models.enabled = 1` **且** 其上游 `enabled = 1`。
  * 上游一停用，它名下的模型立刻不可路由、也不再出现在 /v1/models 里 —— 两处必须同一句 SQL。
  *
- * M3 适配层用它同时干三件事：/v1/models 列表、选路的「谁登记了谁才可能被选到」、
- * 以及用量落库时的价格换算。三件事共用一份行，少一次查询也少一处口径漂移。
+ * M3 适配层用它同时干四件事：/v1/models 列表、选路的「谁登记了谁才可能被选到」、
+ * 用量落库时的价格换算，以及**端点类别准入**（`type`，ADR-0039）。
+ * 四件事共用一份行，少一次查询也少一处口径漂移。
  */
 export function listEnabledGatewayModels(db: Db): EnabledGatewayModel[] {
   const rows = db
     .prepare(
       `SELECT m.id              AS id,
               m.name            AS name,
+              m.type            AS type,
               m.upstream_id     AS upstreamId,
               u.name            AS upstreamName,
               m.created_at      AS createdAt,

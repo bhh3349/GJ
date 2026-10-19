@@ -4,7 +4,8 @@
  *
  * 纪律：`/v1/*` 只出 OpenAI 形状 `{error:{message,type,code}}`，绝不出现 `{code,message}`。
  * 码值来源分两类：
- *   - 项目冻结码：NO_AVAILABLE_KEY / NO_AVAILABLE_EGRESS / UNSUPPORTED_ENDPOINT / GROUP_DISABLED（契约 §10 明文写死）
+ *   - 项目冻结码：NO_AVAILABLE_KEY / NO_AVAILABLE_EGRESS / UNSUPPORTED_ENDPOINT / GROUP_DISABLED /
+ *     MODEL_NOT_AUTHORIZED（v1.15.8）（契约 §10 明文写死）
  *   - OpenAI 规范码：invalid_api_key / rate_limit_exceeded / insufficient_quota / ...
  * 新增码值前先在群里对一次，避免调用方按码分支时踩空。
  */
@@ -34,6 +35,15 @@ export const GATEWAY_ERROR_CODES = {
   INVALID_REQUEST: 'INVALID_REQUEST',
   INVALID_API_KEY: 'INVALID_API_KEY',
   GROUP_DISABLED: 'GROUP_DISABLED',
+  /**
+   * v1.15.8 新增（契约 §10 / ADR-0037）：该组**未被授权**使用这个模型 —— 凭据是对的，
+   * 是"人不对"（组策略），所以与 `GROUP_DISABLED` 同族（403 / `authentication_error`），
+   * 客户端的处置一致（找管理员开授权，不是改代码）。
+   * **不复用** `GROUP_DISABLED`：组没禁用，那个码会把值班引向"查账号状态"这条错路。
+   * **不复用** `INVALID_REQUEST`(400)：调用方没写错任何东西。
+   * 0 次真实尝试、不计 key 健康、不碰冷却 —— 判在候选集建立**之前**（路由层）。
+   */
+  MODEL_NOT_AUTHORIZED: 'MODEL_NOT_AUTHORIZED',
   NO_AVAILABLE_KEY: 'NO_AVAILABLE_KEY',
   /**
    * v1.7.0 新增（契约 §10 / ADR-0021 决策 9(5)）：候选集合**永久为空** —— 绑定的出口全 `retired`，
@@ -91,6 +101,24 @@ export class GatewayError extends Error {
 
 export const unauthorizedError = (message = 'missing or invalid gateway key'): GatewayError =>
   new GatewayError(401, GATEWAY_ERROR_CODES.INVALID_API_KEY, message, 'authentication_error');
+
+/**
+ * 403 `MODEL_NOT_AUTHORIZED`（契约 §10 v1.15.8 / ADR-0037 决策 5）：该组**未被授权**用这个模型。
+ *
+ * 位置在路由层（`requireGroup` → `passLimiter` → `readModel` → **本门** → 引擎），
+ * 所以它天然带着那排拒绝的 0-attempt 语义：候选集根本没建、`failureReason: null`、
+ * 不计 key 健康、不碰冷却 —— 与 `GROUP_DISABLED` / 限流是**同一类拒绝**（凭据/策略侧）。
+ *
+ * `param` 给 `model`：调用方拿到 403 后第一个问题是"哪个模型不行"，写在 param 里比拆 message 稳。
+ */
+export const modelNotAuthorizedError = (model: string): GatewayError =>
+  new GatewayError(
+    403,
+    GATEWAY_ERROR_CODES.MODEL_NOT_AUTHORIZED,
+    `model not authorized for this group: ${model}`,
+    'authentication_error',
+    'model',
+  );
 
 export const noAvailableKeyError = (model: string): GatewayError =>
   new GatewayError(503, GATEWAY_ERROR_CODES.NO_AVAILABLE_KEY, `no available key for model: ${model}`, 'server_error');

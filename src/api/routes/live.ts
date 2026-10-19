@@ -71,11 +71,27 @@ const CLOSE_GRACE_MS = 200;
  *
  * 用 `touchSession` 而不是 `sessionAlive`：建连是一次性动作，顺手把滑动续期做掉是正确的；
  * 而连接建立之后每秒复查绝不能再走这条写路径（见 auth.ts `sessionAlive` 的注释）。
+ *
+ * **这里必须判 `role`**（v1.15.1 补，§19.1 / ADR-0034）：本路径是 `app.ts` 鉴权闸门的
+ * 唯一例外（`isLiveHandshake`：升级请求不能回 HTTP 401，否则浏览器只报 1006，
+ * 前端分不清"会话过期"与"服务不可用"）。那个例外的代价是**闸门的授面判定也一起被跳过** ——
+ * 实测 `role=user` 拿到的会话同样能握手成功并收 `metrics` 帧
+ * （全站 QPS / 成功率 / `balanceGlobal` 全站余额 / `egress_pool`）。
+ * 那些数字是 §19.1 明写"不给普通用户"的东西：`/api/stats/overview` 会 403，
+ * 而 WS 这条路把同一份数据原样送了出去 —— 授面在**通道层**漏了一格。
+ *
+ * 拒绝用 `4401` 而不是 `1008`：4401 在前端 `live.ts` 里就是"跳登录页"，
+ * 而这里的真话是"你的身份不该开这条通道"（**不是**会话失效，重新登录也没用）。
+ * 两者在 HTTP 时代码不同，在 WS 侧 4401 是唯一能表达的语义，且前端已有处理分支。
  */
 function handshakeSession(db: Db, ttlHours: number, req: FastifyRequest): string | null {
   const token = sessionCookieValue(req);
   if (token === null) return null;
-  return touchSession(db, token, ttlHours) === null ? null : token;
+  const info = touchSession(db, token, ttlHours);
+  if (info === null) return null;
+  // §19.1：`/api/stats/live` 是管理面全局面通道，`role=user` 不开。
+  if (info.role !== 'admin') return null;
+  return token;
 }
 
 /**

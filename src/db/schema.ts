@@ -27,6 +27,16 @@ const DDL = `
 CREATE TABLE IF NOT EXISTS admin_users (
   username      TEXT PRIMARY KEY,
   password_hash TEXT NOT NULL,          -- scrypt/argon2id 编码串（含 salt 与参数）
+  -- v1.15.0 / ADR-0034：两种身份。'admin' = 管理面全权；'user' = 只能进 §19 消费面（只读）。
+  -- **DEFAULT 'admin' 不是随手填的**：老库里唯一的账号本来就是管理员，填 'user' 会让
+  -- 升级后现有管理员失去管理面（"升级即锁死自己"的故障形状）。判据钉这一条。
+  role          TEXT NOT NULL DEFAULT 'admin',
+  -- 该用户归属的组。可空 = 未分配（此时消费面**读**端点回空/降级，不是 500；
+  -- 写端点则回 400 —— 读的失败是"看不到"（无害），写的失败是"签出一把废 key"（有害）。
+  -- 外键不设 ON DELETE：删组时这些用户的 group_id 会怎样由仓储层显式处理，不让
+  -- SQLite 的隐式行为（SET NULL / RESTRICT / CASCADE）在没人看的地方替我们决定。
+  group_id      TEXT REFERENCES groups(id),
+  display_name  TEXT,
   created_at    TEXT NOT NULL,
   updated_at    TEXT NOT NULL
 );
@@ -46,7 +56,7 @@ CREATE TABLE IF NOT EXISTS upstreams (
   name          TEXT NOT NULL UNIQUE,
   base_url      TEXT NOT NULL,
   enabled       INTEGER NOT NULL DEFAULT 1,
-  supplier      TEXT,                         -- 供应商能力位（本期唯一取值 'tierflow'）；NULL = 通用上游。能力位只看这一列，不猜 host（§2 / §15.6 / ADR-0018 决策 0）
+  supplier      TEXT,                         -- 供应商能力位（'tierflow' / 'tokenrhythm'）；NULL = 通用上游。能力位只看这一列，不猜 host（§2 / §15.6 / ADR-0018 决策 0）
   balance_query TEXT NOT NULL DEFAULT '{}',   -- JSON：{enabled,url,method,headers,body,parse,timeoutMs}
   revision      INTEGER NOT NULL DEFAULT 1,
   created_at    TEXT NOT NULL,
@@ -136,6 +146,27 @@ CREATE TABLE IF NOT EXISTS models (
   UNIQUE (upstream_id, name)
 );
 CREATE INDEX IF NOT EXISTS idx_models_enabled ON models(enabled);
+
+-- 组 → 模型授权（契约 §4「模型授权」/ ADR-0037）。**纯加表**，SCHEMA_VERSION 不递增 ——
+-- 同 gateway_error_events / balance_snapshots 那几批，DDL 每次开库整体跑，旧库上照建。
+-- 旧库上这张表是空的 = 全部组都是"不限模型"，正是升级该有的零行为变更。
+--
+-- 两条外键，且**刻意不写 ON DELETE CASCADE**（全库同一条纪律：谁受什么影响由
+-- 删除事务显式决定，schema 不藏行为）。代价是两个删除路径必须各加一条显式清理，
+-- 漏一条就是 FOREIGN KEY constraint failed → 500（实测钉过，ADR-0037 决策 7）：
+--   ① deleteGroup 事务内、删 groups 行之前：DELETE FROM group_models WHERE group_id = ?
+--   ② deleteUpstream(force) 事务内、删 models 行之前：DELETE FROM group_models WHERE model_id IN (...)
+--
+-- 授权落的是 model_id（不是名字），判定按名字 —— 名字在写入时由 upstream_id + name
+-- 解析成 id，所有同名档案一起授权（ADR-0037 决策 2 的代价，已登记）。
+-- （本段是 DDL 模板的一部分，**不能出现反引号**：那会提前结束模板字符串。）
+CREATE TABLE IF NOT EXISTS group_models (
+  group_id TEXT NOT NULL REFERENCES groups(id),
+  model_id TEXT NOT NULL REFERENCES models(id),
+  PRIMARY KEY (group_id, model_id)
+);
+-- 按 model_id 反查（级联 ② 的 WHERE 条件）走这条索引：主键索引前缀是 group_id，帮不上它。
+CREATE INDEX IF NOT EXISTS idx_group_models_model ON group_models(model_id);
 
 CREATE TABLE IF NOT EXISTS usage_logs (
   id                TEXT PRIMARY KEY,
@@ -316,7 +347,7 @@ CREATE INDEX IF NOT EXISTS idx_balance_snapshots_upstream_ts ON balance_snapshot
 CREATE TABLE IF NOT EXISTS supplier_accounts (
   id                 TEXT PRIMARY KEY,
   upstream_id        TEXT NOT NULL,                 -- 抹名引用，刻意不设外键（见上）
-  supplier           TEXT NOT NULL,                 -- 'tierflow'（本期唯一取值）
+  supplier           TEXT NOT NULL,                 -- 'tierflow' / 'tokenrhythm'（该行来自哪家，决定用哪个驱动器）
   identifier         TEXT NOT NULL,                 -- 掩码手机号 / 邮箱，列表直接展示这个
   identifier_hash    TEXT NOT NULL,                 -- 归一化真值 sha256，同一上游内判重
   username           TEXT,
@@ -330,6 +361,16 @@ CREATE TABLE IF NOT EXISTS supplier_accounts (
   balance_currency   TEXT,
   balance_updated_at TEXT,                          -- 只在**真查到**时写；查失败不动（§14.2 同纪律）
   egress_id          TEXT,                          -- §16.7 Tier 2；NULL = 用宿主出口
+  -- 该账号站点自己的换算比（/api/user/self → data.quota_per_unit）与读到它的时刻。
+  -- （本段不写反引号：它在模板字符串里，反引号会当场截断整段 DDL。）
+  -- **审计项 D**：createToken 一度写死 DEFAULT_QUOTA_PER_UNIT（500000），而 §15.1
+  -- 钉死"换算基准每次从上游读、不写死"。站点改了比值时，unlimited:false 建出来的 key
+  -- 额度会成比例地错，且不报错。存这一列不是"又缓存了一份" —— 是让建 key 这条腿
+  -- **不必为拿一个比值多发一次请求**（§15.5：建 key = 2 次请求，那条预算是死的）。
+  -- 只在**真读到**时写（同 balance_updated_at 的纪律：查失败不动，否则会把上一次
+  -- 真值抹成"没读过"，而两者在取值上都表现为"用默认值"）。
+  quota_per_unit     INTEGER,
+  quota_read_at      TEXT,                          -- 比值是什么时候读到的；NULL = 从没读到过
   revision           INTEGER NOT NULL DEFAULT 1,
   created_at         TEXT NOT NULL,
   updated_at         TEXT NOT NULL,
@@ -579,6 +620,52 @@ export function migrate(db: SqliteDatabase): void {
       if (!hasColumn(db, table, column)) {
         db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
       }
+    }
+  })();
+
+  // v1.14.0：supplier_accounts 的换算比缓存（审计项 D）。**纯加列**，SCHEMA_VERSION 不递增。
+  //
+  // 判据照本文件其余各批用 `hasColumn()`：`supplier_accounts` 是 v1.4.0 建的表，
+  // 在跑着的库里早就存在 —— 只改上面的 DDL 文本对它**没有任何作用**
+  // （`CREATE TABLE IF NOT EXISTS` 撞上已存在的表是空操作），必须真发 ALTER。
+  //
+  // 可空、无默认：老行 NULL = "从没读到过比值"，建 key 时落回 `DEFAULT_QUOTA_PER_UNIT` ——
+  // 与加列前**逐字相同**。给个默认值 500000 反而是错的：那会让"没读过"伪装成"读过 500000"，
+  // 而 `quota_read_at IS NULL` 这条判据（"该不该信这个比值"）就再也用不上了。
+  db.transaction(() => {
+    for (const [column, decl] of [
+      ['quota_per_unit', 'INTEGER'],
+      ['quota_read_at', 'TEXT'],
+    ] as const) {
+      if (!hasColumn(db, 'supplier_accounts', column)) {
+        db.exec(`ALTER TABLE supplier_accounts ADD COLUMN ${column} ${decl}`);
+      }
+    }
+  })();
+
+  // v1.15.0 / ADR-0034：admin_users 的 role 与 group_id（消费面用户）。**纯加列**，SCHEMA_VERSION 不递增。
+  //
+  // `admin_users` 是开库第一张建的表（见顶部 DDL），在跑着的库里早就存在 ——
+  // 只改上面的 DDL 文本对它**没有任何作用**（`CREATE TABLE IF NOT EXISTS` 撞上已存在的表是空操作），
+  // 必须真发 ALTER。判据仍是 `hasColumn()`：ADD COLUMN 不幂等，重复执行抛
+  // `duplicate column name`，而这段跑在每次 openDatabase() 里。
+  //
+  // **`DEFAULT 'admin'` 是本批最要紧的一处**：老库里唯一的账号本来就是管理员，
+  // 默认值填 `'user'` 会让升级后的现有管理员**打不开管理面**（他落在 `/api/**` 上全部 403），
+  // 而那时候库里可能已经没有第二个 admin 账号了 —— 那是一个"升级即锁死自己"的故障形状，
+  // 且只能靠改库脱身。所以老行一律补 `admin`，与升级前的行为逐字相同。
+  //
+  // `group_id` 可空无默认：`NULL` = 未分配组。语义与加列前逐字相同（那时没有"归属组"这个概念），
+  // 消费面读到 NULL 时回空列表 + `assigned:false`，不是 500。
+  db.transaction(() => {
+    if (!hasColumn(db, 'admin_users', 'role')) {
+      db.exec(`ALTER TABLE admin_users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'`);
+    }
+    if (!hasColumn(db, 'admin_users', 'group_id')) {
+      db.exec('ALTER TABLE admin_users ADD COLUMN group_id TEXT REFERENCES groups(id)');
+    }
+    if (!hasColumn(db, 'admin_users', 'display_name')) {
+      db.exec('ALTER TABLE admin_users ADD COLUMN display_name TEXT');
     }
   })();
 

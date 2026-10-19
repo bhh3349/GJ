@@ -14,6 +14,7 @@ import { useLocation, useNavigate } from 'react-router-dom';
 
 import { authApi } from '@/api/endpoints';
 import { describeError } from '@/api/http';
+import type { SessionInfo } from '@/api/types';
 import { tokens } from '@/theme/tokens';
 
 interface LoginFormValues {
@@ -50,8 +51,9 @@ export default function LoginPage() {
   const onSubmit = async (values: LoginFormValues): Promise<void> => {
     setFailure(null);
     setSubmitting(true);
+    let session: SessionInfo | null = null;
     try {
-      await authApi.login({ username: values.username, password: values.password });
+      session = await authApi.login({ username: values.username, password: values.password });
     } catch (error) {
       const { code, message } = describeError(error);
       setFailure({ code, message });
@@ -67,7 +69,12 @@ export default function LoginPage() {
     }
 
     const state = location.state as LocationState | null;
-    navigate(state?.from ?? '/dashboard', { replace: true });
+    // §19 / ADR-0034 决策 4：跳哪由**登录响应里的 role** 决定，不是写死 `/dashboard`。
+    // 写死时 `role=user` 会先落在管理面仪表盘上（那里会去打 `upstreamsApi.list()`，
+    // 拿到 403），再被路由层的兜底送去 `/console` —— 用户看到的是"闪一下+一屏错误"。
+    // 有了 role 就直接去该去的那一侧，那一下闪现与那次 403 都不会发生。
+    const home = session?.role === 'user' ? '/console' : '/dashboard';
+    navigate(state?.from ?? home, { replace: true });
   };
 
   return (

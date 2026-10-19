@@ -25,7 +25,15 @@ const CODE = {
   INVALID_REQUEST: 'INVALID_REQUEST',
   INVALID_API_KEY: 'INVALID_API_KEY',
   GROUP_DISABLED: 'GROUP_DISABLED',
+  MODEL_NOT_AUTHORIZED: 'MODEL_NOT_AUTHORIZED', // v1.15.8 / ADR-0037
   NO_AVAILABLE_KEY: 'NO_AVAILABLE_KEY',
+  // v1.15.8 / ADR-0037 决策 5 **同笔订正一处既有漂移**：`NO_AVAILABLE_EGRESS` 自 v1.7.0 进
+  // 契约 §10 表以来，**从未登进本映射** —— 于是 503 `NO_AVAILABLE_EGRESS` 事件一路被
+  // `deriveCategory` 的 default 归成 `INTERNAL`（error 级）。而 §10 那句「§12.1 的 category
+  // 仍是 9 值：'出口选不出'与'key 选不出'是同一个分诊对象」的**意图本来就是**它归
+  // `NO_AVAILABLE_KEY` 分型。这是"契约表加了码、实现侧映射没跟上"，先于本版存在，
+  // 本版补上并用例钉住（不静默改：改了什么、为什么，都在这里与 ADR-0037 决策 5）。
+  NO_AVAILABLE_EGRESS: 'NO_AVAILABLE_EGRESS',
   UNSUPPORTED_ENDPOINT: 'UNSUPPORTED_ENDPOINT',
   RATE_LIMITED: 'RATE_LIMITED',
   QUOTA_EXCEEDED: 'QUOTA_EXCEEDED',
@@ -50,12 +58,17 @@ function categoryOfCode(code: string | null): GatewayErrorCategory | null {
       return 'CLIENT_REQUEST';
     case CODE.INVALID_API_KEY:
     case CODE.GROUP_DISABLED:
+    // v1.15.8：凭据对了、人（组）不对 —— 与 GROUP_DISABLED 同族（ADR-0037 决策 5）。
+    case CODE.MODEL_NOT_AUTHORIZED:
       return 'AUTH_FAILED';
     case CODE.RATE_LIMITED:
       return 'RATE_LIMITED';
     case CODE.QUOTA_EXCEEDED:
       return 'QUOTA_EXCEEDED';
     case CODE.NO_AVAILABLE_KEY:
+    // v1.15.8 订正（见 CODE 处的长注释）：出口选不出与 key 选不出是同一个分诊对象。
+    // before: 落到 default → INTERNAL（error 级），值班被引向"网关内部出错"这条错路。
+    case CODE.NO_AVAILABLE_EGRESS:
       return 'NO_AVAILABLE_KEY';
     case CODE.UPSTREAM_ERROR:
       return 'UPSTREAM_ERROR';

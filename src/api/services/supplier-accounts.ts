@@ -34,6 +34,7 @@ import type { Db } from '../../db/database.js';
 import { newId } from '../../db/ids.js';
 import { createKey, deleteKey } from '../../db/repo/keys.js';
 import {
+  backfillSubscriptionTokenPlan,
   createSupplierAccount,
   findSupplierAccountByIdentifierHash,
   latestSubscriptionSubNo,
@@ -50,6 +51,7 @@ import {
   type SupplierAccountKeyWrite,
   type SupplierAccountRef,
   type SupplierCredential,
+  type SupplierSubscriptionBackfill,
   type SupplierSubscriptionWrite,
   type UpdateSupplierAccountInput,
 } from '../../db/repo/supplier-accounts.js';
@@ -57,7 +59,12 @@ import { encodePasswordBlob, encodeSessionBlob, scrubCredentials } from '../../s
 import { excludedHashSet, isExcludedHash, parseExcludedIdentifiers } from '../../supplier/identifiers.js';
 import { LINE_PARSE_FAILED, parseAccountText, type LineProblem, type ParsedImportRow } from '../../supplier/import-text.js';
 import { createAccountQueue, type AccountQueue } from '../../supplier/pacing.js';
+import {
+  importSupplierSessionCookies,
+  parseCookieOnlyText,
+} from '../../supplier/session-import-cookie.js';
 import { mapSubscription } from '../../supplier/subscriptions.js';
+import { createTokenrhythmClient } from '../../supplier/tokenrhythm.js';
 import {
   callWithRelogin,
   createTierFlowClient,
@@ -178,9 +185,16 @@ export function supplierOps(db: Db, masterKey: Buffer, seams: SupplierSeams): Su
   };
 }
 
-/** 批量端点收尾时的回带（路由用它写审计 —— 参见 `http.ts` 的 `captureAuditActor`）。 */
+/**
+ * 批量端点收尾时的回带（路由用它写审计 —— 参见 `http.ts` 的 `captureAuditActor`）。
+ *
+ * **必须整支透传给 `startTask` 的第 5 参**（`models.ts` 的 `model_sync` 就是那样写的），
+ * 不许在 `work()` 里手调 —— 手调的后果是审计抛错会把一个**已经跑完**的批量倒置成
+ * failed、result 一起丢（审计项 E：`appendAudit` 是裸的 `.run()`，DB 忙 / FK 一炸就抛）。
+ * 第 5 参在终态落库**之后**调用，抛错影响不到任务本身。
+ */
 export interface BatchHooks {
-  onFinish?: (result: SupplierBatchResult) => void;
+  onFinish?: (result: SupplierBatchResult | null, failed: boolean) => void;
 }
 
 function now(ctx: SupplierOps): Date {
@@ -210,26 +224,66 @@ function requiredString(body: unknown, field: string): string {
   return value.trim();
 }
 
+/** §15 / §15.14 在册的供应商能力位。`null` 是通用上游，不在这张能力表上。 */
+const SUPPLIER_KINDS = ['tierflow', 'tokenrhythm'] as const;
+type SupplierKind = (typeof SUPPLIER_KINDS)[number];
+
+function isSupplierKind(value: string | null): value is SupplierKind {
+  return value === 'tierflow' || value === 'tokenrhythm';
+}
+
 /**
- * 上游必须存在且 `supplier="tierflow"`（§15.2 `import` 明写，其余五个同理）。
+ * §15.14.1 能力表「密码登录」：这家**有没有**"用账号密码换一枚会话"这条路。
+ *
+ * TokenRhythm **没有** —— 站点对 `/api/*` 只有会话鉴权（`tr_session`），`/api/auth/login`
+ * 那个路径对任何账号密码一律 401（v1.16.1 订正；真登录走 `/api/auth/login-or-register`
+ * 的验证码流程，网关不代做）。所以这家**只能**走 §15.9 的会话型凭据。
+ *
+ * 这张位决定的不是"画不画一个按钮"，而是**整个导入端点收不收**：文本导入的每一行
+ * 都以"用密码登一次"为前提，对一家没有密码登录的供应商，那个前提整条不成立
+ * （不是"某些行会失败"，是"一行都不可能成"）。
+ *
+ * 写成表而不是几个 `=== 'tokenrhythm'`：第三家接入时，"这家能不能密码登录"要有
+ * **一个**落点，而不是散在导入 / 重登 / 刷新三处各判一次（那三处漂了不会报错）。
+ */
+const SUPPLIER_PASSWORD_LOGIN: Record<SupplierKind, boolean> = {
+  tierflow: true,
+  tokenrhythm: false,
+};
+
+function supplierSupportsPasswordLogin(supplier: SupplierKind): boolean {
+  return SUPPLIER_PASSWORD_LOGIN[supplier];
+}
+
+/**
+ * 上游必须存在且 `supplier` 是 §15 在册的账号型供应商（§15.2 `import` 明写，其余五个同理）。
  *
  * 用 `422 UNPROCESSABLE` 而不是 400：请求本身完全合法，是**这个上游**不适合做这件事
  * （§15.4 把 UNPROCESSABLE 的触发写成"上游不是账号型 / 无可用账号"）。
+ *
+ * 返回值带上 `supplier`：调用方拿它选驱动器（`clientFor`）与判能力差异
+ * （`keys` 端点对 TokenRhythm 拒收额度/白名单，§15.14）。
  */
-function requireTierflowUpstream(db: Db, upstreamId: string): { baseUrl: string } {
+function requireSupplierUpstream(db: Db, upstreamId: string): { baseUrl: string; supplier: SupplierKind } {
   const up = upstreamSupplier(db, upstreamId);
   if (up === null) throw ApiError.notFound('上游', upstreamId);
-  if (up.supplier !== 'tierflow') {
+  if (!isSupplierKind(up.supplier)) {
     throw new ApiError(
       'UNPROCESSABLE',
-      '该上游不是供应商账号型（supplier 必须是 "tierflow"），无法执行管理面操作',
+      '该上游不是供应商账号型（supplier 必须是 "tierflow" 或 "tokenrhythm"），无法执行管理面操作',
     );
   }
-  return { baseUrl: up.baseUrl };
+  return { baseUrl: up.baseUrl, supplier: up.supplier };
 }
 
-function clientFor(ctx: SupplierOps, baseUrl: string): TierFlowClient {
-  return createTierFlowClient({ baseUrl, fetchImpl: ctx.fetchImpl });
+/**
+ * 按上游的能力位选驱动器。两家驱动器**结构上实现同一个 `TierFlowClient`** ——
+ * 六个批量端点、被动重登、账号级节奏对两者都原样工作；差异全在驱动器内部
+ * 的具名操作里（TokenRhythm 的能力表见 `supplier/tokenrhythm.ts` 文件头 / §15.14）。
+ */
+function clientFor(ctx: SupplierOps, baseUrl: string, supplier: SupplierKind): TierFlowClient {
+  const options = { baseUrl, fetchImpl: ctx.fetchImpl };
+  return supplier === 'tokenrhythm' ? createTokenrhythmClient(options) : createTierFlowClient(options);
 }
 
 function accountCredential(cred: SupplierCredential): AccountCredential {
@@ -464,6 +518,40 @@ function persistRenewed(ctx: SupplierOps, accountId: string, renewed: SessionCre
 }
 
 /**
+ * 把 `/api/user/self` 读到的站点换算比落库（审计项 D 的"记住"那一半）。
+ *
+ * ## 为什么建 key 需要它、又不能为它多发一次请求
+ *
+ * `createToken` 在 `unlimited:false` 时要把 `quotaCents` 换算成上游的 `remain_quota`
+ * （`分 → quota`，`src/supplier/tierflow.ts` 的 `centsToQuota`）。比值写死 500000
+ * 的那一版在站点改了比值时**成比例地错**，且不报错：站点实际 250000/元、我们要 1000 分，
+ * 发出去的会是 5000000 quota（= 20 元）而不是 2500000（= 10 元）—— 凭空多一倍额度。
+ *
+ * 拿现成比值的两条路都不通：**建 key = 2 次请求**是 §15.5 表里钉死的（创建 + 回查
+ * `token_no`），加一发 `/api/user/self` 就是 3 次，那条预算动不得；而 `refresh` /
+ * `keys/sync` / 自测三条腿**已经在打** `/api/user/self` 了 —— 比值是顺手拿到的，
+ * 只是拿到就扔。所以正确形状是**顺手记下来**，让建 key 那条腿不必再问一次。
+ *
+ * ## 只在真读到时写
+ *
+ * 同 `balance_updated_at` 的纪律（§14.2）：查失败**不动**这两列。写 NULL 会把上一次
+ * 真值抹成"没读过"，而两者在建 key 时都表现为"用默认值" —— 一次网络抖动就白丢一次
+ * 真值，且没有任何东西会提示这件事发生了。
+ *
+ * ## 为什么不在 `refreshOne` 里多包一层
+ *
+ * 那里已经有一条 `selfCall`，比值就在 `selfCall.result.data.quotaPerUnit` 上，
+ * 与余额**同一次请求**拿到。单独一个函数而不是塞进 `persistRenewed`：后者管的是会话，
+ * 这件事管的是比例，混在一起会让"这两列什么时候被写"变得要读代码才知道。
+ */
+function persistQuotaPerUnit(ctx: SupplierOps, accountId: string, quotaPerUnit: number): void {
+  updateSupplierAccount(ctx.db, accountId, {
+    quotaPerUnit,
+    quotaReadAt: now(ctx).toISOString(),
+  });
+}
+
+/**
  * 失败该写什么状态。
  *
  * **只有 401/403 才动 `status`，其余只写 `statusMessage`。** 理由：`status` 是一列
@@ -523,6 +611,9 @@ async function loginAccount(
     const probe = await client.self(existing);
     if (probe.ok) {
       updateSupplierAccount(ctx.db, cred.id, { status: 'active', statusMessage: null });
+      // 顺手记下站点换算比（审计项 D）：这一发探针本来就是 `/api/user/self`，
+      // 比值已经在 `probe.data.quotaPerUnit` 上，记下来不花任何请求。
+      persistQuotaPerUnit(ctx, cred.id, probe.data.quotaPerUnit);
       return { ok: true, relogged: false, code: null, message: null };
     }
     // 非"会话失效"的失败（网络抖动 / 上游 5xx）**不当作换会话的理由**：照旧往下走登录 ——
@@ -625,6 +716,11 @@ async function refreshAccount(
     patch.balanceCurrency = self.currency;
     patch.balanceUpdatedAt = now(ctx).toISOString();
   }
+  // 换算比与余额**同一次请求**拿到（这一发 `/api/user/self` 两个数都回）。
+  // 写进同一个 patch 而不是另发一次 `updateSupplierAccount`：那会让一次刷新
+  // 对同一行写两条 UPDATE、`revision` 无谓跳两格（前端一次提交就撞 REVISION_MISMATCH）。
+  patch.quotaPerUnit = self.quotaPerUnit;
+  patch.quotaReadAt = now(ctx).toISOString();
 
   const subsCall = await callWithRelogin(client, budget.credential(sessionAfter(selfCall.renewed, start)), (c) =>
     client.subscriptions(c),
@@ -744,7 +840,17 @@ export function startSupplierImport(ctx: SupplierOps, body: unknown, hooks: Batc
   if (typeof text !== 'string' || text.trim() === '') {
     throw ApiError.invalidParam('text', 'text 不能为空（每行「账号,密码」）');
   }
-  const { baseUrl } = requireTierflowUpstream(ctx.db, upstreamId);
+  const { baseUrl, supplier } = requireSupplierUpstream(ctx.db, upstreamId);
+  // §15.14.1 能力表「密码登录」：TokenRhythm **没有**这条路（站点只有会话鉴权）。
+  // 整个端点在入口 422，而不是让每一行各自 `login_failed` —— 20 行粘进来收 20 条
+  // 「登录失败」，读者会去数哪行错了；而事实是**一行都不可能成**，该说的是这个。
+  if (!supplierSupportsPasswordLogin(supplier)) {
+    throw new ApiError(
+      'UNPROCESSABLE',
+      'TokenRhythm 只支持会话凭据（tr_session），没有账号密码登录，无法走文本导入（§15.14.1 能力表）。'
+        + '账号入池请走 §15.9 的一次性离线会话导入',
+    );
+  }
 
   const parsed = parseAccountText(text);
   // 空行在解析器里就没进合计（见该函数注释），所以这里合起来的**都是真行**：
@@ -757,47 +863,175 @@ export function startSupplierImport(ctx: SupplierOps, body: unknown, hooks: Batc
     unit.index = i;
   });
 
-  return startTask(ctx.db, 'supplier_import', units.length, async (reporter) => {
-    const tally = new BatchTally(units.length);
-    if (units.length === 0) {
-      // 全是空行 / 只有一行表头。回一份**形状完整**的零结果，不是空对象。
-      const result = tally.build();
-      hooks.onFinish?.(result);
-      return result;
-    }
+  return startTask(
+    ctx.db,
+    'supplier_import',
+    units.length,
+    async (reporter) => {
+      const tally = new BatchTally(units.length);
+      if (units.length === 0) {
+        // 全是空行 / 只有一行表头。回一份**形状完整**的零结果，不是空对象。
+        return tally.build();
+      }
 
-    const excluded = excludedHashSet(ctx.excluded);
-    const queue = accountQueue(ctx);
+      const excluded = excludedHashSet(ctx.excluded);
+      const queue = accountQueue(ctx);
 
-    const running: Promise<void>[] = units.map((unit) => {
-      if (unit.kind === 'problem') {
-        // 解析不了的行**不打上游**，所以不占队列槽位 —— 27 行密码错不该让真正要干的活
-        // 多等 0.6s × 27。它当场就有结论。
+      const running: Promise<void>[] = units.map((unit) => {
+        if (unit.kind === 'problem') {
+          // 解析不了的行**不打上游**，所以不占队列槽位 —— 27 行密码错不该让真正要干的活
+          // 多等 0.6s × 27。它当场就有结论。
+          tally.put(
+            unit.index,
+            emptyItem({
+              accountId: null,
+              identifier: null,
+              action: null,
+              ok: false,
+              code: LINE_PARSE_FAILED,
+              message: unit.problem.message,
+            }),
+          );
+          reporter.step();
+          return Promise.resolve();
+        }
+        return queue.run(async () => {
+          tally.put(unit.index, await importOne(ctx, baseUrl, supplier, upstreamId, unit.row, excluded));
+          reporter.step();
+        });
+      });
+
+      await Promise.all(running);
+      return tally.build();
+    },
+    hooks.onFinish,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 1b) POST /api/supplier-accounts/import-sessions（v1.16.4，TokenRhythm）
+// ---------------------------------------------------------------------------
+
+/** §15.9 cookie-only 的身份解析原因 → `items[].code`（供应商自己的话留在 message）。 */
+function codeForSessionImportFailure(reason: string | null): string | null {
+  switch (reason) {
+    case 'upstream_unreachable':
+      return 'UPSTREAM_UNREACHABLE';
+    case 'session_expired':
+      return 'SESSION_EXPIRED';
+    default:
+      // `upstream_rejected` / `envelope_invalid` / `identity_unavailable` / 落库失败：
+      // 没有比 message 更准确的分类，编一个只会盖掉真正的原因。
+      return null;
+  }
+}
+
+/**
+ * 把**粘贴进管理面**的 cookie 清单导入账号池（§15.9 v1.16.4）。
+ *
+ * 与 `startSupplierImport` 的关系：同一个批量任务/逐行结果形状，输入形态不同。
+ * 这里不做登录 —— 会话本身就是凭据，因此 `action` 是新值 `import`（不是 `login`：
+ * 一行都没有发生过登录）。每行仍要向上游 `GET /api/me` 问出 uid 与掩码。
+ *
+ * 入口闸（全部在任务开始前，避免"建了任务才发现一行都不能做"）：
+ * - 供应商必须是 TokenRhythm（TierFlow 走「标识 + 会话」/「账号 + 密码」）；
+ * - 排除名单必须为空（名单按真值匹配，而这里只有掩码，无法验证）。
+ */
+export function startSupplierSessionImport(
+  ctx: SupplierOps,
+  body: unknown,
+  hooks: BatchHooks = {},
+): TaskDto {
+  const upstreamId = requiredString(body, 'upstreamId');
+  const text = asRecord(body)?.['text'];
+  if (typeof text !== 'string' || text.trim() === '') {
+    throw ApiError.invalidParam('text', 'text 不能为空（每行一枚 tr_session）');
+  }
+
+  const { supplier } = requireSupplierUpstream(ctx.db, upstreamId);
+  if (supplier !== 'tokenrhythm') {
+    throw new ApiError(
+      'UNPROCESSABLE',
+      'Cookie 粘贴导入只支持 TokenRhythm（它没有密码登录）；其他供应商请用「账号,密码」导入',
+    );
+  }
+  if (ctx.excluded.size > 0) {
+    throw new ApiError(
+      'UNPROCESSABLE',
+      '排除名单非空时无法做 Cookie 导入：名单按真实手机号/邮箱匹配，而 Cookie 只能解析出掩码，'
+        + '无法验证。请改用「账号,密码」导入，或清空排除名单后再试',
+    );
+  }
+
+  // 先解析一次只为拿总行数（任务对象在创建时就要有 total）；导入函数内部会再解析，
+  // 解析本身是纯内存操作，重复一次比把"已解析对象"塞进两个模块的接口更不容易漂。
+  const parsed = parseCookieOnlyText(text);
+  const total = parsed.rows.length + parsed.problems.length;
+  if (total === 0) {
+    throw ApiError.invalidParam('text', '没有可导入的 Cookie（空行、注释与表头不算）');
+  }
+  const units = [
+    ...parsed.problems.map((problem) => ({ kind: 'problem' as const, line: problem.line })),
+    ...parsed.rows.map((row) => ({ kind: 'row' as const, line: row.line })),
+  ].sort((a, b) => a.line - b.line);
+  const indexByLine = new Map(units.map((unit, index) => [unit.line, index]));
+
+  return startTask(
+    ctx.db,
+    'supplier_import_sessions',
+    total,
+    async (reporter) => {
+      const tally = new BatchTally(total);
+      for (const problem of parsed.problems) {
+        const index = indexByLine.get(problem.line);
+        if (index === undefined) continue;
         tally.put(
-          unit.index,
+          index,
           emptyItem({
             accountId: null,
             identifier: null,
             action: null,
             ok: false,
             code: LINE_PARSE_FAILED,
-            message: unit.problem.message,
+            message: problem.message,
           }),
         );
-        reporter.step();
-        return Promise.resolve();
       }
-      return queue.run(async () => {
-        tally.put(unit.index, await importOne(ctx, baseUrl, upstreamId, unit.row, excluded));
-        reporter.step();
-      });
-    });
 
-    await Promise.all(running);
-    const result = tally.build();
-    hooks.onFinish?.(result);
-    return result;
-  });
+      const imported = await importSupplierSessionCookies(ctx.db, ctx.masterKey, {
+        upstreamId,
+        text,
+        excluded: ctx.excluded,
+        fetchImpl: ctx.fetchImpl,
+        // 进度 = 已处理行数（含解析失败行），与任务创建时的 total 同一口径。
+        onLine: (done) => reporter.step(done),
+      });
+      if (!imported.ok) {
+        // 入口闸已经在返回值之前拦过；走到这里说明上游在任务中途消失/被改类型，
+        // 属于环境异常，让任务以 failed 收场比伪造一份逐行结果诚实。
+        throw new Error(imported.message);
+      }
+
+      for (const outcome of imported.report.outcomes) {
+        const index = indexByLine.get(outcome.line);
+        if (index === undefined) continue;
+        tally.put(
+          index,
+          emptyItem({
+            accountId: outcome.accountId,
+            identifier: outcome.identifier,
+            action: 'import',
+            ok: outcome.ok,
+            code: outcome.ok ? null : codeForSessionImportFailure(outcome.reason),
+            message: outcome.ok ? null : outcome.message,
+          }),
+        );
+      }
+
+      return tally.build();
+    },
+    hooks.onFinish,
+  );
 }
 
 /**
@@ -810,6 +1044,7 @@ export function startSupplierImport(ctx: SupplierOps, body: unknown, hooks: Batc
 async function importOne(
   ctx: SupplierOps,
   baseUrl: string,
+  supplier: SupplierKind,
   upstreamId: string,
   row: ParsedImportRow,
   excluded: ReadonlySet<string>,
@@ -837,9 +1072,11 @@ async function importOne(
   let accountId: string;
   if (isNew) {
     accountId = newId('supplierAccount');
+    // 账号行记下**所属供应商**（不是写死 tierflow）：这张能力位决定后续五个端点
+    // 给它选哪个驱动器，上游的 supplier 改了，账号行跟着改（§15.14 与 ADR-0018 决策 0）。
     createSupplierAccount(ctx.db, accountId, {
       upstreamId,
-      supplier: 'tierflow',
+      supplier,
       identifier: row.maskedIdentifier,
       identifierHash: row.identifierHash,
       status: 'unknown',
@@ -869,7 +1106,7 @@ async function importOne(
     });
   }
 
-  const client = clientFor(ctx, baseUrl);
+  const client = clientFor(ctx, baseUrl, supplier);
   const logged = await loginAccount(ctx, client, cred);
   if (!logged.ok) {
     return emptyItem({
@@ -914,33 +1151,38 @@ async function importOne(
 export function startSupplierRefresh(ctx: SupplierOps, body: unknown, hooks: BatchHooks = {}): TaskDto {
   const upstreamId = requiredString(body, 'upstreamId');
   const ids = readIds(body);
-  const { baseUrl } = requireTierflowUpstream(ctx.db, upstreamId);
+  const { baseUrl, supplier } = requireSupplierUpstream(ctx.db, upstreamId);
   // `ids` 省略 = 全部账号（§15.2）。**不按状态过滤** —— 会话过期的账号正是最该被刷一遍的那个。
   const targets = resolveTargets(ctx.db, upstreamId, ids, undefined);
 
-  return startTask(ctx.db, 'supplier_refresh', targets.length, async (reporter) => {
-    const tally = new BatchTally(targets.length);
-    const excluded = excludedHashSet(ctx.excluded);
-    const queue = accountQueue(ctx);
+  return startTask(
+    ctx.db,
+    'supplier_refresh',
+    targets.length,
+    async (reporter) => {
+      const tally = new BatchTally(targets.length);
+      const excluded = excludedHashSet(ctx.excluded);
+      const queue = accountQueue(ctx);
 
-    await Promise.all(
-      targets.map((ref, index) =>
-        queue.run(async () => {
-          tally.put(index, await refreshOne(ctx, baseUrl, ref, excluded));
-          reporter.step();
-        }),
-      ),
-    );
+      await Promise.all(
+        targets.map((ref, index) =>
+          queue.run(async () => {
+            tally.put(index, await refreshOne(ctx, baseUrl, supplier, ref, excluded));
+            reporter.step();
+          }),
+        ),
+      );
 
-    const result = tally.build();
-    hooks.onFinish?.(result);
-    return result;
-  });
+      return tally.build();
+    },
+    hooks.onFinish,
+  );
 }
 
 async function refreshOne(
   ctx: SupplierOps,
   baseUrl: string,
+  supplier: SupplierKind,
   ref: SupplierAccountRef,
   excluded: ReadonlySet<string>,
 ): Promise<SupplierBatchItem> {
@@ -967,7 +1209,7 @@ async function refreshOne(
     });
   }
 
-  const out = await refreshAccount(ctx, clientFor(ctx, baseUrl), cred);
+  const out = await refreshAccount(ctx, clientFor(ctx, baseUrl, supplier), cred);
   return emptyItem({
     accountId: ref.id,
     identifier: cred.maskedIdentifier,
@@ -987,7 +1229,16 @@ export async function loginSupplierAccount(ctx: SupplierOps, id: string): Promis
   const cred = readSupplierCredential(ctx.db, id, ctx.masterKey);
   if (cred === null) throw ApiError.notFound('供应商账号', id);
 
-  const { baseUrl } = requireTierflowUpstream(ctx.db, cred.upstreamId);
+  const { baseUrl, supplier } = requireSupplierUpstream(ctx.db, cred.upstreamId);
+  // §15.14.1 能力表「密码登录」：这家没有这条路 ⇒ 手工重登**整体不适用**，先于
+  // "有没有存档密码"判 —— 顺序反了的话，对一个补录过密码的 TR 账号会真发一次
+  // 注定 401 的登录（那行密码是导入期落进去的陈货，发出去只会惊动风控）。
+  if (!supplierSupportsPasswordLogin(supplier)) {
+    throw new ApiError(
+      'UNPROCESSABLE',
+      'TokenRhythm 只有会话鉴权，没有密码重登（§15.14.1 能力表）。会话过期请重新执行一次性离线会话导入（§15.9）',
+    );
+  }
   // 手工触发的一次重登。**没有密码就直接 422** —— 这个端点的全部意义就是"用密码换会话"。
   // 回 200 再让 `status` 说"没重登成"，会让点了按钮的人以为点过了。
   if (cred.password === null || cred.identifier === '') {
@@ -997,7 +1248,7 @@ export async function loginSupplierAccount(ctx: SupplierOps, id: string): Promis
     );
   }
 
-  await loginAccount(ctx, clientFor(ctx, baseUrl), cred);
+  await loginAccount(ctx, clientFor(ctx, baseUrl, supplier), cred);
   // 无论成败都回 200 + 最新一行：失败原因（供应商错误码一类）写在 `status` / `statusMessage` 上，
   // 与 §2 自测同一条取向 —— 这是**操作的结果**，不是请求有问题。
   return requireSupplierAccount(ctx.db, id);
@@ -1022,7 +1273,7 @@ export async function testSupplierAccount(ctx: SupplierOps, id: string): Promise
   const cred = readSupplierCredential(ctx.db, id, ctx.masterKey);
   if (cred === null) throw ApiError.notFound('供应商账号', id);
 
-  const { baseUrl } = requireTierflowUpstream(ctx.db, cred.upstreamId);
+  const { baseUrl, supplier } = requireSupplierUpstream(ctx.db, cred.upstreamId);
 
   const startedMs = Date.now();
   const failure = (
@@ -1052,7 +1303,7 @@ export async function testSupplierAccount(ctx: SupplierOps, id: string): Promise
   }
 
   const budget = createReloginBudget(cred);
-  const client = clientFor(ctx, baseUrl);
+  const client = clientFor(ctx, baseUrl, supplier);
 
   const selfCall = await callWithRelogin(client, budget.credential(start), (c) => client.self(c));
   budget.note(selfCall.relogged);
@@ -1076,6 +1327,10 @@ export async function testSupplierAccount(ctx: SupplierOps, id: string): Promise
   }
 
   const self = selfCall.result.data;
+  // 自测也是 `/api/user/self` 的一次真实调用，比值同样在手上（审计项 D）。
+  // 落库只记比值与时刻，**不碰账号状态** —— 自测是诊断动作，
+  // 不该因为它把 `status` 从 `session_expired` 改成 `active`（那是登录/刷新的职权）。
+  persistQuotaPerUnit(ctx, cred.id, self.quotaPerUnit);
   const subsCall = await callWithRelogin(client, budget.credential(sessionAfter(selfCall.renewed, start)), (c) =>
     client.subscriptions(c),
   );
@@ -1134,7 +1389,7 @@ interface KeySpec {
   label: string | null;
 }
 
-function parseKeySpec(body: unknown): KeySpec {
+function parseKeySpec(body: unknown, supplier: SupplierKind): KeySpec {
   const raw = asRecord(body) ?? {};
 
   const countRaw = raw['count'] === undefined ? 1 : raw['count'];
@@ -1148,7 +1403,10 @@ function parseKeySpec(body: unknown): KeySpec {
   }
 
   const prefixRaw = raw['namePrefix'];
-  let namePrefix = 'tierflow';
+  // 默认前缀跟随供应商（`supplier` 就是驱动器名）：上游侧 key 名是
+  // `<prefix>-<尾4>-<序号>`，默认值写死 `tierflow` 会让 TokenRhythm 的 key 也叫 `tierflow-…`，
+  // 在一个混装两家供应商的池子里分不出它是谁建出来的。
+  let namePrefix: string = supplier;
   if (prefixRaw !== undefined && prefixRaw !== null) {
     if (typeof prefixRaw !== 'string' || prefixRaw.trim() === '') {
       throw ApiError.invalidParam('namePrefix', 'namePrefix 必须是非空字符串');
@@ -1192,36 +1450,60 @@ function parseKeySpec(body: unknown): KeySpec {
 export function startSupplierKeys(ctx: SupplierOps, body: unknown, hooks: BatchHooks = {}): TaskDto {
   const upstreamId = requiredString(body, 'upstreamId');
   const ids = readIds(body);
+  const { baseUrl, supplier } = requireSupplierUpstream(ctx.db, upstreamId);
   // 字段校验放在建任务**之前**：`count: 99` 应当在这一次 HTTP 里 400，
   // 而不是变成一个"建了任务、立刻失败"的异步错误（前端要轮询一次才知道自己参数写错了）。
-  const spec = parseKeySpec(body);
-  const { baseUrl } = requireTierflowUpstream(ctx.db, upstreamId);
+  // 顺序在 `requireSupplierUpstream` 之后：`namePrefix` 的默认值跟随供应商，得先知道是谁。
+  const spec = parseKeySpec(body, supplier);
+  // §15.14 能力表：TokenRhythm 的 key **无额度、无模型白名单**（服务端就没有这两个概念）。
+  // `parseKeySpec` 的默认值是 `unlimited:true` 且没有白名单 —— 那正是 TokenRhythm 唯一
+  // 支持的形状，原样放行；只有调用方**显式指定**了 `unlimited:false` 或非空 `models` 时才 422
+  // （在入口报，而不是让驱动器静默丢掉参数 —— 静默丢参数会造出一把"以为设了额度其实没有"的 key）。
+  if (supplier === 'tokenrhythm') {
+    if (!spec.unlimited) {
+      throw new ApiError(
+        'UNPROCESSABLE',
+        'TokenRhythm 的 key 没有额度概念，不支持 unlimited=false / quotaCents（§15.14 能力表）',
+      );
+    }
+    if (spec.models !== null) {
+      throw new ApiError(
+        'UNPROCESSABLE',
+        'TokenRhythm 的 key 不支持模型白名单（models），请省略该字段（§15.14 能力表）',
+      );
+    }
+  }
   // 省略 ids = 该上游全部 **active** 账号（§15.2 的措辞与 refresh 不同，这里照它写）。
   const targets = resolveTargets(ctx.db, upstreamId, ids, ['active']);
 
-  return startTask(ctx.db, 'supplier_keys', targets.length, async (reporter) => {
-    const tally = new BatchTally(targets.length);
-    const excluded = excludedHashSet(ctx.excluded);
-    const queue = accountQueue(ctx);
+  return startTask(
+    ctx.db,
+    'supplier_keys',
+    targets.length,
+    async (reporter) => {
+      const tally = new BatchTally(targets.length);
+      const excluded = excludedHashSet(ctx.excluded);
+      const queue = accountQueue(ctx);
 
-    await Promise.all(
-      targets.map((ref, index) =>
-        queue.run(async () => {
-          tally.put(index, await createKeysOne(ctx, baseUrl, upstreamId, ref, spec, excluded));
-          reporter.step();
-        }),
-      ),
-    );
+      await Promise.all(
+        targets.map((ref, index) =>
+          queue.run(async () => {
+            tally.put(index, await createKeysOne(ctx, baseUrl, supplier, upstreamId, ref, spec, excluded));
+            reporter.step();
+          }),
+        ),
+      );
 
-    const result = tally.build();
-    hooks.onFinish?.(result);
-    return result;
-  });
+      return tally.build();
+    },
+    hooks.onFinish,
+  );
 }
 
 async function createKeysOne(
   ctx: SupplierOps,
   baseUrl: string,
+  supplier: SupplierKind,
   upstreamId: string,
   ref: SupplierAccountRef,
   spec: KeySpec,
@@ -1250,7 +1532,7 @@ async function createKeysOne(
     });
   }
 
-  const outcome = await createKeysForAccount(ctx, clientFor(ctx, baseUrl), upstreamId, cred, spec);
+  const outcome = await createKeysForAccount(ctx, clientFor(ctx, baseUrl, supplier), upstreamId, cred, spec);
   // §15.3：`create` = `keys`；这个端点里被重登则以 `relogin` 出现在逐行结果里。
   const action: SupplierBatchAction = outcome.relogged ? 'relogin' : 'create';
   if (outcome.error !== null) {
@@ -1311,6 +1593,16 @@ async function createKeysForAccount(
   let relogged = false;
   const created: CreateOutcome['created'] = [];
 
+  // 站点换算比（审计项 D）。`unlimited:true` 时上游不看这个数（`pendingCreateTokenBody`
+  // 只在 `!unlimited` 分支发 `remain_quota`），所以 `undefined` 传给驱动器就等于
+  // 让它落回 `DEFAULT_QUOTA_PER_UNIT` —— 那条路只有"从没 refresh 过的新账号"会走到。
+  //
+  // **不为它多发一次 `/api/user/self`**：§15.5 表钉死"建 key = 2 次请求"（创建 + 回查
+  // `token_no`），加一发就是 3 次。比值由 `refresh` / `keys/sync` / 自测三条腿顺手记在
+  // `supplier_accounts.quota_per_unit` 上（那三条**已经在打** `/api/user/self`），
+  // 这里只负责把它用上。宁可拿到一个可能过期的真值，也不用一个永远错的常量。
+  const quotaPerUnit = cred.quotaPerUnit ?? undefined;
+
   for (let seq = 1; seq <= spec.count; seq += 1) {
     // 上游侧 key 名 = `<prefix>-<identifier后4>-<序号>`，**不含凭据**（§15.2）。
     const name = `${spec.namePrefix}-${tailOfMasked(cred.maskedIdentifier)}-${seq}`;
@@ -1320,6 +1612,7 @@ async function createKeysForAccount(
         unlimited: spec.unlimited,
         quotaCents: spec.quotaCents,
         models: spec.models,
+        quotaPerUnit,
       }),
     );
     persistRenewed(ctx, cred.id, call.renewed);
@@ -1480,28 +1773,38 @@ export function startSupplierRotateKey(ctx: SupplierOps, body: unknown, hooks: B
     throw ApiError.invalidParam('subNo', 'subNo 必须是非空字符串');
   }
   const subNo = typeof rawSubNo === 'string' && rawSubNo.trim() !== '' ? rawSubNo.trim() : null;
-  const { baseUrl } = requireTierflowUpstream(ctx.db, upstreamId);
+  const { baseUrl, supplier } = requireSupplierUpstream(ctx.db, upstreamId);
+  // §15.14 能力表：TokenRhythm 没有套餐，"重置套餐专属 key"这个动作对它不存在。
+  // 在入口 422，而不是让每个账号在 `latestSubscriptionSubNo` 上落一行 SUBSCRIPTION_NOT_FOUND
+  // —— 那是 TierFlow 的"该账号没套餐记录"，对 TokenRhythm 是**整类上游**都没有，语义不同。
+  if (supplier === 'tokenrhythm') {
+    throw new ApiError('UNPROCESSABLE', 'TokenRhythm 无套餐概念，不支持套餐 key 轮换（§15.14 能力表）');
+  }
   // 省略 ids = 该上游**全部**账号（与 refresh 同口径）：会话过期的账号正是"点重置想救回来"的那个。
   const targets = resolveTargets(ctx.db, upstreamId, ids, undefined);
 
-  return startTask(ctx.db, 'supplier_rotate_key', targets.length, async (reporter) => {
-    const tally = new BatchTally(targets.length);
-    const excluded = excludedHashSet(ctx.excluded);
-    const queue = accountQueue(ctx);
+  return startTask(
+    ctx.db,
+    'supplier_rotate_key',
+    targets.length,
+    async (reporter) => {
+      const tally = new BatchTally(targets.length);
+      const excluded = excludedHashSet(ctx.excluded);
+      const queue = accountQueue(ctx);
 
-    await Promise.all(
-      targets.map((ref, index) =>
-        queue.run(async () => {
-          tally.put(index, await rotateOne(ctx, baseUrl, upstreamId, ref, excluded, subNo));
-          reporter.step();
-        }),
-      ),
-    );
+      await Promise.all(
+        targets.map((ref, index) =>
+          queue.run(async () => {
+            tally.put(index, await rotateOne(ctx, baseUrl, supplier, upstreamId, ref, excluded, subNo));
+            reporter.step();
+          }),
+        ),
+      );
 
-    const result = tally.build();
-    hooks.onFinish?.(result);
-    return result;
-  });
+      return tally.build();
+    },
+    hooks.onFinish,
+  );
 }
 
 /**
@@ -1517,6 +1820,7 @@ export function startSupplierRotateKey(ctx: SupplierOps, body: unknown, hooks: B
 async function rotateOne(
   ctx: SupplierOps,
   baseUrl: string,
+  supplier: SupplierKind,
   upstreamId: string,
   ref: SupplierAccountRef,
   excluded: ReadonlySet<string>,
@@ -1572,7 +1876,7 @@ async function rotateOne(
   }
 
   const budget = createReloginBudget(cred);
-  const client = clientFor(ctx, baseUrl);
+  const client = clientFor(ctx, baseUrl, supplier);
 
   // §15.13 规则 3 的取证腿：重置**之前**先取旧掩码（重置换尾，拿新掩码永远认领不到旧 key），
   // 并拍一张"重置前台账快照"（新 key 入台账后再读会把新 key 自己当成旧 key）。
@@ -1604,8 +1908,12 @@ async function rotateOne(
   );
   persistRenewed(ctx, ref.id, subRows.renewed);
   budget.note(subRows.relogged);
+  // 换算比取**这个账号自己读到过的那个**，与 `createKeysForAccount` 同一来源
+  // （`supplier_accounts.quota_per_unit`，审计项 D）。重置套餐 key 这一路没有
+  // `/api/user/self` 可打（§15.13：重置是**一次**请求），所以只能靠缓存 ——
+  // 宁可要一个可能过期的真值，也不用写死的 500000 把套餐金额整列算错。
   const mapped = subRows.result.ok
-    ? mapSubscriptions(subRows.result.data, DEFAULT_QUOTA_PER_UNIT)
+    ? mapSubscriptions(subRows.result.data, cred.quotaPerUnit ?? DEFAULT_QUOTA_PER_UNIT)
     : [];
   if (mapped.length > 0) replaceSupplierSubscriptions(ctx.db, ref.id, mapped);
   const plan = mapped.find((row) => row.subNo === targetSubNo) ?? null;
@@ -1679,32 +1987,37 @@ async function rotateOne(
 export function startSupplierKeysSync(ctx: SupplierOps, body: unknown, hooks: BatchHooks = {}): TaskDto {
   const upstreamId = requiredString(body, 'upstreamId');
   const ids = readIds(body);
-  const { baseUrl } = requireTierflowUpstream(ctx.db, upstreamId);
+  const { baseUrl, supplier } = requireSupplierUpstream(ctx.db, upstreamId);
   const targets = resolveTargets(ctx.db, upstreamId, ids, ['active']);
 
-  return startTask(ctx.db, 'supplier_keys_sync', targets.length, async (reporter) => {
-    const tally = new BatchTally(targets.length);
-    const excluded = excludedHashSet(ctx.excluded);
-    const queue = accountQueue(ctx);
+  return startTask(
+    ctx.db,
+    'supplier_keys_sync',
+    targets.length,
+    async (reporter) => {
+      const tally = new BatchTally(targets.length);
+      const excluded = excludedHashSet(ctx.excluded);
+      const queue = accountQueue(ctx);
 
-    await Promise.all(
-      targets.map((ref, index) =>
-        queue.run(async () => {
-          tally.put(index, await syncKeysOne(ctx, baseUrl, ref, excluded));
-          reporter.step();
-        }),
-      ),
-    );
+      await Promise.all(
+        targets.map((ref, index) =>
+          queue.run(async () => {
+            tally.put(index, await syncKeysOne(ctx, baseUrl, supplier, ref, excluded));
+            reporter.step();
+          }),
+        ),
+      );
 
-    const result = tally.build();
-    hooks.onFinish?.(result);
-    return result;
-  });
+      return tally.build();
+    },
+    hooks.onFinish,
+  );
 }
 
 async function syncKeysOne(
   ctx: SupplierOps,
   baseUrl: string,
+  supplier: SupplierKind,
   ref: SupplierAccountRef,
   excluded: ReadonlySet<string>,
 ): Promise<SupplierBatchItem> {
@@ -1727,7 +2040,7 @@ async function syncKeysOne(
     return item({ ok: false, code: 'INTERNAL', message: '凭据读不回来（多半是 MASTER_KEY 与写入时不一致）' });
   }
 
-  const outcome = await syncForAccount(ctx, clientFor(ctx, baseUrl), cred);
+  const outcome = await syncForAccount(ctx, clientFor(ctx, baseUrl, supplier), cred);
   if (!outcome.ok) return item({ ok: false, code: outcome.code, message: outcome.message });
   return item({
     ok: true,
@@ -1784,6 +2097,11 @@ async function syncForAccount(
   }
   session = sessionAfter(selfCall.renewed, session);
   const quotaPerUnit = selfCall.result.data.quotaPerUnit;
+  // 同步顺手记下比值（审计项 D）：这一发 `/api/user/self` 本来就是为拿它才打的
+  // （上面的注释写明了"不为省一次请求去猜换算比"），拿到不记，下一个动作
+  // 又得用 500000 去猜一遍。记在**读失败之前**：比值本身已经拿到了，
+  // 下面套餐接口抖不抖与它无关。
+  persistQuotaPerUnit(ctx, cred.id, quotaPerUnit);
 
   const subsCall = await callWithRelogin(client, budget.credential(session), (c) => client.subscriptions(c));
   persistRenewed(ctx, cred.id, subsCall.renewed);
@@ -1801,7 +2119,15 @@ async function syncForAccount(
 
   const subs = mapSubscriptions(subsCall.result.data, quotaPerUnit);
   await fillSubscriptionKeyMasks(client, session, subs);
-  if (subs.length > 0) replaceSupplierSubscriptions(ctx.db, cred.id, subs);
+  if (subs.length > 0) {
+    replaceSupplierSubscriptions(ctx.db, cred.id, subs);
+    // 顺手把套餐余量回填给池里那把套餐 key（ADR-0022 承诺的"后续"腿）。
+    // 放在 `replaceSupplierSubscriptions` 之后、`tokens()` 之前：此刻 `key_masked`
+    // 刚从上游补全（`fillSubscriptionKeyMasks`），而台账里还没有本轮的新 key ——
+    // 但**已入池的套餐 key 是上一次 rotate 留下的**，它们已经在台账里，不受本轮影响。
+    // 回填失败不该让整次同步失败：它只是让那把 key 多留一轮 `NULL`（= 未知，仍可选路）。
+    backfillSubscriptionTokenPlan(ctx.db, cred.id, subs as readonly SupplierSubscriptionBackfill[]);
+  }
 
   const tokensCall = await callWithRelogin(client, budget.credential(session), (c) => client.tokens(c));
   persistRenewed(ctx, cred.id, tokensCall.renewed);

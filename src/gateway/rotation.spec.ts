@@ -20,7 +20,7 @@ import { createKeyPool } from './key-pool.js';
 import type { GroupContext, ModelCatalog, SecretResolver, UpstreamTarget } from './ports.js';
 import type { KeyConfig, PoolSnapshot } from './types.js';
 
-const GROUP: GroupContext = { groupId: 'grp_poll', name: '轮询回归', enabled: true, rpm: null, tpm: null, dailyQuota: null };
+const GROUP: GroupContext = { groupId: 'grp_poll', name: '轮询回归', enabled: true, rpm: null, tpm: null, dailyQuota: null, authorizedModels: null };
 const ROUNDS = 60;
 const MIN_SHARE = 0.1; // 验收 §九.1：每 key ≥10%
 /** 关联键（契约 §6 / ADR-0014）：引擎纯透传，此处给合法常量即可 */
@@ -61,7 +61,7 @@ async function pollDistribution(keys: KeyConfig[]): Promise<Map<string, number>>
       return target;
     },
   };
-  const models: ModelCatalog = { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m };
+  const models: ModelCatalog = { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m, typeOf: () => null };
   const fetchImpl: FetchLike = async () =>
     new Response(JSON.stringify({ id: 'cmpl_poll', choices: [], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }), {
       status: 200,

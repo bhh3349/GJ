@@ -1,0 +1,100 @@
+# sub-gateway 单机部署（docker compose）。
+#
+# 这个文件假设你**已经**有一份填好的 `.env`（`cp .env.example .env` 后按需改）。
+# compose 的 `env_file` 会把整个文件读进容器环境 —— 包括 `MASTER_KEY`。
+#
+# **`MASTER_KEY` 是硬要求**：缺它或解码后不是 32 字节，进程拒绝启动（不降级、不自动生成）。
+# 生成方式：
+#   /opt/node22/bin/node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+# 或任意 32 字节的 base64。**换 key = 库内全部密文作废**，所以第一次就要存好。
+
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: sub-gateway:local
+    restart: unless-stopped
+    ports:
+      # 左 = 宿主机，右 = 容器内。网关面默认对外；管理面**建议绑回环** ——
+      # 它是带会话 cookie 的完整控制面，`HOST_ADMIN=0.0.0.0` + `0.0.0.0:4001`
+      # 等于把管理后台暴露给整个网段。要远程访问请走反代 + TLS，别改这里。
+      # 缺省 4100/4101：与 LAN 测试实例（裸跑 node，占 4000/4001）错开，
+      # 两实例并存互不干扰。切换 = 停掉裸跑实例后把这里改回 4000/4001。
+      - "${PORT_GATEWAY:-4100}:4000"
+      - "${PORT_ADMIN:-4101}:4001"
+    env_file:
+      - .env
+    environment:
+      # 容器内固定值：进程看到的路径是容器里的路径，不是宿主机的。
+      # 这三个在 .env 里怎么写都不影响这里 —— 故意覆盖，避免"宿主机相对路径"
+      # 在容器里解析到一个不存在的目录，而那个症状是启动时报找不到库文件。
+      DB_PATH: /app/data/gateway.db
+      # 网关面在容器内必须听 0.0.0.0（docker 的网络命名空间里 127.0.0.1 是容器自己）。
+      # 管理面听 0.0.0.0 但**只在容器内**：对外与否由上面 ports 的左半边决定。
+      HOST_GATEWAY: 0.0.0.0
+      HOST_ADMIN: 0.0.0.0
+    volumes:
+      # 管理界面静态产物：Dockerfile 故意不构建前端（见 Dockerfile 头注释），由宿主机
+      # `pnpm web:build` 产出后 bind 进来。只读挂载 —— 容器不需要改它，写权限留给构建。
+      # ADMIN_WEB_DIST 在 .env 里设为 /app/web/dist 指向这里。
+      # 改了前端代码：宿主机重跑 `pnpm web:build` 即生效（静态托管直接读文件），无需重启容器。
+      - ./web/dist:/app/web/dist:ro
+      # 命名卷而不是 bind：SQLite 在 bind 到某些网络文件系统（NFS/CIFS）上会坏
+      # （fcntl 锁语义不一致），而 docker 命名卷在本机，锁是可靠的。
+      # 备份 = `docker run --rm -v sub-gateway-data:/data -v $PWD:/out alpine cp /data/gateway.db /out/`
+      - sub-gateway-data:/app/data
+      # 出口心跳收件箱（入口 A）：VPS 侧 pool-probe.sh 的 JSON 报告目录。
+      # 留空 = 入口 A 关（缺省）。要开就取消注释并在 .env 里配 EGRESS_HEARTBEAT_INBOX_DIR。
+      # - ${EGRESS_HEARTBEAT_INBOX_DIR:-/dev/null}:/inbox:ro
+    healthcheck:
+      # 探"进程活着 + 管理面在服务"。**为什么不是 HTTP 200**：
+      # `/api/*` 除 `auth/login` 外全量鉴权（安全红线，无例外列表），所以
+      # `/api/observability/health` 不带会话 cookie 回的是 **401** ——
+      # 而 `r.ok` 只在 2xx 为真，于是那个探针**恒假**：容器明明是好的，
+      # 却永远 `(unhealthy)`，`restart` 策略会把它反复重启。
+      # 这不是"探针选得不够准"，是**把需要鉴权的端点当成了健康端点**。
+      #
+      # 换成 WS 升级握手：`/api/stats/live` 的 101 在鉴权**之前**发生
+      # （鉴权发生在升级成功之后，服务端才发 4401）。断言 101 =
+      # "TCP 连着 + HTTP 解析正常 + 路由表命中了那条 WS 路由"，
+      # 这是不新增一个免鉴权端点的前提下能拿到的最强存活信号。
+      #
+      # **为什么用裸 socket 而不是 curl**：镜像里没有 curl（slim 且不装）。
+      # **为什么不用 `ws` 模块**：`node -e` 的解析根在 /app，而 `ws` 是
+      # 间接依赖、不在顶层 node_modules 里可解析的位置（实测
+      # `Cannot find module 'ws'`）。Node 内置 `net` 零依赖，且握手只需要
+      # 写对 4 个头。判到 101 立刻销毁 socket，不留下半开的 WS 连接。
+      test:
+        - CMD
+        - node
+        - -e
+        - |
+          const net = require('net');
+          const s = net.connect(Number(process.env.PORT_ADMIN || 4001), '127.0.0.1', () => {
+            s.write('GET /api/stats/live HTTP/1.1\r\n' +
+                    'Host: 127.0.0.1\r\n' +
+                    'Upgrade: websocket\r\n' +
+                    'Connection: Upgrade\r\n' +
+                    'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n' +
+                    'Sec-WebSocket-Version: 13\r\n\r\n');
+          });
+          let buf = '';
+          const done = (c) => { s.destroy(); process.exit(c); };
+          s.on('data', (d) => {
+            buf += d;
+            if (buf.includes('\r\n\r\n')) done(buf.startsWith('HTTP/1.1 101') ? 0 : 1);
+          });
+          s.on('error', () => done(1));
+          setTimeout(() => done(1), 4000);
+      # interval 20s：网关自己每 1s 刷一次快照，20s 足够捕捉"进程卡死"而不会
+      # 因为一次瞬时负载就翻 unhealthy。timeout 4s < 上面的 4s 兜底，
+      # 两个都留 4s：探针自己超时退出码同样非 0。
+      interval: 20s
+      timeout: 4s
+      retries: 3
+      # 首次启动要建库 + 引导管理员，给它 40s（缺省 30s 会在慢盘上误判为不健康）。
+      start_period: 40s
+
+volumes:
+  sub-gateway-data:

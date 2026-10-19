@@ -34,7 +34,7 @@ import { changesSince } from '../db/repo/change-log.js';
 // 见 `src/db/model-limits.ts` 头注。本地不得再存一份解析。
 import { parseModelLimits } from '../db/model-limits.js';
 import type { Db } from '../db/database.js';
-import type { ModelCatalog, ModelDescriptor } from '../gateway/ports.js';
+import type { ModelCatalog, ModelDescriptor, ModelType } from '../gateway/ports.js';
 import type { KeyCategory, KeyConfig, PoolSnapshot, UpstreamConfig } from '../gateway/types.js';
 import { createSecretResolver } from './secrets.js';
 import type { DbSecretResolver, SecretRow } from './secrets.js';
@@ -151,6 +151,15 @@ export function createGatewayStore(options: GatewayStoreOptions): GatewayStore {
   let snapshot: PoolSnapshot = { revision: 0, upstreams: [], keys: [] };
   let maskedById = new Map<string, string>();
   let priceByModel = new Map<string, { inputPer1k: number | null; outputPer1k: number | null }>();
+  /**
+   * 已启用模型名 → 登记类别（ADR-0039）。**与 `snapshot` 同一拍子重建**，热路径纯内存读。
+   *
+   * 为什么复用 `listEnabledGatewayModels` 那一份行、而不另发一条 `SELECT name, type`：
+   * 「已启用」的判据（`models.enabled=1 AND upstreams.enabled=1`）必须只有一处实现，
+   * 否则本闸与选路会在停用边界上给出两个答案 —— 正是 ADR-0039 要修的那类漂移。
+   * 同名跨上游时后写覆盖（`Map` 语义）：与 `modelsByUpstream` 一样，名字是客户端可见键。
+   */
+  let typeByName = new Map<string, ModelType>();
   let lastSeq = 0;
   let built = false;
 
@@ -166,6 +175,7 @@ export function createGatewayStore(options: GatewayStoreOptions): GatewayStore {
     priceByModel = new Map(
       models.map((m) => [m.name, { inputPer1k: m.priceInputPer1k, outputPer1k: m.priceOutputPer1k }]),
     );
+    typeByName = new Map(models.map((m) => [m.name, m.type]));
 
     // 模型档案按上游分组 = 该上游"被允许路由"的模型集合（见文件头「选路口径」）
     const modelsByUpstream = new Map<string, string[]>();
@@ -225,6 +235,8 @@ export function createGatewayStore(options: GatewayStoreOptions): GatewayStore {
       async listEnabledModels(): Promise<ModelDescriptor[]> {
         return listEnabledGatewayModels(db).map((m) => ({
           id: m.name,
+          // 类别随档案行同批带出（ADR-0039）：路由层据此判「这个端点放不放这个类别」
+          type: m.type,
           createdAt: m.createdAt,
           ownedBy: m.upstreamName,
           // 契约 §10 v1.11.0 只加字段：能力/上下文随档案行同批带出（逐项 0 差异的字段面延伸）
@@ -241,6 +253,15 @@ export function createGatewayStore(options: GatewayStoreOptions): GatewayStore {
        */
       resolveUpstreamModel(clientModel: string): string {
         return clientModel;
+      },
+
+      /**
+       * 走**快照**（`typeByName`，随 `rebuild()` 同拍子刷新），不实时查库 ——
+       * 理由与"为什么它是同步签名"写在 `ports.ts` 的 `ModelCatalog.typeOf` 上。
+       * 未登记 / 已停用 / 上游已停用一律 `null`，由路由层解释成"本闸不表态"。
+       */
+      typeOf(clientModel: string): ModelType | null {
+        return typeByName.get(clientModel) ?? null;
       },
     },
 

@@ -154,6 +154,40 @@ describe('快照构造', () => {
     assert.equal(h.store.poolSnapshot().upstreams[0]?.models, null);
   });
 
+  it('typeOf 走快照：类别随 refresh 更新，未登记/已停用一律 null（ADR-0039）', () => {
+    const h = setup();
+    const up = addUpstream(h.db);
+    const chat = upsertModelFromSync(h.db, {
+      upstreamId: up,
+      name: 'gpt-4o',
+      displayName: null,
+      type: 'chat',
+      capabilities: [],
+      contextLength: null,
+      price: null,
+    });
+    upsertModelFromSync(h.db, {
+      upstreamId: up,
+      name: 'text-embedding-3-small',
+      displayName: null,
+      type: 'embedding',
+      capabilities: [],
+      contextLength: null,
+      price: null,
+    });
+    h.store.refresh();
+
+    assert.equal(h.store.catalog.typeOf('gpt-4o'), 'chat');
+    assert.equal(h.store.catalog.typeOf('text-embedding-3-small'), 'embedding');
+    assert.equal(h.store.catalog.typeOf('从没建过档'), null, '未登记 ⇒ null（本闸不表态，交给候选集去回答）');
+    // 与 /v1/models 同一个「已启用」判据：停用后两处必须同时消失，否则列表里有、闸口按旧类别判
+    const dto = getModel(h.db, chat.id);
+    assert.ok(dto);
+    updateModel(h.db, chat.id, { enabled: false, revision: dto.revision });
+    assert.equal(h.store.refresh(), true);
+    assert.equal(h.store.catalog.typeOf('gpt-4o'), null, '停用即从快照消失，与 listEnabledModels 同拍子');
+  });
+
   it('停用档案里的模型 → 立刻从「上游允许集合」消失', async () => {
     const h = setup();
     const up = addUpstream(h.db);

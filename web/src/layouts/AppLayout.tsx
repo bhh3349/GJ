@@ -1,5 +1,4 @@
-import { DownOutlined, LogoutOutlined, UserOutlined } from '@ant-design/icons';
-import { App, Dropdown, Layout, Menu, Typography } from 'antd';
+import { App, Layout, Menu, Typography } from 'antd';
 import type { MenuProps } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
@@ -7,9 +6,10 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { authApi } from '@/api/endpoints';
 import { SESSION_EXPIRED_EVENT } from '@/api/http';
 import { useAction } from '@/api/hooks';
-import { useSession } from '@/auth/AuthGate';
+import { AccountMenu } from '@/components/AccountMenu';
 import { ConnectionBadge } from '@/components/ConnectionBadge';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { SidebarCollapseButton } from '@/components/SidebarCollapseButton';
 import { useSupplierNav } from '@/layouts/useSupplierNav';
 import { resetLiveData, startLive, stopLive } from '@/realtime/live';
 import { findNavItem, navItems } from '@/router/nav';
@@ -46,7 +46,6 @@ export function AppLayout() {
   const [collapsed, setCollapsed] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
-  const session = useSession();
   const { modal } = App.useApp();
   const { run } = useAction();
   const suppliers = useSupplierNav();
@@ -129,6 +128,10 @@ export function AppLayout() {
       <Sider
         theme="dark"
         collapsible
+        // 关掉 antd 底部那条通栏把手（Bo 说的"一整条"），改用品牌行右侧的图标按钮 ——
+        // 组件与理由见 `SidebarCollapseButton`。`trigger={null}` 同时让 `aside` 不再带
+        // `padding-bottom = 把手高度`，所以左下角的账号格可以**贴着底边**，不再悬空一截。
+        trigger={null}
         collapsed={collapsed}
         onCollapse={setCollapsed}
         width={tokens.layout.siderWidth}
@@ -142,47 +145,81 @@ export function AppLayout() {
           zIndex: 1,
         }}
       >
-        <div
-          style={{
-            height: tokens.layout.headerHeight,
-            display: 'flex',
-            alignItems: 'center',
-            gap: tokens.space.sm,
-            padding: `0 ${tokens.space.lg}px`,
-            color: tokens.color.textPrimary,
-            fontWeight: 600,
-            letterSpacing: '0.02em',
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-          }}
-        >
-          <span
-            aria-hidden
+        {/*
+          侧栏内容排成**一列三格**：品牌 / 菜单（吃满剩余高度，自身可滚） / 用户按钮（钉死在底）。
+          `height:'100%'` 是对 antd 的 `-children` 取的；把手已由 `trigger={null}` 关掉，
+          aside 不再有那条 `padding-bottom`，所以账号格贴着底边、菜单的滚动区也多了把手那一截。
+        */}
+        <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+          <div
             style={{
-              width: 8,
-              height: 8,
-              borderRadius: 2,
-              background: tokens.color.primary,
-              boxShadow: `0 0 12px ${tokens.color.primary}`,
+              height: tokens.layout.headerHeight,
               flex: 'none',
+              display: 'flex',
+              alignItems: 'center',
+              gap: tokens.space.sm,
+              // 折叠态只有 64px：品牌点 + 按钮一共 44px，左侧 24px 的展开态内边距会把按钮挤出去
+              // （`overflow:hidden` 会把它**裁掉**而不是报错 —— 一个看不见的按钮）。
+              padding: collapsed
+                ? `0 ${tokens.space.xs}px`
+                : `0 ${tokens.space.sm}px 0 ${tokens.space.lg}px`,
+              color: tokens.color.textPrimary,
+              fontWeight: 600,
+              letterSpacing: '0.02em',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
             }}
-          />
-          {collapsed ? null : <span>Gateway Console</span>}
-        </div>
+          >
+            <span
+              aria-hidden
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: 2,
+                background: tokens.color.primary,
+                boxShadow: `0 0 12px ${tokens.color.primary}`,
+                flex: 'none',
+              }}
+            />
+            {collapsed ? null : <span>Gateway Console</span>}
+            {/*
+              收起按钮挂品牌行右侧（agent web 端的通行位置，Bo 指定）：
+              折叠态品牌名消失，它靠 `marginInlineStart:auto` 独占一行居中。
+            */}
+            <SidebarCollapseButton collapsed={collapsed} onToggle={() => setCollapsed(!collapsed)} />
+          </div>
 
-        <Menu
-          theme="dark"
-          mode="inline"
-          selectedKeys={[selectedKey]}
-          openKeys={openKeys}
-          onOpenChange={(keys) => setOpenKeys(keys as string[])}
-          items={menuItems}
-          onClick={({ key }) => {
-            // 置灰的占位行（加载中 / 加载失败）不是路由，点了不跳。
-            if (key.startsWith('/')) navigate(key);
-          }}
-          style={{ background: 'transparent', borderInlineEnd: 'none' }}
-        />
+          <Menu
+            theme="dark"
+            mode="inline"
+            selectedKeys={[selectedKey]}
+            openKeys={openKeys}
+            onOpenChange={(keys) => setOpenKeys(keys as string[])}
+            items={menuItems}
+            onClick={({ key }) => {
+              // 置灰的占位行（加载中 / 加载失败）不是路由，点了不跳。
+              if (key.startsWith('/')) navigate(key);
+            }}
+            style={{ background: 'transparent', borderInlineEnd: 'none', flex: 1, minHeight: 0, overflowY: 'auto' }}
+          />
+
+          {/*
+            用户按钮：从顶栏搬到**侧栏左下角**（1panel 那种，Bo 的要求）。
+            它是**会话级**入口 —— 与"当前在看哪一页"无关，所以钉在侧栏上而不是放在某一页里。
+            菜单项与顶栏那一版逐条相同（同一个 `AccountMenu`，只换长相），登出仍走本页
+            `onLogout`：管理面退出要顺带断掉实时通道，那是外壳的结构职责。
+            底部留白用 `paddingBottom` 而不是 `padding: '… 0'`：把手没了，这一格该贴底。
+          */}
+          <div
+            style={{
+              flex: 'none',
+              borderTop: `1px solid ${tokens.color.border}`,
+              padding: `${tokens.space.sm}px`,
+            }}
+          >
+            <AccountMenu collapsed={collapsed} onLogout={onLogout} />
+          </div>
+        </div>
       </Sider>
 
       <Layout style={{ background: 'transparent' }}>
@@ -204,50 +241,13 @@ export function AppLayout() {
               {current?.label ?? 'Gateway Console'}
             </Text>
           </div>
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: tokens.space.lg,
-              flex: 'none',
-            }}
-          >
+          {/*
+            顶栏只留连接状态。**账号菜单已搬到侧栏左下角**（`AccountMenu`，见上面 Sider 里那一格）——
+            这里刻意不再留一份："同一个入口在两个地方"会立刻带来"两份状态、两个漂移点"
+            （改密码弹窗的开关就是其中一份），而 Bo 要的是 1panel 那种左下角。
+          */}
+          <div style={{ flex: 'none' }}>
             <ConnectionBadge />
-            <Dropdown
-              trigger={['click']}
-              menu={{
-                items: [
-                  {
-                    key: 'account',
-                    label: session?.username ?? '未知账号',
-                    disabled: true,
-                    icon: <UserOutlined />,
-                  },
-                  { type: 'divider' },
-                  { key: 'logout', label: '退出登录', icon: <LogoutOutlined />, danger: true },
-                ],
-                onClick: ({ key }) => {
-                  if (key === 'logout') onLogout();
-                },
-              }}
-            >
-              <span
-                style={{
-                  display: 'inline-flex',
-                  alignItems: 'center',
-                  gap: tokens.space.sm,
-                  cursor: 'pointer',
-                  fontSize: 12,
-                  color: tokens.color.textSecondary,
-                  padding: '4px 8px',
-                  borderRadius: tokens.radius.sm,
-                }}
-              >
-                <UserOutlined />
-                {session?.username ?? '—'}
-                <DownOutlined style={{ fontSize: 10 }} />
-              </span>
-            </Dropdown>
           </div>
         </Header>
 

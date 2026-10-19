@@ -10,6 +10,12 @@
  *
  * 非冻结的内部面（仅供网关引擎使用，不属于对外 KeyPool 契约）：
  *   applySnapshot / beginAttempt / endAttempt / view / stats
+ *
+ * 排序口径的历史（`remainingQuotaOf` 的语义是这文件里唯一被改过的）：
+ *   · 2026-10-06 ADR-0011：balance 退出键 2（返回常量 0），兜底位改 LRU。
+ *   · 2026-10-16 ADR-0011 追认：套餐余量未知的哨兵从 `-1` 改 `1`，
+ *     实现「套餐 key 一律排在余额 key 之前」（套餐 30 天有效期，不用即作废）。
+ *     签名、过滤、冷却、单写者全部未动 —— 变的只有排序键 2 的一个常量。
  */
 
 import { MAX_COOLDOWN_MS, nextCooldownMs } from './cooldown.js';
@@ -99,9 +105,28 @@ function keyModels(key: KeyConfig, upstreamModels: readonly string[] | null): re
   return key.models === null || key.models.length === 0 ? upstreamModels : key.models;
 }
 
+/**
+ * 「套餐余量未知」在排序键 2 上的取值（ADR-0011 追认，2026-10-16）。
+ *
+ * 旧值是 `-1`（排到 balance 的 0 之后）。改成 `1` 的理由是用户目标
+ * **「先烧套餐 key，再烧余额 key」**（套餐只有 30 天有效期，不用就作废）：
+ * 余量未知的套餐 key 也必须排在余额 key 前面，否则它会被饿死。
+ *
+ * 为什么恰好是 `1` 而不是任意正数：`1` 是**唯一**同时满足两条的值 ——
+ *   · `> 0`：压过 balance 类的常量 0（余额 key 排在所有套餐 key 之后）；
+ *   · `≤ 任何可用套餐 key 的真实余量`：`isUsable` 把余量 0 的套餐 key 已经排除，
+ *     所以"可用"的已知余量最小就是 1 —— 未知值不会盖过任何一把真实有额的套餐 key。
+ * 取更大的数（如 `Number.MAX_SAFE_INTEGER`）会让"刚 rotate 完、还没回填"的 key
+ * 压过一把只剩 2 个 token 的套餐 key，那才叫真的本末倒置。
+ *
+ * `isUsable` 的 `remainingQuotaOf(...) !== 0` 判定因此**不受影响**（1 ≠ 0，仍可用）：
+ * "余量未知"从来就不是"不可用"，这一点与 ADR-0011 原文一致，没有放松过滤。
+ */
+const UNKNOWN_PLAN_QUOTA = 1;
+
 function remainingQuotaOf(key: KeyConfig, rt: RuntimeExtras): number {
   if (key.category === 'token-plan') {
-    if (key.tokenPlanRemainingTokens === null) return -1; // 未知 → 排序时靠后，但不排除
+    if (key.tokenPlanRemainingTokens === null) return UNKNOWN_PLAN_QUOTA; // 未知 → 仍排在余额 key 前
     return Math.max(0, key.tokenPlanRemainingTokens - rt.spentTokens);
   }
   // balance 类不参与「剩余额度」排序（ADR-0011）：余额是计费资金，不是随请求递减的配额，
@@ -184,7 +209,7 @@ export function createKeyPool(options: PoolOptions = {}): KeyPoolInternal {
         if (b.weight !== a.weight) return b.weight - a.weight; // 1. 权重降序
         const ra = remainingQuotaOf(configOf(a), runtimeOf(a));
         const rb = remainingQuotaOf(configOf(b), runtimeOf(b));
-        if (rb !== ra) return rb - ra; // 2. 剩余额度降序（仅 token-plan；balance 类恒 0，见 ADR-0011）
+        if (rb !== ra) return rb - ra; // 2. 剩余额度降序（token-plan；balance 类恒 0 故总排在套餐 key 后，见 ADR-0011 + UNKNOWN_PLAN_QUOTA）
         const la = freshFailureAt(a);
         const lb = freshFailureAt(b);
         if (la !== lb) return la - lb; // 3. 上次失败时间升序（从未失败优先；超窗归从未失败）
@@ -245,6 +270,12 @@ export function createKeyPool(options: PoolOptions = {}): KeyPoolInternal {
       rt.consecutiveFails = 0; // 清失败计数、退出冷却半开
       rt.cooldownUntil = null;
       rt.lastLatencyMs = latencyMs;
+      // 一次真实的成功就是最强的证据：这把 key 现在能敲通上游。若留着 autoDisabled，
+      // 这把 key 会被 isUsable 的第一行永久踢出选路，而自动禁用是**网关自己的推断**
+      // （连续 5 次 401），不是管理端的配置意图 —— 推断被证据推翻时就该撤回。
+      // 此前不清的后果是进程级不可恢复：key_runtime 没有这一列、管理面没有入口、
+      // applySnapshot 也不清，唯一的恢复手段是重启进程（审计项 A）。
+      rt.autoDisabled = false;
       const key = snapshot.keys.find((k) => k.keyId === keyId);
       if (key?.category === 'token-plan') rt.spentTokens += tokens.total; // 乐观扣减，落库由管家侧异步结算
       usageSink?.(keyId, tokens, latencyMs);
@@ -277,6 +308,11 @@ export function createKeyPool(options: PoolOptions = {}): KeyPoolInternal {
         lastFailureReason: r.lastFailureReason,
         lastLatencyMs: r.lastLatencyMs,
         inflight: r.inflight,
+        // 与 failCount 同族：只在 /internal/snapshot 上可见，不进 key_runtime 镜像
+        // （表里没有这一列，加了就是给 ADR-0010 的单向镜像添一个"永不刷新"的假字段）。
+        // 管理端想看"这把 key 是不是被自动禁用了"只能看日志里的 AUTH_INVALID_AUTO_DISABLED
+        // 告警 —— 这是已知缺口，不是遗漏：自动禁用态不落库，重启即归零（见 types.ts 注释）。
+        autoDisabled: r.autoDisabled,
       }));
     },
   };

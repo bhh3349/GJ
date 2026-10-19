@@ -397,7 +397,26 @@ export interface TierFlowClient {
   /** 建 key。返回的明文**只在此刻存在于栈内**，调用方须当场加密落库。 */
   createToken(
     credential: { session: string; tfUser: string | null },
-    input: { name: string; unlimited: boolean; quotaCents: number | null; models?: readonly string[] | null },
+    input: {
+      name: string;
+      unlimited: boolean;
+      quotaCents: number | null;
+      models?: readonly string[] | null;
+      /**
+       * 该账号站点自己的换算比（`/api/user/self → data.quota_per_unit`）。
+       *
+       * **可省，但省略是有代价的**：省掉就等于让 `DEFAULT_QUOTA_PER_UNIT`（500000）
+       * 这个文档默认值去当事实源，而 §15.1 明写"换算基准每次从上游读、不写死"。
+       * 站点改了比值时，`unlimited:false` 建出来的 key 额度会**成比例地错** ——
+       * 例：站点实际 250000/元，我们要 1000 分，这里发出去的会是 5000000 quota
+       * （= 20 元）而不是 2500000（= 10 元）。不报错、不告警，余额凭空多一倍。
+       *
+       * 调用方拿得到就不该省：`refresh` / `keys/sync` / 自测三条腿都已经在读
+       * `/api/user/self`，那个比值是**顺手拿到**的，不需要为它多发一次请求
+       * （§15.5 的请求数预算不动）。
+       */
+      quotaPerUnit?: number | undefined;
+    },
   ): Promise<TierFlowResult<{ tokenNo: string | null; maskedKey: string | null; plaintext: string | null; raw: unknown }>>;
   /** 删上游 key。**无尾斜杠**。 */
   deleteToken(credential: { session: string; tfUser: string | null }, tokenId: string): Promise<TierFlowResult<unknown>>;
@@ -586,7 +605,10 @@ export function createTierFlowClient(options: TierFlowOptions): TierFlowClient {
           unlimited: input.unlimited,
           quotaCents: input.quotaCents,
           models: input.models ?? null,
-          quotaPerUnit: DEFAULT_QUOTA_PER_UNIT,
+          // **取调用方给的比值**，拿不到才落回文档默认值。写死的那一版是审计项 D：
+          // 站点把比值从 500000 改成别的之后，`unlimited:false` 建出来的 key 额度
+          // 成比例地错（见接口上 `quotaPerUnit` 的说明）。
+          quotaPerUnit: input.quotaPerUnit ?? DEFAULT_QUOTA_PER_UNIT,
         }),
         credential,
       });

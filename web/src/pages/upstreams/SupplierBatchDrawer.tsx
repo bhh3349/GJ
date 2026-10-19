@@ -31,7 +31,7 @@ import { formatCount, formatIso } from '@/utils/format';
 
 const { Text } = Typography;
 
-/** `action` 六值 → 人话。六值**每个都有生产者**（§15.3 / §15.13），所以这里没有兜底项要写"其它"。 */
+/** `action` 七值 → 人话。七值**每个都有生产者**（§15.3 / §15.13 / v1.16.4），所以这里没有兜底项要写"其它"。 */
 const ACTION_TEXT: Record<SupplierBatchAction, string> = {
   login: '首登',
   relogin: '重登',
@@ -39,6 +39,7 @@ const ACTION_TEXT: Record<SupplierBatchAction, string> = {
   create: '建 key',
   sync: '同步 key',
   rotate: '重置套餐 key',
+  import: '导入 Cookie',
 };
 
 /**

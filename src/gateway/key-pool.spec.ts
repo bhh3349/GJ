@@ -132,7 +132,7 @@ describe('getAvailableKeys 排序', () => {
     assert.ok(heads.size > 1, `LRU 应轮换到多把头 key（distinct=${heads.size}），而不是恒钉一把`);
   });
 
-  it('token-plan 仍按套餐余量降序（键 2 语义只对 token-plan 保留）', async () => {
+  it('token-plan 仍按套餐余量降序，且**未知余量也排在余额 key 之前**（ADR-0011 追认）', async () => {
     clock = 1_700_000_000_000;
     const pool = createKeyPool({ now });
     pool.applySnapshot(
@@ -145,7 +145,7 @@ describe('getAvailableKeys 排序', () => {
     assert.deepEqual(
       (await pool.getAvailableKeys('gpt-4o')).map((c) => c.keyId),
       ['tp-rich', 'tp-poor', 'tp-unknown'],
-      '余量降序，未知(-1)靠后但不排除',
+      '余量降序；未知哨兵取 1，垫在「任何可用的已知余量」之后（可用最小即 1），但不排除',
     );
     pool.reportSuccess('tp-rich', { prompt: 400, completion: 0, total: 400, isEstimated: false }, 10);
     assert.deepEqual(
@@ -161,6 +161,48 @@ describe('getAvailableKeys 排序', () => {
     );
   });
 
+  it('套餐 key 一律排在余额 key 之前（用户目标：先烧 30 天有效期的套餐）', async () => {
+    clock = 1_700_000_000_000;
+    const pool = createKeyPool({ now });
+    // 余额 key 刻意给「很高」的余额：按 balanceCents 排序的旧世界它会赢，
+    // 而它现在必须排在最后 —— 这正是 ADR-0011 的 balance 常量 0 与追认的哨兵 1 共同作用的结果。
+    pool.applySnapshot(
+      snapshot([
+        balanceKey('bal-rich', { balanceCents: 999_999 }),
+        balanceKey('bal-unknown', { balanceCents: null }),
+        balanceKey('bal-zero-ish', { balanceCents: 1 }),
+        balanceKey('tp-known', { category: 'token-plan', balanceCents: null, tokenPlanRemainingTokens: 2 }),
+        balanceKey('tp-unknown', { category: 'token-plan', balanceCents: null, tokenPlanRemainingTokens: null }),
+      ]),
+    );
+    const ids = (await pool.getAvailableKeys('gpt-4o')).map((c) => c.keyId);
+    assert.deepEqual(
+      ids.slice(0, 2).sort(),
+      ['tp-known', 'tp-unknown'],
+      `两把套餐 key 必须占据前两位（实际顺序 ${ids.join(', ')}）`,
+    );
+    assert.deepEqual(
+      ids.slice(2),
+      ['bal-rich', 'bal-unknown', 'bal-zero-ish'],
+      '余额 key 全数沉到套餐 key 之后；它们内部按键 3/4/5 走（余额不参与键 2）',
+    );
+
+    // 反向钉：哨兵 1 不能盖过**真实只剩 2** 的套餐 key —— 否则"刚 rotate、还没回填"的 key
+    // 会抢在"快用完、该轮换了"的 key 前面，把仅剩的额度堵死。
+    pool.applySnapshot(
+      snapshot([
+        balanceKey('tp-unknown', { category: 'token-plan', balanceCents: null, tokenPlanRemainingTokens: null }),
+        balanceKey('tp-last-tokens', { category: 'token-plan', balanceCents: null, tokenPlanRemainingTokens: 2 }),
+        balanceKey('bal', { balanceCents: 5000 }),
+      ]),
+    );
+    assert.deepEqual(
+      (await pool.getAvailableKeys('gpt-4o')).map((c) => c.keyId),
+      ['tp-last-tokens', 'tp-unknown', 'bal'],
+      '2 > 1（哨兵）：真实余量仍胜过未知；且未知仍胜过余额 key',
+    );
+  });
+
   it('lastUsedSeq 不进 view()（内部轮转游标，不对外承诺）', async () => {
     clock = 1_700_000_000_000;
     const pool = createKeyPool({ now });
@@ -170,6 +212,9 @@ describe('getAvailableKeys 排序', () => {
     const rt = pool.view().find((r) => r.keyId === 'k1');
     assert.ok(rt !== undefined);
     assert.equal('lastUsedAt' in rt, false, 'view() 输出形状零变化（/internal/snapshot、key_runtime 镜像不受影响）');
+    // autoDisabled **在** view() 里（审计项 A 的可观测性腿），但它刻意不进 key_runtime
+    // 镜像 —— 表里没有那一列，加了就是给 ADR-0010 的单向镜像添一个永不刷新的假字段。
+    assert.equal('autoDisabled' in rt, true, '自动禁用态必须可见（此前连日志外没有任何读面）');
   });
 });
 
@@ -283,6 +328,44 @@ describe('并发上限与自动禁用', () => {
     }
     assert.deepEqual(alerts, ['AUTH_INVALID_AUTO_DISABLED:k1']);
     assert.equal((await pool.getAvailableKeys('gpt-4o')).length, 0, '自动禁用后不再入选');
+  });
+
+  // 审计项 A：自动禁用曾经是**进程级不可恢复**的 —— reportSuccess 清了冷却与计数，
+  // 却没碰 autoDisabled，而 isUsable 第一行就看它。后果不是"多等 30min"，是
+  // 这把 key 从此再也不入选：key_runtime 表没有这一列、管理面没有入口、
+  // applySnapshot 也不清，唯一的恢复手段是重启进程。
+  it('自动禁用后，一次真实成功即可撤回（审计项 A）', async () => {
+    clock = 1_700_000_000_000;
+    const pool = createKeyPool({ now });
+    pool.applySnapshot(snapshot([balanceKey('k1')]));
+
+    for (let i = 0; i < 5; i += 1) {
+      pool.reportFailure('k1', 'AUTH_INVALID');
+      clock += MAX_COOLDOWN_MS + 1;
+    }
+    assert.equal((await pool.getAvailableKeys('gpt-4o')).length, 0, '已自动禁用');
+    assert.equal(pool.view()[0]?.autoDisabled, true, 'view() 暴露自动禁用态');
+
+    // 上游恢复 / 管理员换了新 key：一次真实的成功就是最强的反证。
+    // 自动禁用是网关自己的**推断**，不是管理端的配置意图，被证据推翻时就该撤回。
+    pool.reportSuccess('k1', usage(1), 10);
+    assert.equal(pool.view()[0]?.autoDisabled, false, '成功即撤回禁用态');
+    assert.equal((await pool.getAvailableKeys('gpt-4o')).length, 1, '重新入选');
+  });
+
+  it('自动禁用态不进 key_runtime 镜像（与 failCount 同族，重启归零）', async () => {
+    clock = 1_700_000_000_000;
+    const pool = createKeyPool({ now });
+    pool.applySnapshot(snapshot([balanceKey('k1')]));
+
+    for (let i = 0; i < 5; i += 1) {
+      pool.reportFailure('k1', 'AUTH_INVALID');
+      clock += MAX_COOLDOWN_MS + 1;
+    }
+    // 表里没有 auto_disabled 列（见 src/db/schema.ts 的 key_runtime DDL）。
+    // 加列就是给镜像添一个"永不刷新"的假字段 —— 见 src/wiring/key-runtime-flusher.ts
+    // 的 signatureOf：只含会被写进表里的四列，这里守的就是那句话。
+    assert.equal(pool.view()[0]?.autoDisabled, true);
   });
 });
 

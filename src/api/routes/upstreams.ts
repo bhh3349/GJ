@@ -65,13 +65,13 @@ interface UpdateBody {
 const balanceQueryProp = { type: 'object', additionalProperties: true } as const;
 
 /**
- * 契约 §2 `supplier`：`null` = 通用上游，`"tierflow"` = 走 §15 账号面。
+ * 契约 §2 `supplier`：`null` = 通用上游，`"tierflow"` / `"tokenrhythm"` = 走 §15 账号面。
  *
  * **取值是枚举，不是自由文本**：这一列是"该走哪个驱动器"的能力位，写错一个字的后果是
- * 静默走错分支（或不走账号面），而不是一条能看见的报错。将来接第二家供应商时，
- * 这里加一个取值 + §15 加一个驱动器，通用层不动（ADR-0018 决策 0）。
+ * 静默走错分支（或不走账号面），而不是一条能看见的报错。接第二家供应商按 ADR-0018 决策 0
+ * 落地：这里加一个取值 + §15.14 加一个驱动器，通用层不动。
  */
-const supplierProp = { type: ['string', 'null'], enum: [null, 'tierflow'] } as const;
+const supplierProp = { type: ['string', 'null'], enum: [null, 'tierflow', 'tokenrhythm'] } as const;
 
 export function registerUpstreamRoutes(app: FastifyInstance, ctx: ApiContext): void {
   const { db, config } = ctx;

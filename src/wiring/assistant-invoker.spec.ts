@@ -128,7 +128,7 @@ function stubSecrets(keys: KeyConfig[]): SecretResolver {
   };
 }
 
-const models: ModelCatalog = { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m };
+const models: ModelCatalog = { listEnabledModels: async () => [], resolveUpstreamModel: (m) => m, typeOf: () => null };
 
 function messages(text = '刚才 5 分钟的错误多吗？'): AssistantMessage[] {
   return [{ role: 'user', content: text }];

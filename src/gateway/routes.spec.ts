@@ -16,17 +16,33 @@ import { describe, it } from 'vitest';
 import type { ForwardResult, GatewayEngine } from './engine.js';
 import { GATEWAY_ERROR_CODES, GatewayError } from './errors.js';
 import type { RateLimiter, LimitCheckResult } from './limiter.js';
-import type { GroupContext, GatewayAuth, ModelDescriptor } from './ports.js';
+import type { GroupContext, GatewayAuth, ModelCatalog, ModelDescriptor } from './ports.js';
 import { gatewayRoutes } from './routes.js';
 
 /* ------------------------------ 测试台 ------------------------------ */
 
-const GROUP: GroupContext = { groupId: 'grp_1', name: '测试组', enabled: true, rpm: null, tpm: null, dailyQuota: null };
+const GROUP: GroupContext = { groupId: 'grp_1', name: '测试组', enabled: true, rpm: null, tpm: null, dailyQuota: null, authorizedModels: null };
 
 const MODELS: ModelDescriptor[] = [
-  { id: 'gpt-4o', createdAt: '2026-10-06T00:00:00.000Z', ownedBy: 'openai', capabilities: ['stream', 'vision'], contextLength: 128_000, endpointTypes: null },
-  { id: 'deepseek-chat', createdAt: '2026-10-01T00:00:00.000Z', ownedBy: 'up1', capabilities: [], contextLength: null, endpointTypes: null },
+  { id: 'gpt-4o', type: 'chat', createdAt: '2026-10-06T00:00:00.000Z', ownedBy: 'openai', capabilities: ['stream', 'vision'], contextLength: 128_000, endpointTypes: null },
+  { id: 'deepseek-chat', type: 'chat', createdAt: '2026-10-01T00:00:00.000Z', ownedBy: 'up1', capabilities: [], contextLength: null, endpointTypes: null },
+  { id: 'text-embedding-3-small', type: 'embedding', createdAt: '2026-10-02T00:00:00.000Z', ownedBy: 'openai', capabilities: [], contextLength: null, endpointTypes: null },
+  { id: 'dall-e-3', type: 'image', createdAt: '2026-10-02T00:00:00.000Z', ownedBy: 'openai', capabilities: [], contextLength: null, endpointTypes: null },
 ];
+
+/**
+ * 路由层类别准入用的 catalog 桩（ADR-0039）：**从 MODELS 现推**，不另写一份名字到类别的表 ——
+ * 另写一份就等于 `typeOf` 与 `/v1/models` 会有两套事实，"列表里写着 embedding、闸口按 chat 判"
+ * 这种漂移在单测里根本看不出来。未登记 → null（本闸不表态，交给引擎的候选集）。
+ */
+function stubCatalog(models: ModelDescriptor[] = MODELS): ModelCatalog {
+  const byName = new Map(models.map((m) => [m.id, m.type]));
+  return {
+    listEnabledModels: async () => models,
+    resolveUpstreamModel: (m: string) => m,
+    typeOf: (m: string) => byName.get(m) ?? null,
+  };
+}
 
 function stubEngine(over: Partial<GatewayEngine> = {}): { engine: GatewayEngine; seen: Array<Record<string, unknown>> } {
   const seen: Array<Record<string, unknown>> = [];
@@ -66,6 +82,8 @@ interface BuildOptions {
   limiter?: RateLimiter;
   internalToken?: string;
   engine?: GatewayEngine;
+  /** 类别准入的判据来源（ADR-0039）；不传 = 用 MODELS 现推的那个桩 */
+  catalog?: ModelCatalog;
 }
 
 async function buildApp(options: BuildOptions = {}): Promise<FastifyInstance> {
@@ -74,6 +92,7 @@ async function buildApp(options: BuildOptions = {}): Promise<FastifyInstance> {
   const { engine } = stubEngine();
   await app.register(gatewayRoutes, {
     engine: options.engine ?? engine,
+    models: options.catalog ?? stubCatalog(),
     auth,
     ...(options.limiter === undefined ? {} : { limiter: options.limiter }),
     ...(options.internalToken === undefined ? {} : { internalToken: options.internalToken }),
@@ -421,13 +440,13 @@ describe('GET /v1/models', () => {
     assert.equal(res.statusCode, 200);
     const body = res.json() as {
       object: string;
-      data: Array<{ id: string; object: string; created: number; owned_by: string; capabilities: string[]; contextLength: number | null; endpointTypes: string[] | null }>;
+      data: Array<{ id: string; object: string; created: number; owned_by: string; capabilities: string[]; contextLength: number | null; endpointTypes: string[] | null; type: string }>;
     };
     assert.equal(body.object, 'list');
     assert.equal(body.data.length, MODELS.length);
     assert.deepEqual(
       body.data.map((m) => m.id),
-      ['gpt-4o', 'deepseek-chat'],
+      ['gpt-4o', 'deepseek-chat', 'text-embedding-3-small', 'dall-e-3'],
     );
     for (const m of body.data) {
       assert.equal(m.object, 'model');
@@ -450,14 +469,22 @@ describe('GET /v1/models', () => {
     assert.equal(first.object, 'model');
     assert.equal(typeof first.created, 'number');
     assert.equal(first.owned_by, 'openai');
-    // 新增三字段：值取自 ModelDescriptor（实现侧来自同一份档案行）
+    // 新增字段：值取自 ModelDescriptor（实现侧来自同一份档案行）
     assert.deepEqual(first.capabilities, ['stream', 'vision']);
     assert.equal(first.contextLength, 128_000);
     assert.equal(first.endpointTypes, null, '本期恒 null = 未采集（§10 登记，不写"先加字段后补生产者"）');
+    // v1.15.10 新增 `type`（ADR-0039）：准入按类别把关，就必须把类别告诉调用方，
+    // 否则调用方只能盲试端点。与档案卡的 `ModelDto.type` 同源。
+    assert.equal(first.type, 'chat', '类别随列表带出，且与准入闸读的是同一份 `models.type`');
     // [] 是「未探测/上游未给」，不是 null —— 第二条保持 []，不另立第二套空值语义
     const second = body.data[1] as Record<string, unknown>;
     assert.deepEqual(second.capabilities, []);
     assert.equal(second.contextLength, null);
+    // 列表里三种类别都出得来（准入是写面的门，读面不受影响）
+    assert.deepEqual(
+      body.data.map((m) => m.type),
+      ['chat', 'chat', 'embedding', 'image'],
+    );
     await app.close();
   });
 
@@ -465,6 +492,193 @@ describe('GET /v1/models', () => {
     const app = await buildApp();
     const res = await app.inject({ method: 'GET', url: '/v1/models' });
     assert.equal(res.statusCode, 401);
+    await app.close();
+  });
+});
+
+describe('模型授权（v1.15.8 / ADR-0037）', () => {
+  /** 授权了 `gpt-4o` 一把的组。 */
+  const restricted = (authorizedModels: string[] | null): GatewayAuth => ({
+    authenticate: async (key) => (key === 'gk-ok' ? { ...GROUP, authorizedModels } : null),
+  });
+
+  it('授权列表内的模型 → 放行，引擎真的收到了请求', async () => {
+    const { engine, seen } = stubEngine();
+    const app = await buildApp({ engine, auth: restricted(['gpt-4o']) });
+    const res = await app.inject({
+      method: 'POST',
+      url: CHAT,
+      headers: { authorization: 'Bearer gk-ok' },
+      payload: chatPayload({ model: 'gpt-4o' }),
+    });
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(seen.length, 1, '授权放行必须是**真的**放行，不是"看起来放行"');
+    assert.equal(seen[0]?.model, 'gpt-4o');
+    await app.close();
+  });
+
+  it('授权列表外的模型 → 403 MODEL_NOT_AUTHORIZED + authentication_error + param=model，且一次上游都不敲', async () => {
+    const { engine, seen } = stubEngine();
+    const app = await buildApp({ engine, auth: restricted(['gpt-4o']) });
+    const res = await app.inject({
+      method: 'POST',
+      url: CHAT,
+      headers: { authorization: 'Bearer gk-ok' },
+      payload: chatPayload({ model: 'deepseek-chat' }),
+    });
+
+    assert.equal(res.statusCode, 403);
+    const err = assertOpenAIShape(res.json());
+    assert.equal(err.code, GATEWAY_ERROR_CODES.MODEL_NOT_AUTHORIZED);
+    assert.equal(err.type, 'authentication_error', '与 GROUP_DISABLED 同族：凭据对了、人不对');
+    assert.equal((res.json() as { error: { param?: string } }).error.param, 'model');
+    assert.equal(seen.length, 0, '授权失败是 0 次真实尝试：候选集根本没建（§10 的 0-attempt 判据）');
+    await app.close();
+  });
+
+  it('embeddings 同一个门：列表内放行、列表外 403（两个 handler 都要有，漏一个就是绕过）', async () => {
+    const { engine, seen } = stubEngine();
+    const app = await buildApp({ engine, auth: restricted(['text-embedding-3-small']) });
+
+    const denied = await app.inject({
+      method: 'POST',
+      url: '/v1/embeddings',
+      headers: { authorization: 'Bearer gk-ok' },
+      payload: { model: 'deepseek-chat', input: 'hi' },
+    });
+    assert.equal(denied.statusCode, 403);
+    assert.equal((denied.json() as { error: { code: string } }).error.code, 'MODEL_NOT_AUTHORIZED');
+    assert.equal(seen.length, 0);
+
+    const allowed = await app.inject({
+      method: 'POST',
+      url: '/v1/embeddings',
+      headers: { authorization: 'Bearer gk-ok' },
+      payload: { model: 'text-embedding-3-small', input: 'hi' },
+    });
+    assert.equal(allowed.statusCode, 200);
+    assert.equal(seen.length, 1);
+    await app.close();
+  });
+
+  it('`null`（不限）的组打任意模型都放行 —— 升级零行为变更', async () => {
+    const { engine, seen } = stubEngine();
+    const app = await buildApp({ engine, auth: restricted(null) });
+    for (const model of ['gpt-4o', 'deepseek-chat', 'whatever-not-listed']) {
+      // 注意最后一个：**不在 MODELS 里也放行** —— 授权层不是"模型是否存在"的校验层，
+      // 它只管"这一组许不许用这个名字"；存在性由引擎侧的候选集去回答（503/404）。
+      const res = await app.inject({
+        method: 'POST',
+        url: CHAT,
+        headers: { authorization: 'Bearer gk-ok' },
+        payload: chatPayload({ model }),
+      });
+      assert.equal(res.statusCode, 200, `model=${model}`);
+    }
+    assert.equal(seen.length, 3);
+    await app.close();
+  });
+
+  it('授权列表按**字面**匹配，不特判 `*`（通配符归 key 白名单那一层）', async () => {
+    const { engine, seen } = stubEngine();
+    const app = await buildApp({ engine, auth: restricted(['*']) });
+    const res = await app.inject({
+      method: 'POST',
+      url: CHAT,
+      headers: { authorization: 'Bearer gk-ok' },
+      payload: chatPayload({ model: 'gpt-4o' }),
+    });
+
+    assert.equal(res.statusCode, 403, '`*` 在授权层不是通配：要"不限"就用 null，不是写一个星号');
+    assert.equal(seen.length, 0);
+    await app.close();
+  });
+
+  it('授权门排在 readModel 之后：缺 model 报 400 而不是 403（名字都读不出来，谈不上授权）', async () => {
+    const app = await buildApp({ auth: restricted(['gpt-4o']) });
+    const res = await app.inject({
+      method: 'POST',
+      url: CHAT,
+      headers: { authorization: 'Bearer gk-ok' },
+      payload: { messages: [{ role: 'user', content: 'hi' }] },
+    });
+
+    assert.equal(res.statusCode, 400);
+    assert.equal((res.json() as { error: { code: string } }).error.code, GATEWAY_ERROR_CODES.INVALID_REQUEST);
+    await app.close();
+  });
+
+  it('`/v1/models` 不强制授权门，但**按组收窄**（列表 = enabled 判据 ∩ 该组授权）', async () => {
+    const restrictedApp = await buildApp({ auth: restricted(['gpt-4o']) });
+    const restrictedRes = await restrictedApp.inject({
+      method: 'GET',
+      url: '/v1/models',
+      headers: { authorization: 'Bearer gk-ok' },
+    });
+    assert.equal(restrictedRes.statusCode, 200, '读面不 403：调用方需要它来发现自己能用什么');
+    assert.deepEqual(
+      (restrictedRes.json() as { data: Array<{ id: string }> }).data.map((m) => m.id),
+      ['gpt-4o'],
+    );
+    await restrictedApp.close();
+
+    // 未授权收缩的组：集合与改版前**逐项相同**（既有验收 4 对存量组原样成立）
+    const openApp = await buildApp({ auth: restricted(null) });
+    const openRes = await openApp.inject({ method: 'GET', url: '/v1/models', headers: { authorization: 'Bearer gk-ok' } });
+    assert.deepEqual(
+      (openRes.json() as { data: Array<{ id: string }> }).data.map((m) => m.id),
+      ['gpt-4o', 'deepseek-chat', 'text-embedding-3-small', 'dall-e-3'],
+    );
+    await openApp.close();
+  });
+
+  it('授权在鉴权那一刻读入：同一把 key、改授权后**下一个请求**即按新的判（不重启、不缓存）', async () => {
+    const { engine, seen } = stubEngine();
+    let authorized: string[] | null = ['gpt-4o'];
+    const app = await buildApp({
+      engine,
+      // 每次 authenticate 都现读 `authorized` —— 这就是 `wiring/auth.ts` 实时读库的形状
+      auth: { authenticate: async (key) => (key === 'gk-ok' ? { ...GROUP, authorizedModels: authorized } : null) },
+    });
+
+    const before = await app.inject({
+      method: 'POST',
+      url: CHAT,
+      headers: { authorization: 'Bearer gk-ok' },
+      payload: chatPayload({ model: 'deepseek-chat' }),
+    });
+    assert.equal(before.statusCode, 403);
+
+    authorized = ['deepseek-chat'];
+    const after = await app.inject({
+      method: 'POST',
+      url: CHAT,
+      headers: { authorization: 'Bearer gk-ok' },
+      payload: chatPayload({ model: 'deepseek-chat' }),
+    });
+    assert.equal(after.statusCode, 200, '改授权后下一个请求就生效（实时读，ADR-0037 决策 1）');
+    assert.equal(seen.length, 1);
+    await app.close();
+  });
+
+  it('组被禁用优先于授权：禁用组打**已授权**的模型仍是 403 GROUP_DISABLED（门序不能换）', async () => {
+    const app = await buildApp({
+      auth: { authenticate: async (key) => (key === 'gk-ok' ? { ...GROUP, enabled: false, authorizedModels: ['gpt-4o'] } : null) },
+    });
+    const res = await app.inject({
+      method: 'POST',
+      url: CHAT,
+      headers: { authorization: 'Bearer gk-ok' },
+      payload: chatPayload({ model: 'gpt-4o' }),
+    });
+
+    assert.equal(res.statusCode, 403);
+    assert.equal(
+      (res.json() as { error: { code: string } }).error.code,
+      GATEWAY_ERROR_CODES.GROUP_DISABLED,
+      '组禁用是"这一组谁都不许调"，比"这个模型许不许"更外层 —— 报 GROUP_DISABLED 才是正确的排障方向',
+    );
     await app.close();
   });
 });

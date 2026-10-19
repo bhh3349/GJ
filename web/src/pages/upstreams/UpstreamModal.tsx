@@ -7,15 +7,17 @@
  *   也不显示任何上游凭据。
  *
  * §15.6 的「供应商」下拉（本期唯一动到本表单的地方）：
- * - `supplier` **可写**（`null` | `'tierflow'`，默认 `null`），且**建与改两条路径都要发** ——
+ * - `supplier` **可写**（`null` | 任一账号面 kind，默认 `null`），且**建与改两条路径都要发** ——
  *   只加在下拉上而漏进 body，会变成一个"选得动、不生效"的控件，比没有这个控件更难查。
- * - 表单值是 `'common' | 'tierflow'` 这个**展示枚举**，只在提交那一刻映射成 `null | 'tierflow'`。
+ * - 表单值是 `'common' | SupplierKind` 这个**展示枚举**，只在提交那一刻映射成 `null | kind`。
  *   不让 `null` 直接当控件值，是因为 antd 的 `Select` 把 `null` 与"没选"当同一件事。
  * - `PATCH` 的判据是 `!== undefined` 而不是真值判断 ⇒ **必须显式发 `null`** 才能降回通用；
  *   省略这个字段是"不改"。这两者必须分得开（§2）。
  * - 不解析 `baseUrl` 猜供应商（§15.6）：猜错会静默渲染出一个功能全 422 的分区。
  * - 降回通用**没有** `force`、没有 409（与退役出口的 `EGRESS_HAS_ACCOUNTS` 不同）：
  *   后端只改这一列、不级联删账号。所以这里用一条就地警告说清代价，而不是假装弹个确认框。
+ * - 下拉项与判定共用 `@/api/types` 的 `SUPPLIER_ACCOUNT_KINDS` / `SUPPLIER_LABELS`：
+ *   接入新供应商只在那里加一个值，这里自动多一项（选项表里再抄一份名单必然早晚抄漏）。
  */
 import {
   Alert,
@@ -34,11 +36,15 @@ import { useEffect, useState } from 'react';
 
 import { upstreamsApi } from '@/api/endpoints';
 import { useAction } from '@/api/hooks';
-import type {
-  BalanceQueryTemplate,
-  BalanceTestTemplate,
-  SupplierKind,
-  Upstream,
+import {
+  SUPPLIER_ACCOUNT_KINDS,
+  SUPPLIER_LABELS,
+  asSupplierKind,
+  supplierLabel,
+  type BalanceQueryTemplate,
+  type BalanceTestTemplate,
+  type SupplierKind,
+  type Upstream,
 } from '@/api/types';
 import { invalidateSupplierNav } from '@/router/supplierNav';
 import { tokens } from '@/theme/tokens';
@@ -47,11 +53,12 @@ import { BalanceSelfTest } from './BalanceSelfTest';
 const { Text } = Typography;
 
 /** 表单里的展示枚举。`'common'` 提交时映射为 `supplier: null`（§15.6 默认值）。 */
-type SupplierFormValue = 'common' | 'tierflow';
+type SupplierFormValue = 'common' | SupplierKind;
 
+/** 选项表由 kind 名单派生 —— 新增供应商时这里不需要动。 */
 const SUPPLIER_OPTIONS: { value: SupplierFormValue; label: string }[] = [
   { value: 'common', label: '通用' },
-  { value: 'tierflow', label: 'TierFlow' },
+  ...SUPPLIER_ACCOUNT_KINDS.map((kind) => ({ value: kind as SupplierFormValue, label: SUPPLIER_LABELS[kind] })),
 ];
 
 interface UpstreamFormValues {
@@ -106,9 +113,9 @@ function toFormValues(upstream: Upstream | null): Partial<UpstreamFormValues> {
   return {
     name: upstream.name,
     baseUrl: upstream.baseUrl,
-    // 判据只有一条：`supplier === 'tierflow'`（§15.12 锚 1）。不是 tierflow 就是通用，
-    // 包括 `null` 与将来可能出现的第二个供应商值 —— 落到「通用」比落到某个具体值是更诚实的缺省。
-    supplier: upstream.supplier === 'tierflow' ? 'tierflow' : 'common',
+    // 已知 kind 原样回填（哪一家就回哪一家），`null` / 无法识别的值落到「通用」——
+    // 后者比"假装它是某一家"更诚实，且提交时会把这一列写回 `null`（§15.12 锚 1）。
+    supplier: asSupplierKind(upstream.supplier) ?? 'common',
     enabled: upstream.enabled,
     queryEnabled: template.enabled,
     queryUrl: template.url,
@@ -210,7 +217,7 @@ export function UpstreamModal({ open, editing, onClose, onSaved }: UpstreamModal
     };
 
     // 展示枚举 → 契约取值。`null` 是**显式降回通用**，不是"没填"（§2 / §15.6）。
-    const supplierValue: SupplierKind | null = values.supplier === 'tierflow' ? 'tierflow' : null;
+    const supplierValue: SupplierKind | null = values.supplier === 'common' ? null : values.supplier;
 
     const result = editing
       ? await run(
@@ -303,9 +310,10 @@ export function UpstreamModal({ open, editing, onClose, onSaved }: UpstreamModal
           {/*
             降回通用：后端不拦（没有 409、也没有 `force`），只把这一列写成 NULL。
             所以代价必须在这里说清 —— 入口会消失，但账号数据还在；否则管理员会以为
-            这个动作要么被拒绝、要么连账号一起清了。
+            这个动作要么被拒绝、要么连账号一起清了。当前值取 `asSupplierKind`：
+            命中任一账号面 kind 都要警告（不只是 TierFlow），警告文案回显原本那家的名字。
           */}
-          {editing?.supplier === 'tierflow' && supplier !== 'tierflow' ? (
+          {asSupplierKind(editing?.supplier ?? null) !== null && supplier === 'common' ? (
             <Alert
               type="warning"
               showIcon
@@ -314,8 +322,8 @@ export function UpstreamModal({ open, editing, onClose, onSaved }: UpstreamModal
               description={
                 <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
                   这个动作只写这一个字段，不会级联删除账号
-                  {editing.accountCount > 0 ? `（当前名下有 ${editing.accountCount} 个账号，它们会保留）` : ''}
-                  ；但管理面上不再显示账号池入口，直到把「供应商」改回 TierFlow。
+                  {editing && editing.accountCount > 0 ? `（当前名下有 ${editing.accountCount} 个账号，它们会保留）` : ''}
+                  ；但管理面上不再显示账号池入口，直到把「供应商」改回 {supplierLabel(editing?.supplier)}。
                 </Text>
               }
             />

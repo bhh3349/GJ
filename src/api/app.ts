@@ -35,7 +35,9 @@ import { isWriteMethod, sessionCookieValue, verifyCsrf } from './http.js';
 import { registerAccessInfoRoutes } from './routes/access-info.js';
 import { registerAssistantRoutes } from './routes/assistant.js';
 import { registerAuthRoutes } from './routes/auth.js';
+import { registerConsoleRoutes } from './routes/console.js';
 import { registerGroupRoutes } from './routes/groups.js';
+import { registerUserRoutes } from './routes/users.js';
 import { registerKeyRoutes } from './routes/keys.js';
 import { createLiveHub, registerLiveRoutes, type LiveHub } from './routes/live.js';
 import { registerEgressRoutes } from './routes/egress.js';
@@ -47,9 +49,18 @@ import { registerSupplierAccountRoutes } from './routes/supplier-accounts.js';
 import { registerUpstreamRoutes } from './routes/upstreams.js';
 import { supplierOps, type SupplierOps, type SupplierSeams } from './services/supplier-accounts.js';
 
+/**
+ * 闸门写进 `req.auth` 的身份（`fastify` 模块增强里那个字段的类型别名）。
+ *
+ * 抽成导出类型而不是让各路由手写 `SessionInfo & { viaMachineToken: boolean }`：
+ * 手写的那份将来给 SessionInfo 加字段时**不会跟着报错**（结构化类型下交集是宽进宽出的），
+ * 于是新字段在某条路由里静默变成 unavailable。命名的别名只有一处定义。
+ */
+export type AuthInfo = SessionInfo & { viaMachineToken: boolean };
+
 declare module 'fastify' {
   interface FastifyRequest {
-    auth: (SessionInfo & { viaMachineToken: boolean }) | null;
+    auth: AuthInfo | null;
   }
   interface FastifyInstance {
     /**
@@ -117,6 +128,94 @@ export interface ApiContext {
 /** 唯一免鉴权路径（契约 §0.5）。用 method+path 精确匹配，不用前缀。 */
 function isPublic(method: string, path: string): boolean {
   return method === 'POST' && path === '/api/auth/login';
+}
+
+/**
+ * 消费面前缀（契约 §19.1 / ADR-0034）。
+ *
+ * **`role=user` 只能进这个前缀**，落在既有 `/api/**` 上一律 403 `FORBIDDEN`
+ * （唯一例外是下面 `inConsoleAccessInfoScope` 那一个精确路径）。
+ * 判据放闸门里而不是各路由里，与下面 `inReadonlyScope()` 是同一条纪律：
+ * 每条路由各自判一次的失败形状是**漏判** —— 加新路由时忘了判，那一条就全漏，
+ * 而它回的是上游 Base URL / 真实账号池这类不该给普通用户看的东西。
+ */
+const CONSOLE_PREFIX = '/api/console/';
+
+function inConsoleScope(path: string): boolean {
+  return path.startsWith(CONSOLE_PREFIX);
+}
+
+/**
+ * 消费面**唯一**放行的既有管理面端点（契约 §19.1 / §19.5，v1.15.1 / ADR-0034）。
+ *
+ * `GET /api/access-info`（§18）是 `publicHost` / `portGateway` / `portAdmin` 的**唯一来源**，
+ * 而 §19.5 那条 URL 公式要用的正是它们。不放行它，"普通用户在前端拿到接入 URL"这件事
+ * 在逻辑上办不到 —— v1.15.0 把 §19.1（不放行）与 §19.5（自己拼 URL）写在同一版里，
+ * 两条合起来是一个不可能满足的公式；本版按 ADR-0034「影响面」表的裁定订正。
+ *
+ * **为什么是精确匹配而不是"再开一个前缀"**：在 `/api/console/` 下新开一个
+ * `access-info` 就是两个端点回同一份值 = 两份口径，而两份口径将来一定漂移
+ * （ADR-0033 决策 2 同理由，这里禁的是第二个端点）。
+ *
+ * **为什么不扩大暴露面**：`hostGateway` / `hostAdmin` 是**绑定地址**（`0.0.0.0` /
+ * `127.0.0.1`），按 §18 纪律从不与端口拼接给用户；且它给的严格**少于**
+ * `/api/console/keys` 已经给出去的东西（那把 key 掩码）。既没有上游 Base URL、
+ * 没有账号池、没有审计日志，也没有任何密钥明文。
+ *
+ * 只放行这一个**字面路径**：写 `/api/access-info` 之外的任何东西都要新写一行 ——
+ * "顺手加个前缀"会让这条例外变成一扇门。
+ */
+const CONSOLE_ACCESS_INFO_PATH = '/api/access-info';
+
+function inConsoleAccessInfoScope(method: string, path: string): boolean {
+  // §18 的端点只有 GET。写方法落在它上面仍然 403 —— 那既是 §18 的形状
+  // （本资源无写路径），也让这条例外不会在某天被当成"放行了一个前缀"。
+  return method === 'GET' && path === CONSOLE_ACCESS_INFO_PATH;
+}
+
+/**
+ * 会话自身相关的三个端点（契约 §19.1 / §0.5，v1.15.5 / v1.15.9）。
+ *
+ * `GET /api/auth/session`、`POST /api/auth/logout`（v1.15.5）与
+ * `POST /api/auth/password`（v1.15.9）必须对 `role=user` 放行 ——
+ * 第一个不放行的后果不是"少一个功能"，是**普通用户完全登不进来**：
+ * `web/src/auth/AuthGate.tsx` 进受保护区域第一件事就是打 `/api/auth/session`，
+ * 它拿到 403 就渲染成"无法连接管理面"的全屏错态（403 不是 `UNAUTHORIZED`，
+ * 不会被派发成跳登录页），于是 `/console` 那几页、路由分流、`ConsoleLayout`
+ * 全部够不着。v1.15.4 交付用户管理页时实测才发现：那时建得出普通用户，
+ * 却没有任何一个普通用户能登进消费面。第三个（改密）同一条理由的另一半：
+ * 进得去、出得来，还得**换得掉口令** —— 消费面没有别的入口能做这件事。
+ *
+ * **为什么放行它们不扩大暴露面**：三个端点都只碰**调用者自己的那一行**。
+ * `session` 读 `req.auth`（闸门已经验过的那个会话）回 `{username, role, expiresAt}`，
+ * 不查库、不返回任何别人的数据；`logout` 按 cookie 里的 token 删会话，
+ * token 不在库里就什么都不做；`password` 验旧口令写自己那一行、
+ * 只删本账号的**其他**会话（`WHERE username = ? AND token_hash != ?`）。
+ * 三者都不碰上游 Base URL、账号池、key 掩码、审计日志。
+ * 而 `POST /api/auth/login` 早就在闸门的例外里（`isLoginRequest`）——
+ * 少了后面这三个，等于"能登进去、但一刷新就被踢出来、还退不出去、也换不掉口令"。
+ *
+ * **为什么是精确路径而不是"放行 /api/auth/ 前缀"**：那个前缀下只有这三个端点
+ * 与 `login`，但"顺手加个前缀"的写法意味着**将来往 /api/auth/ 加任何端点都自动
+ * 对普通用户可见**。新增的必须是显式新写一行 —— 与上面 `access-info` 同一条纪律。
+ *
+ * **这里曾经有一个 `CONSOLE_AUTH_PATHS` 常量**（三行集合，v1.15.5 起**全仓零引用**），
+ * v1.15.9 删掉。删它的理由不是"重复"：它长得像这份放行清单的**事实源**，而实际上
+ * 行不行全看下面函数里的 `if` —— 下一个加端点的人很可能往那个集合里补一行、
+ * 然后发现"改了没生效"（或者更糟：以为生效了，而实际压根没接线）。
+ * 一份没人读的清单比没有清单更坏。
+ */
+function inConsoleAuthScope(method: string, path: string): boolean {
+  // 方法也要判：`session` 只该是 GET、`logout` / `password` 只该是 POST。
+  // 只判路径的话，将来若给 session 挂一个写方法，它会跟着这道口子一起放行。
+  if (path === '/api/auth/session') return method === 'GET';
+  if (path === '/api/auth/logout') return method === 'POST';
+  // v1.15.9 / ADR-0038 决策 3：改自己的口令。**两种身份都要走它** ——
+  // 它改的是会话本人那一行，`role` 与"能不能改自己的密码"无关。
+  // 不放行的后果对 `role=user` 是"我永远改不了自己的密码"（改密在消费面是唯一入口），
+  // 对 `role=admin` 则毫无影响（他本来就在 `/api/**` 里面）。
+  if (path === '/api/auth/password') return method === 'POST';
+  return false;
 }
 
 /**
@@ -391,7 +490,15 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     if ((config.adminToken !== null || config.readonlyToken !== null) && typeof authz === 'string' && authz.startsWith('Bearer ')) {
       const presented = authz.slice('Bearer '.length).trim();
       if (presented !== '' && config.adminToken !== null && presented === config.adminToken) {
-        req.auth = { username: 'ci', expiresAt: new Date(Date.now() + 60_000).toISOString(), viaMachineToken: true };
+        // 机器令牌是管理面全权（CI 用），所以 role='admin'、groupId=null。
+        // 它走的不是"用户"这条路 —— 表里没有一个叫 'ci' 的 admin_users 行。
+        req.auth = {
+          username: 'ci',
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          role: 'admin',
+          groupId: null,
+          viaMachineToken: true,
+        };
         return;
       }
       if (presented !== '' && config.readonlyToken !== null && presented === config.readonlyToken) {
@@ -403,6 +510,8 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
         req.auth = {
           username: 'readonly',
           expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          role: 'admin',
+          groupId: null,
           viaMachineToken: true,
         };
         return;
@@ -411,6 +520,32 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
     }
 
     req.auth = { ...requireSession(db, sessionCookieValue(req), config.sessionTtlHours), viaMachineToken: false };
+
+    // 授面：`role=user` 只能进消费面前缀（契约 §19.1 / ADR-0034）。
+    //
+    // 为什么放在**这里**而不是各路由里：每条路由各自判一次的失败形状是漏判 ——
+    // 加新路由时忘了判，那一条就全漏，而它回的可能是上游 Base URL、真实账号池、
+    // 审计日志。放在闸门里，新增路由**不可能绕过**这条判定（与 `inReadonlyScope()`
+    // 对 READONLY_TOKEN 的做法同源）。
+    //
+    // 为什么是 403 而不是"把非消费面藏起来"：隐藏是前端的事，前端能被 DevTools 绕过。
+    // 一个普通用户 `fetch('/api/upstreams')` 必须拿到 403，而不是拿到数据后由 React 决定显不显示。
+    //
+    // 机器令牌腿不走这里：`ADMIN_TOKEN` 是管理面全权（CI 用），
+    // 而 `READONLY_TOKEN` 的作用域已经收窄在 `GET /api/observability/*` ——
+    // 两者都**不可能**变成"一个普通用户的凭据"，所以这里只看会话。
+    //
+    // 例外只有 §19.1 表里那两个：`GET /api/access-info`（v1.15.1，接入 URL 的唯一来源）
+    // 与会话自身的 `session` / `logout` / `password`（v1.15.5 / v1.15.9）。理由见 `inConsoleAccessInfoScope`
+    // 与 `inConsoleAuthScope` 的头注 —— 前者是公式的必要条件，后者是"登得进来"的必要条件。
+    if (
+      req.auth.role === 'user' &&
+      !inConsoleScope(path) &&
+      !inConsoleAccessInfoScope(req.method, path) &&
+      !inConsoleAuthScope(req.method, path)
+    ) {
+      throw new ApiError('FORBIDDEN', '当前账号只能访问消费面');
+    }
   });
 
   app.setErrorHandler((error: unknown, req: FastifyRequest, reply) => {
@@ -419,11 +554,29 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
       return;
     }
 
-    // Fastify 的错误类型在这里是 unknown（不是每个抛出物都是 Error）。
+    // Fastify 的类型在这里是 unknown（不是每个抛出物都是 Error）。
     // 先收窄成"可能带 statusCode/validation 的东西"，再决定回什么。
     const thrown = error as { statusCode?: unknown; validation?: unknown };
     const status = typeof thrown.statusCode === 'number' ? thrown.statusCode : 500;
-    if (status === 400 && thrown.validation !== undefined) {
+
+    // 400 一律收成 `INVALID_PARAM`，**不论带不带 `validation`**。
+    //
+    // 带 `validation` 的是 schema 校验失败（`FST_ERR_VALIDATION`），能指到具体字段；
+    // **不带**的是 body 解析失败 —— `FST_ERR_CTP_EMPTY_JSON_BODY`（声明了
+    // `content-type: application/json` 却发了空 body）与
+    // `FST_ERR_CTP_INVALID_JSON_BODY`（body 不是合法 JSON）。后者同样只有
+    // `statusCode: 400`，没有 `validation`。
+    //
+    // 原来的判据是 `status === 400 && validation !== undefined`，于是这两种解析失败
+    // 掉到下面的 500 分支：`DELETE` 带上一个空的 `content-type: application/json`
+    // 会回 `500 INTERNAL` —— 而那是个**完全正常的删除**。回 500 的代价不只是状态码
+    // 难看：它把"请求写错了"报成"服务端炸了"，排错的人先去翻服务端日志，
+    // 而那里只有一条 `Body cannot be empty when content-type is set to
+    // 'application/json'`，与客户端看到的那句对不上。
+    //
+    // §0.4 只有一枚 400 码（`INVALID_PARAM`），所以解析失败也归它 ——
+    // `validationField` 在拿不到 instancePath 时回 `body`，正好指到出错的那一段。
+    if (status === 400) {
       const field = validationField({ validation: thrown.validation });
       const body = new ApiError('INVALID_PARAM', `参数 ${field} 不合法`, { field }).toBody();
       void reply.code(400).send(body);
@@ -490,6 +643,10 @@ export function buildApp(opts: BuildAppOptions): FastifyInstance {
   });
 
   registerAuthRoutes(app, ctx);
+  // 顺序无关：console 与 users 的前缀都在闸门里判过（§19.1 / ADR-0034），
+  // 不存在"后注册的覆盖先注册的"这种 Fastify 路由冲突。
+  registerConsoleRoutes(app, ctx);
+  registerUserRoutes(app, ctx);
   registerEgressRoutes(app, ctx, opts.egressProbeFetch);
   registerUpstreamRoutes(app, ctx);
   registerKeyRoutes(app, ctx);

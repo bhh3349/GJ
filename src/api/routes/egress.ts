@@ -18,6 +18,7 @@ import type { ApiContext } from '../app.js';
 import { ApiError } from '../errors.js';
 import { auditWrite } from '../http.js';
 import { idParam } from '../schemas.js';
+import { EGRESS_ECHO_URL_DEFAULT } from '../../egress/port.js';
 
 const SSRF_BLOCKED_V4 = [
   ['0.0.0.0/8', 0, 0x000000ff],
@@ -135,8 +136,8 @@ function proxyUrlWithCredentials(base: string, credentials: string): string {
  *
  * 缺省**延迟**取全局 fetch：写成模块级常量会在 import 那一刻绑死，测试就换不掉了。
  * 线上不传 ⇒ 行为与直调 fetch 逐字节相同；spec 注入假件 ⇒ 用例零网络。
- * 没有这层缝，/test 的成功用例就得真打 api.ipify.org —— 沙箱/CI 里既不可复现，
- * 也违背"测试不发真实出站请求"的项目纪律。
+ * 没有这层缝，/test 的成功用例就得真打回显端点（缺省值见 `EGRESS_ECHO_URL_DEFAULT`，
+ * ADR-0033 起可配）—— 沙箱/CI 里既不可复现，也违背"测试不发真实出站请求"的项目纪律。
  */
 
 export type EgressProbeFetch = typeof fetch;
@@ -231,7 +232,10 @@ export function registerEgressRoutes(
         ? row.url
         : proxyUrlWithCredentials(row.url, decryptEgressProxySecret(blobRow.secret, config.masterKey));
       const { ProxyAgent } = await import('undici');
-      const res = await egressProbeFetch('https://api.ipify.org', {
+      // 回显端点：配置层给了就用配置的，否则回落端口层缺省（ADR-0033）。
+      // **两个消费者（本端点 + 心跳入口 B）必须用同一份字面量**，所以缺省不从本文件取 ——
+      // 见 `EGRESS_ECHO_URL_DEFAULT` 头注里"两个消费者配不同值"的那个失败形状。
+      const res = await egressProbeFetch(config.egressEchoUrl ?? EGRESS_ECHO_URL_DEFAULT, {
         dispatcher: new ProxyAgent(proxyUrl),
       } as unknown as RequestInit);
       const egressIp = (await res.text()).trim();

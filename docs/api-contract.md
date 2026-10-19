@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.13.0**　｜
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.16.4**　｜
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -32,11 +32,11 @@
 > ① **新端点**（§15.2 表 + §15.13）：`POST /api/supplier-accounts/rotate-key` body `{upstreamId, ids?, subNo?}` → `202 {taskId}`，任务类型 `supplier_rotate_key`，逐行结果复用 §15.3 的 `SupplierBatchResult`，**`action` 枚举新增第 6 个值 `rotate`**（被重登过的行报 `relogin`）。
 > ② **取回明文 → 入池**：重置响应**直接下发新 key 明文**，服务端当场 `aes-256-gcm` 写入 `upstream_keys`（`category='token-plan'`，走既有 `createKey` 路径），响应 / result **只回 `keyId` + `keyMasked`**，明文不经浏览器（与 §15.2 `keys` 同一条纪律）。
 > ③ **四步固定次序（纪律，不是实现细节）**：**(1) 先落库、后失效** —— 新 key 入库成功之后才禁用旧 key；**(2) `subNo` 省略 = 该账号最新到期的套餐**（与 §15.2 `GET /subscriptions` 的 `end_at` 排序同源）；**(3) 旧 key 只在掩码「精确相等且唯一」时被认领并禁用**，撞号 / 认领不到一律不动任何 key（§15.2 `KEY_MASK_AMBIGUOUS` 同一条取向：宁可留一把已失效的旧 key，也不误禁别人的 key）；**(4) 重置不改变账号 `status`**（§15.1 `status` 是"最近一次查询"的结论，重置不是查询；失败只写 `statusMessage`）。
-> ④ **`token_plan_remaining` 落 `NULL`**（不猜一个 0）：余量由后续 `keys/sync` / 余额刷新回填。**`unlimited` 不适用**（`token-plan` 行不落 `unlimited`，§15.7）。
+> ④ **`token_plan_remaining` 落 `NULL`**（不猜一个 0）：余量由后续 `keys/sync` / 余额刷新回填（**该"后续"已于 v1.13.1 落地**，见文末 v1.13.1 条）。**`unlimited` 不适用**（`token-plan` 行不落 `unlimited`，§15.7）。
 > ⑤ **`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增**：`SUBSCRIPTION_NOT_FOUND` 与 `KEY_PLAINTEXT_MISSING` 是**逐行 `items[].code`**（§15.4 同一条：不进口径码表）；新增审计动作 `supplier.rotate-key`（`detail` 只放计数）。
 > ⑥ **`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2、零 DDL**（本面第一把 `token-plan` key 是**新数据行**，不是新列）；`src/gateway/` **零改动**（网关按 `category` + `balance_cents` 选路，`unlimited=0` + `balance_cents IS NULL` 走既有「未知 ≠ 0、仍可用」分支）。
 > ⑦ **同步订正 §15.8 第 8 问**：原文"若将来…实测确认…"的前提已满足，指针改指本节 §15.13；**"套餐剩余不进 `totalBalance` / 不进 §14 快照 / 不进网关准入判断"三条零改动**（重置进池的是**套餐专属 key 凭据**，用的仍是套餐自己的额度池）。
-> ⑧ 已知边界（写在这里，不留待发现）：**上游明文在结果面不可取回**（重置只此一次）——所以"先落库、后失效"是硬次序；池内**旧 key 不删台账行**（保留对账历史）；全新 key 未与本地上游记录对账前，`token_plan_remaining` 为 `NULL`，网关按"未知"处理。动机与影响见 **ADR-0022**。
+> ⑧ 已知边界（写在这里，不留待发现）：**上游明文在结果面不可取回**（重置只此一次）——所以"先落库、后失效"是硬次序；池内**旧 key 不删台账行**（保留对账历史）；全新 key 未与本地上游记录对账前，`token_plan_remaining` 为 `NULL`，网关按"未知"处理（**v1.13.2 起"未知"的语义 = 排在所有余额 key 之前、任何真实有额的套餐 key 之后**，见 v1.13.2 ① / ADR-0030 决策 1）。动机与影响见 **ADR-0022**。
 > **v1.10.0（2026-10-13，助手聊天支持按请求选择站内模型 —— Bo 要求落地）**：**§13.1 请求体新增可选字段 `model`**（string）。动机见 **ADR-0023**。
 > ① **缺省 / 空串 = 用装配侧 `ASSISTANT_MODEL`**：**零行为变更** —— 老前端 / 老脚本完全不发这个字段时，行为与 v1.9.0 逐字节相同。
 > ② **校验口径 = 站内已启用模型集合**：与 §5 `GET /api/models?enabled=true`、`/v1/models` **同一判据**（`models.enabled = 1` **且**其上游 `upstreams.enabled = 1`）。
@@ -102,6 +102,85 @@
 > ① **协议面成文（§16.7.2）**：出口**只支持 HTTP(S)（CONNECT 隧道）**。`normalizeEgressUrl` 只收 `http:` / `https:`，**`socks5://` / `socks4://` 等非 HTTP(S) 协议在创建 / 保存那一刻即被入口拒下**：`400 INVALID_PARAM`（`details.field = 'url'`）。**不存在「静默直连」** —— 被拒 = 行没落库 = 没有出口可用，而**不是**「忽略协议、改从宿主 IP 出站」（同 ADR-0021 决策 9(5) 「不得静默回落」的取向）。理由是可实现性：`undici` 的 `ProxyAgent` **不支持 SOCKS**，换 fetch 栈与「stream 透传不缓冲」的既有实现冲突（onboarding §1.1）。
 > ② **判据落地**：新增一条入口阻断用例（`src/api/routes/egress.spec.ts`）：`POST /api/egress {url: "socks5://…"}` → `400 INVALID_PARAM`（`details.field='url'`）**且零行落库** —— 把「协议面」从「实现里写了」变成「闸上有判据」（同批删除面板那句说反话的警示条文案，`29e7479`）。
 > ③ **零行为面变更**：`/api/*` / `/v1/*` 既有响应零字节变更（`normalizeEgressUrl` 判据一字未改，本版只补文档与用例）；`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增；`SCHEMA_VERSION` 仍为 2、零 DDL、零迁移；`src/gateway/` 零改动。
+>
+> **v1.13.2（2026-10-16，套餐 key 优先于余额 key —— ADR-0011 排序键 2 追认 + ADR-0022 §4 的"回填"腿落地）**：动机是用户需求原文「先处理套餐 key 比较合理毕竟套餐 key 只有 30 天有效期」。落笔依据见 **`docs/adr/0030-plan-key-before-balance-key.md`**。
+> ① **排序口径变更（`src/gateway/key-pool.ts`，1 个常量）**：`remainingQuotaOf` 对「套餐余量未知」（`token_plan_remaining IS NULL`）的哨兵值 **`-1 → 1`**。取 `1` 是唯一同时满足两个约束的值：**`> 0`** ⇒ 压过 balance 类的常量 0（余额 key 整类沉到套餐 key 之后）；**`≤ 任何可用套餐 key 的真实余量`** ⇒ `isUsable` 已排除余量 0 的套餐 key，"可用"的已知余量最小就是 1，未知值不会盖过任何一把真实有额的套餐 key。**`/v1/*` 响应零字节变更、无新错误码** —— 变的只是 `getAvailableKeys` 返回列表的**内部顺序**（§"返回顺序即优先级"本就是 ADR-0011 立的规矩）。
+> ② **回填腿（ADR-0022 §4 / v1.9.0 ④ 承诺的"后续"首次落地）**：`GET /subscriptions` 每轮同步拿到的 `basic_token_total` / `basic_token_used` / `end_time`，回写到该账号**已入池的套餐 key**（`token-plan`）的 `token_plan_remaining` / `token_plan_expires_at`。三条取值纪律：**单位是 Token 个数**（`basic_*` 与 `amount_*` 是两套池，前者**绝不**过 `quotaToCents`）；**`basic_token_total` 取不到 ⇒ 整行跳过**（`null` = 上游没说，写 0 会让那把 key 被静默排除出选路）—— **v1.14.0 起同款纪律扩到 `basic_token_used`**（原实现对它 `?? 0`，是替上游下一个它没下过的结论，见本文件 v1.14.0 ⑤ / ADR-0031 决策 5）；**余量可递减** ⇒ 不复用 `applyTemplateTokenPlan`（`COALESCE` 写不进更小的数）。掩码撞号 / 认领不到 ⇒ 一行不动（同 §15.2 `KEY_MASK_AMBIGUOUS` 取向）。
+> ③ **广播**：每把被回填的 key 在同一事务里各发一条 `entity='balance'` 的 `change_log`（该实体在 `SNAPSHOT_ENTITIES` 内 ⇒ 网关下次 `refresh()` 重建快照，配额列即刻生效）。
+> ④ **`/v1/*` 与 `src/gateway/` 零改动**：准入过滤（`isUsable` 的 `balanceCents === null || > 0` / 套餐到期 / 余量 ≠ 0）**一字未动**，"未知 ≠ 不可用"完整保留 —— 本版只改"未知排在谁前面"。`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` **零新增**；`SCHEMA_VERSION` 仍为 2、**零 DDL、零迁移**（回填写的是既有列）。
+> ⑤ **已知边界（不粉饰，写在这里不留待发现）**：套餐 key 只服务部分模型（实测 `TierSense` 回 **404**），而 404 按 §10 属"客户端错、原样透传、不换 key" ⇒ 套餐 key 排前之后，套餐不支持的模型可能直接拿到那个 404。**这不是 v1.13.2 引入的新风险**（套餐 key 有已知余量时 ADR-0011 时代它已排在前面）；修法要动 `classify.ts` 的 404 口径或给 rotate 写 `model_limits`，属独立契约决策，留待后续 ADR。
+>
+> **v1.14.0（2026-10-16，站点换算比不再写死 —— `createToken` 走上游真值；附一处回填文档漂移订正）**：动机是契约 §15.1 自己的那一句「换算基准 `quota_per_unit` 每次查询时从上游读、不写死 —— 供应商改了换算比，我们的数不会跟着错」，而**写侧只剩一处例外、且恰好是"花钱"的那一处**：`createToken` 建固定额度 key 时把 `quotaCents`（分）换算成上游的 `remain_quota` 用的是写死的 `DEFAULT_QUOTA_PER_UNIT`（500000）。落笔依据见 **`docs/adr/0031-quota-per-unit-from-upstream.md`**。
+> ① **换算比由调用方给**：`createToken` 入参新增**可选** `quotaPerUnit`（站点自己的 `/api/user/self → data.quota_per_unit`），实现里 `?? DEFAULT_QUOTA_PER_UNIT`。**可选**是因为 `unlimited:true` 时上游根本不看这个数（body 里没有 `remain_quota` 可错），必填会逼调用方为一个不会被读的字段找值。
+> ② **`supplier_accounts` 加两列纯缓存**：`quota_per_unit` INTEGER NULL / `quota_read_at` TEXT NULL，**均可空、无默认、不进 `SupplierAccount` DTO**。`NULL` = **从没读到过**（不是 500000 —— 给默认值会让"没读过"伪装成"读过 500000"，`quota_read_at IS NULL` 这条判据就失效）。写入由**四条已经在打 `/api/user/self` 的腿**顺手完成：登录探活 / 余额刷新 / 自测 / `keys/sync`，**零新增上游请求**。只在**真读到**时写（同 §14.2 `balance_updated_at` 的纪律：查失败一个字都不写，否则把上一次真值抹成"没读到"）。
+> ③ **建 key 时不为拿比值多发一次请求**：取值是 `cred.quotaPerUnit ?? undefined`（**从库里读**）。§15.5「单账号请求数：建 key = 2」那行**逐字不变** —— 加一发 `/api/user/self` 就是 3 次，那是破坏一条已发布的契约行。判据用例钉的是 **`count('/api/user/self')` 在建 key 前后不变**，不是"请求数等于 2"。代价说清楚：库里的比值**可能过期**，本版选「一个可能过期的真值」对「一个永远错的常量」—— 站点不改比值时前者**永远正确**，站点一改错到下次刷新为止；后者站点一改就**立刻错**。
+> ④ **§15.13 rotate 腿的第二处写死同批修**：`mapSubscriptions(..., DEFAULT_QUOTA_PER_UNIT)` → `cred.quotaPerUnit ?? DEFAULT_QUOTA_PER_UNIT`。rotate 是**单请求**动作，只读缓存、不刷新缓存（刷新账号级缓存是下一轮 `refresh` 的职权）。
+> ⑤ **回填文档漂移订正（零代码契约含义变化，实现对齐 ADR-0030 决策 2 的原文）**：`backfillSubscriptionTokenPlan` 原对 `basic_token_used` 用 `?? 0`，与 ADR-0030 只写的「`basic_token_total` 取不到 ⇒ 整行跳过」不一致。订正为**两格任一未知 ⇒ 整行跳过**，`token_plan_remaining` 保持 `NULL`。`?? 0` 的语义是替上游下一个它没下过的结论（"这个套餐一点没用过"），而这一减产出**具体的数**（= 全额），它会以"我们查过了"的面目进网关选路键 2、进 `balance_updated_at`、进前端。**代价不是这把 key 被踢出选路**：`remainingQuotaOf` 对 `NULL` 回 `UNKNOWN_PLAN_QUOTA`（= 1），`1 !== 0` ⇒ 仍可用、`1 > 0` ⇒ 仍排在余额 key 前，只是落在"未知"档不参与精确排序 —— **宁可排序粗一格，也不要编一个余量**。
+> ⑥ **影响面清单**：`/api/*` 响应**零字节变更**（两列不进 DTO）；`/v1/*` **零变更**、`src/gateway/` **零改动**（本版不碰选路）；`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` **零新增**（没有任何新的失败形态 —— 只是让一条既有路径取对值）；上游请求数**零增加**；审计动作**零新增**（记比值是缓存维护，不是管理动作）。**DDL：两列纯加列，`SCHEMA_VERSION` 仍为 2、零迁移脚本。**
+>
+> **v1.14.1（2026-10-16，五张表的保留策略 —— 从"表只会长"到"每张表都有人扫"）**：动机是清完一遍 prune 调用方之后剩下的形状 —— 五个 prune 函数里**两个有实现、零生产调用方**（`pruneGatewayErrorEvents` / `pruneChanges`，前者连 spec 都有、生产里从不运行），`audit_log` / `tasks` 连函数都没有。一个"存在但没人调用"的清理函数比"没有这个函数"更坏：它让"这张表有保留期"看起来**已实现**。落笔依据见 **`docs/adr/0032-table-retention-policy.md`**。
+> ① **新增 `pruneAudit`（`audit_log`）+ 独立保留期 `AUDIT_RETENTION_DAYS`（默认 180 天）**：**不并进 `LOG_RETENTION_DAYS`** —— 两张表回答的问题不同，`usage_logs` 是"跑过多少流量"、`audit_log` 是"**谁在什么时候改过什么**"，安全事件的追溯期本就长于用量明细的有用期。**仍然没有 delete 函数**：`pruneAudit` 按**时间窗**删，不认 id / actor / action —— 逐行删审计的能力是"谁能抹掉自己的痕迹"的入口，那个口子不开。
+> ② **新增 `pruneTasks`（`tasks`）+ `TASK_RETENTION_DAYS`（默认 7 天）**：只删**已终态**且 `finished_at < cutoff` 的行。`finished_at IS NOT NULL` 这条谓词**单独写出来，即使删掉它现在也恰好安全**（SQL 里 `NULL < cutoff` 恒为假，2026-10-16 变异验证确认删掉谓词用例**不红**）；它真正拦的是 `COALESCE(finished_at, started_at)` 那次"嫌 NULL 比较别扭"的改写（换成它用例**立刻红**）—— 那一版会让在跑的任务按开始时间被裁掉，`getTask` 开始给轮询的前端回 404。删除后**无级联**（`tasks` 没有子表，已删 id 回 404 是正确语义）。
+> ③ **`change_log` 按行数裁（`CHANGE_LOG_KEEP_ROWS`，默认 10000），不按天数**：它是**广播信道**不是历史，判据是"消费者的 `seq` 追到哪了"。安全性论证在 `src/db/repo/change-log.ts` 头注（消费者 `drainChanges` 每拍把 `lastSeq` 推到读到的最后一条、1s 节拍、一个节拍上界几十条 ⇒ `keep = 10_000` 余量约两个数量级），两个前提（消费者进程活着 / `keep` 不小于一次暂停的累积量）写进注释而不是藏在数字里 —— 所以它**必须是配置**。
+> ④ **`gateway_error_events` 按契约原样接上，不新配旋钮**：`pruneGatewayErrorEvents` 保留期取 `LOG_RETENTION_DAYS` —— §12.1 第 1488 行「保留期与 `usage_logs` 同口径（`LOG_RETENTION_DAYS`，默认 30 天）」是**已发布的契约行**，本版做的是把实现补齐到与契约一致，不是顺手改掉它。真要提高错误事件保留期，走契约修订。
+> ⑤ **五张表挂同一个 6h 定时器，另两张留在原地**：`pruneAudit` / `pruneTasks` / `pruneGatewayErrorEvents` / `pruneChanges` 四条同挂 `6 * HOUR_MS`、逐条 try/catch（清垃圾失败不该带走整台服务）。**不为它们各起一个定时器** —— 多三个定时器就多三条可能在关停时漏清的尾巴。`gateway_health_snapshots` / `balance_snapshots` **不并进来**：它们的写入方已有自己的定时器，再挂一个全局清理器就成了"同一个表两个节拍"，两边保留期一旦配得不一样，谁先跑谁后跑决定库的大小。
+> ⑥ **影响面清单**：`/api/*` 响应**零变更**（保留策略不碰任何 DTO、不改任何查询口径）；`/v1/*` **零变更**、`src/gateway/` **零改动**；**DDL 零**（`SCHEMA_VERSION` 仍为 2、零迁移脚本 —— 删行不需要动表结构）；`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` **零新增**；审计动作**零新增**（裁剪是维护动作，给它记一条审计会自我抵消）；三个新旋钮**全部有默认值，缺省行为 = 本版口径**。判据 `src/db/repo/retention.spec.ts`（16 条，全部经变异验证）。
+>
+> **v1.14.2（2026-10-16，出口探活端点可配 —— 一个会静默骗人的故障形状）**：动机不是"多一个开关"，是 `api.ipify.org` 从网关所在网络不可达时**回显端点会主动骗人**：`/api/egress/:id/test` 对一台完全健康的代理回 `ok=false`，并把那个 false 写进 `egress_proxies.last_test_ok` —— 面板上唯一那个"我的出口通不通"的信号在最坏情况下恒假，照着它删代理的人删掉的是能用的机器。心跳生产者入口 B 同源且更隐蔽：端点不可达 = 每拍一条失败证据，累计到 `HEARTBEAT_EVICT_AFTER_FAILURES`(3) 就把好节点**静默摘除**（无报错，只是可用出口少一个）。落笔依据见 **`docs/adr/0033-egress-echo-url-configurable.md`**。
+> ① **新增 `EGRESS_ECHO_URL`**（空 / 未设 = 用缺省值）：取值只做 trim、**不做 URL 语法校验** —— 一个连不上的端点就是一次失败的探测，那正是探测的职责；而"拒绝启动"会让填错别名的用户在启动阶段看到一句与网络无关的报错。
+> ② **缺省值只有一份字面量** —— `EGRESS_ECHO_URL_DEFAULT`（`src/egress/port.ts`），两个消费者（`/test` 与心跳入口 B）都从那里取。两处各写一遍的失败形状**不是**"以后要改两个地方"，而是两个消费者可以配不同的值而毫无症状：面板说这台通（打新端点）、心跳说这台死了（还打旧的），两边日志还都写着"探测正常" —— 用户看到的是"同一条数据两个互相矛盾的真相"。
+> ③ **缺省值不变**：本版**不**把缺省换成国内可达的目标。换缺省会静默改变所有现存部署的探测语义（含那些"我测过、面板显示通"的记录），而那件事该由部署者显式做。
+> ④ **影响面清单**：`/api/*` 响应**零字节变更**（同一个端点、同一个字段，只是它去打的那条 URL 变成可配）；`/v1/*` **零变更**、`src/gateway/` **零改动**；**DDL 零**（`SCHEMA_VERSION` 仍为 2、零迁移）；`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` **零新增**；审计动作**零新增**（探活是诊断不是管理动作，这条 v1.7.1 起就没变）。判据：`src/egress/heartbeat.spec.ts`（缺省走缺省 / 配了走配的 / 字面量唯一性三条）+ `src/api/routes/egress.spec.ts`（同形两条，断言打进假件的 URL）+ `src/config.spec.ts`（空串 = null），**全部经变异验证**。
+>
+> **v1.16.4（2026-10-18，Cookie 粘贴进管理面 —— 业主显式接受"自用项目，值过一次 HTTP"）**：**动机是 Bo 的两句话**：「我感觉好麻烦，还是直接做到web吧，我这个人自用项目不会泄露的」与「不是上传文件，只是粘贴cookie到输入框」。v1.16.3 的 cookie-only 导入仍要求回终端跑脚本（30 个号 = 30 次命令），本版把同一条解析链接到管理面：① **新增端点** `POST /api/supplier-accounts/import-sessions`（body `{upstreamId,text}` → `202 {taskId}`，任务类型 `supplier_import_sessions`），`text` 每行一枚会话；**仅 TokenRhythm**，TierFlow 入口 `422`（它有密码通路，没有理由把会话值送进浏览器）。② 服务端直接复用 `importSupplierSessionCookies`（v1.16.3 的逐行解析 / `GET /api/me` 身份解析 / uid 判重 / 加密落库**一行未复制**），逐行结果复用 §15.3 `SupplierBatchResult`；**`action` 枚举新增第 7 个值 `import`**（只登记会话，没有发生登录）。解析失败行 `LINE_PARSE_FAILED` 归 `skipped`；401 `SESSION_EXPIRED`、连不上 `UPSTREAM_UNREACHABLE` 归 `failed`；403 仍**不**映射成会话过期（ADR-0040 钉子）。③ **入口闸在任务创建前**：非 TR 上游 / 排除名单非空 → `422 UNPROCESSABLE`；空文本、只有表头注释 → `400 INVALID_PARAM`。④ **纪律的显式例外**：§15.9 纪律 1「不进 HTTP 面」从此有且只有这一条例外，理由是业主对"粘贴值经过浏览器与代理"的明确风险接受；值**不写日志、不进审计 detail、不回显**（响应 / 任务 result / 错误 message 只有掩码），落库即密文，前端提交后立刻 `resetFields()`、不写本地存储。⑤ **前端**：`SupplierCapabilities` 增 `sessionImport` 位（TierFlow `false` / TR `true`），「导入账号」按钮对 TR 改为**可用**的「导入 Cookie」，弹窗按能力位切换成 cookie 粘帖框（不新增第二个弹窗）。**影响面**：`/api/*` **新增 1 个端点**（其余零变更）；`/v1/*`、`src/gateway/` **零改动**；**DDL 零**（`SCHEMA_VERSION` 仍为 2）；`ERROR_CODES` **零新增**（422/400 复用既有码）；审计动作**零新增**（复用 `supplier.import`，detail 只有计数）；`web/` **零新依赖**。**判据**：新增 **5 条**路由用例（成功落库与不回显 / 重复行 skipped + 过期行 failed / TierFlow 422 / 排除名单 422 / 空文本 400），全量套件 **1127 passed**（node22）；后端 `tsc` rc=0；`web/` `tsc --noEmit` rc=0。详见 §15.2 / §15.3 / §15.9 / §15.14 与 ADR-0040 决策 8。
+
+> **v1.16.3（2026-10-18，cookie-only 导入 —— 没有手机号/邮箱也能把会话批量入池）**：**动机是 Bo 的一句实情**：「我只能提供cookie」。v1.16.2 的批量文件仍要求每行带标识，而 TokenRhythm 操作员手上常常只有会话 —— 标识这一栏对他们不可填。本版补的**不是新入口，是同一离线脚本的第二种输入形态**：① `SUPPLIER_SESSION_COOKIE_ONLY=1` + `SUPPLIER_SESSION_BATCH_FILE`（每行一枚会话，`tr_session=…; Path=/` 或裸 value 均可；`Cookie:` 前缀也容忍）。② 新增 `src/supplier/session-resolve.ts`：用会话发**一次** `GET /api/me`，取 `data.id`（UUID）/ `data.name` / `data.phoneMasked`（无则 `emailMasked`）；401 = 会话失效，403 = 上游拒绝**不**当会话过期（ADR-0040 钉子）；上游若回未掩码值，本地再掩，掩不出即拒绝该行。③ 新增 `src/supplier/session-import-cookie.ts`：逐行解析 + 解析身份 + 落库；**单行失败不中断整批**，输出只有行号 / 掩码 / 原因。④ 判重键改为**上游 uid**：`identifier_hash = sha256('tokenrhythm:uid:<id>')`；既有行按 `uid → 掩码 → 摘要` 顺序命中，所以"先按真值导入、后按 cookie 重导"仍汇入同一行（`importResolvedSupplierSession` 只覆写会话与权威信息，不改既有行的展示掩码/摘要）。**排除名单非空时该模式整体拒绝**（名单按真值匹配，只有掩码无法验证；静默放行等于把硬约束变成建议）。**与标识+会话模式的唯一区别是每行 1 次 GET**；四条纪律（不进 HTTP 面 / 不经 Agent 与本仓 / 入库即作废 / 只服务管理面）逐条不变，值仍只从本机文件读、仍只打印掩码、前端仍无会话输入控件。**影响面**：`/api/*` **零新增、零删除端点**；`/v1/*`、`src/gateway/` **零改动**；**DDL 零**（`SCHEMA_VERSION` 仍为 2）；`ERROR_CODES` **零新增**；审计动作**零新增**。**判据**：新增 **18 条**离线用例（`session-resolve.spec.ts` 8 条 + `session-import-cookie.spec.ts` 10 条），全量套件 **1122 passed**（node22）；typecheck rc=0。详见 §15.9 / §15.14.2 与 ADR-0040 决策 6。
+>
+> **v1.16.2（2026-10-18，离线会话导入支持批量文件 —— 入池通路不变，省掉"每号跑一次脚本"）**：**动机**是 Bo 在看到「导入账号」对 TokenRhythm 置灰后的追问：「如果不能导入，那我怎么批量添加cookie然后添加账号呢」。v1.16.1 把 TR 的**唯一**入池通路定死为 §15.9 的离线一次性会话导入，但脚本一次只读一个 `SUPPLIER_IDENTIFIER` + 一个会话 —— 27 个号就是 27 次命令，实操上会把人推回"找个 HTTP 入口吧"的错误方向。本版把同一件事做成循环，**不开任何 HTTP 入口**：① 新增 `src/supplier/session-import-batch.ts` —— `parseSessionBatchText()`（每行 `标识<分隔符>会话`，分隔符 TAB / 逗号 / 空白，空行与 `#` 注释跳过，首行可带 `identifier,session` / `账号,cookie` 表头；**会话一侧可整段粘贴 `tr_session=…; Path=/`，只取 value**；同一账号出现两次保留第一行并报一行）+ `importSupplierSessionBatch()`（逐行调用既有的 `importSupplierSession`，**单行失败不中断整批**，报告只含行号 / 掩码 / 原因）。② `scripts/import-supplier-session.ts` 新增 `SUPPLIER_SESSION_BATCH_FILE`（`-` = 从 stdin 读），单账号模式保持原样；退出码 0 = 全部成功、1 = 至少一行失败 / 未解析、2 = 配置缺失。**纪律一条不改**：值只从运行时环境变量或本机文件读，输出只有掩码，失败信息不回显会话值或标识原文，**前端仍然没有任何会话值输入控件**（只把按钮 tooltip 改成提示可批量）。**影响面**：`/api/*` **零新增、零删除端点**；`/v1/*`、`src/gateway/` **零改动**；**DDL 零**（`SCHEMA_VERSION` 仍为 2）；`ERROR_CODES` **零新增**；审计动作**零新增**；新增模块与脚本是离线工具，不进请求链路。**判据**：`src/supplier/session-import-batch.spec.ts` **7 条**（三种分隔 / 表头 / Cookie 清洗 / 重复行 / 逐行报错不回显 / 批量落库与覆写 / 排除名单），全量套件 **1104 passed**（node22），明文扫描 PASS（364 文件 / 0 命中）；并在一份**测试库副本**上跑通真实脚本（3 新建、2 行跳过、退出码 1；库内无明文会话，临时文件已 shred）。详见 §15.9 与 ADR-0040 决策 6。
+>
+> **v1.16.1（2026-10-18，TokenRhythm 的登录形状订正 —— "端点存在"不等于"密码登录可用"）**：**动机是 Bo 的直接纠正**：「这个只能是 cookie 登录啊……还有创建 key 功能呢批量创建。你能不能好好看看接口文档」。v1.16.0 把「`POST /api/auth/login` 能发通、能拿到 400/401」误读成「这家支持账号密码登录」，于是在驱动器里实现了一条 `login()`，并据此把 HTTP `import` / `:id/login` 写成"登录 + 刷新"。**复核结论**：该端点**从不校验密码** —— 无论 `{account,password}` 取什么值都回 401 `UNAUTHORIZED`（与过期会话同码同文案），12 轮探针里**没有一次成功登录**；站点文档也从"已持有 `tr_session`"开始，真实登录是验证码 / `login-or-register` 流程，网关不应代跑。**订正三处**：① **驱动器 `login()` 改为零请求的能力缺口**，直接回 `rejected`（消息只说明"只有会话鉴权"，不回显标识 / 密码）；`callWithRelogin` 因此对 TR **永不发重登请求**（无密码 → 直接 `session_expired`；即便库里有历史密码，`login()` 也是零请求拒绝）。② **`POST /api/supplier-accounts/import` 与 `POST /:id/login` 对 TR 在入口 422**（`UNPROCESSABLE`）—— 不解析文本、不发上游请求、不写库；入口判据集中在一张 `SUPPLIER_PASSWORD_LOGIN` 能力表，不散落 `if (supplier === …)`。③ **新增 §15.9 的离线一次性会话导入落地件**：`src/supplier/session-import.ts`（归一化 → 掩码 / 摘要 → 排除名单 → 建行或按 `(upstreamId, identifierHash)` 覆写 `encrypted_session`；**零上游请求**；绝不回显会话值；落 `status="unknown"` 等 `refresh` 验活）+ `scripts/import-supplier-session.ts`（操作员本机、值只从运行时环境变量或本机文件读、只打印掩码）。**批量建 key 的代码未变**：`POST /api/supplier-accounts/keys` → `createKeysForAccount` → `client.createToken`，TR 仍是 1 次上游请求 `{name}` + CSRF 双提交；本轮把"TR 能建 key"从**代码存在**变成**可验收**（有会话账号即可跑通）。**契约同步**：§15.9 加 TR 例外（`credentialSource` 恒 `session`，无补录密码升级路径）、§15.2 `import` 加入口 422、§15.14.1 能力表新增「账号密码登录」行、§15.14.2 事实 1 与三条硬纪律重写、§15.14.3 的 `import` 预算改为 **0**。**影响面**：`/api/*` **零新增、零删除端点**；`/v1/*`、`src/gateway/` **零改动**；**DDL 零**；`ERROR_CODES` **零新增**（422 复用 `UNPROCESSABLE`）；审计动作**零新增**；**前端** `SUPPLIER_CAPABILITIES` 新增 `passwordLogin` 位（TR = `false` ⇒ 「导入账号」按钮禁用并提示走离线导入 —— 镜像服务端入口 422，不画点了必然失败的按钮；**不新增任何会话值输入控件**）。**判据**：离线用例新增 6 条（`session-import.spec.ts`），TR 驱动器与路由用例改为会话语义后全量 **1097 passed**（node22）；typecheck rc=0；明文扫描 PASS（362 文件 / 0 命中）；`web/` `tsc --noEmit` 0 错 + `vite build` ✓。**LAN 实例实测**（真会话，只走离线导入）：导入落库 → `refresh` 转 `active`（余额 2366 分）→ `keys` 批量建 key 成功（1/1，`****D6MI`，`unlimited=1`、`balance_cents/model_limits=NULL`）→ `import` / `:id/login` 均回 422。详见 ADR-0040 的 v1.16.1 订正段。
+>
+> **v1.16.0（2026-10-18，第二家账号面供应商 TokenRhythm —— ADR-0018 决策 0「以后要接第二家，是加一个驱动器」的兑现）**：**动机**是 Bo 给出第二家的接口文档并指令实现批量化：「让你添加第二个特殊供应商 tokenrhythm，让你实现它的批量化……两个供应商的接口不一样。tokenrhythm 的接口需要你自己实测，然后再决定怎么加」。**先实测后设计**：12 轮现场探针钉死四条与文档不符的事实（① 文档**整篇没有登录端点**（**v1.16.1 订正**：`POST /api/auth/login` 端点存在，但**从不认证密码** —— 任何输入一律 401，不能作为登录通路；见下）；② 文档说 CSRF 要「`Origin` + `Referer` + `Sec-Fetch-Site` 三件套」，**实测硬性只有 `Sec-Fetch-Site: same-origin`**，单变量 A/B 钉死；③ 文档说 CSRF token「每次请求后立即失效」，实测**轮换但非一次性**；④ 文档**没有余额接口**，实测 `GET /api/wallet/summary` → `availableBalanceCny` 8 位小数 CNY 字符串），全文见 **§15.14.2** 与 ADR-0040。**结构上实现同一个 `TierFlowClient` 协议**（`src/supplier/tokenrhythm.ts`）—— 六个批量端点（`import` / `refresh` / `:id/login` / `:id/test` / `keys` / `keys/sync`）连同被动重登、账号级节奏、逐行累加那一整套机制**一行不改**，`clientFor()` 按 `upstreams.supplier` 选驱动器。**两家真正的差异不是字段名，是能力集**：TokenRhythm **没有**套餐（订阅腿零请求回 `[]`）、**没有** key 额度（`unlimited` / `quotaCents`）、**没有**模型白名单、**没有** `quota_per_unit`（落常量 `100`，只为"分"口径自洽，建 key 不消费它）。差异表达为**两张具名能力闸**而不是散落的 `if (supplier === 'tokenrhythm')`（§15.14.1）：`keys` 拒收 `unlimited:false` / 非空 `models`、`rotate-key` 对无套餐供应商整体 `422`，**默认路径零闸**（`parseKeySpec` 的默认值恰是 TR 唯一合法形状）；前端是同一份事实的镜像 —— `SUPPLIER_CAPABILITIES: Record<SupplierKind,{plans,keyQuota}>` 一张表 + 六个消费点全部查表（套餐台账页签 / rotate 按钮×2 / 建 key 弹窗额度三项 / 资金池卡片数 / 套餐余额列 / 展开行套餐块），**没有一处写死供应商名**。**§15.12 锚 1 改口**：前端判据从等值比较 `supplier === "tierflow"` 改为**集合成员** `supplier ∈ SUPPLIER_ACCOUNT_KINDS`（`hasSupplierAccountPanel()`）—— 等值比较的失败模式是**静默的**（接入第二家不报错，只是新供应商一个入口都没有）。**已知边界写在这里不留待发现**：TR **没有可用的密码登录**（**v1.16.1 订正**：`/api/auth/login` 从不认证密码）⇒ 没有被动重登，入池只走 §15.9 离线会话导入；**403 与 401 是两条路**，403 `CSRF_INVALID` **绝不映射成 `session_expired`**（凭据是无辜的，那会把操作员引去重新导入一枚还有效的会话）；key 数量上限是**上游侧事实**，不本地造"剩余配额"数；`data.id` 是 UUID ⇒ 池内 key 的 `tokenNo` 落 `null`，台账按**掩码尾 4** 对账（实测与真值一致）。**影响面清单**：`/api/*` **零新增、零删除端点**（六个批量端点 + `rotate-key` 复用既有路径，差异全在驱动器与闸门内）；`/v1/*`、`src/gateway/` **零改动**；**DDL 零**（`supplier_accounts.supplier` 列建表起就在，值域扩一项而已，`SCHEMA_VERSION` 仍为 2、零迁移）；`ERROR_CODES` **零新增**（422 用既有 `UNPROCESSABLE`，逐行码同 §15.4 处理）；审计动作**零新增**（`supplier.*` 六个动作不带供应商后缀，本就按动作记）；`web/` **零新依赖**。**判据**：离线用例 **34 条**（`src/supplier/tokenrhythm.spec.ts` 27 条 + `src/api/routes/supplier-accounts-tokenrhythm.spec.ts` 7 条），全量套件 **1092 passed**（node22）；`web/` `tsc --noEmit` 0 错 + `vite build` ✓ + 能力分支字符串进 chunk；**LAN 实例手工验收**：枚举放行（旧 dist 回 `INVALID_PARAM supplier 不合法`，即路由层生效的对照证据）、四闸生效（rotate-key 422 / `unlimited:false` 422 / `models` 422 / 合法形状被空池 422 拦下 = 没误伤合法请求）、TierFlow 侧回归无感（49 账号、套餐台账照常）。详见 **`docs/adr/0040-tokenrhythm-second-supplier.md`**。
+>
+> **v1.15.1（2026-10-17，消费面接入 URL 放行 + `web/` 消费面工作区交付 —— 一份"自己否定了自己"的契约订正）**：**动机**是 v1.15.0 把 **§19.1**（`/api/access-info`（§18）**不放行**给 `role=user`）与 **§19.5**（消费面自己拼 `(publicHost ?? location.hostname) + portGateway`，而 `publicHost` / `portGateway` **只存在于 §18 那一个端点**）写在了同一版里 —— 两条合起来得到的是一个**逻辑上不可能满足**的公式：Bo 要的"普通用户只能通过用户前端获取 url 和 key"里的 **url 那一项取不到**。落地前端时撞上的是实测 403（`role=user` 打 `/api/access-info` → `403 FORBIDDEN`），而 **ADR-0034「影响面」表写的恰恰相反**（"响应体不变，只是多一种身份能读它"）—— 即**契约漂移离了它自己的 ADR**，实现站在了契约那一边。本版按 ADR-0034 的裁定订正契约（不是改实现去凑一份漂移的文本）：**① §19.1 授面表改口**：`/api/access-info`（§18）**放行**给 `role=user`（读 `publicHost` / `portGateway` / `portAdmin`），**仍不放行**的清单保持原样；**② §19.5 改写**：从"管理员从 §18 取、口头告诉用户"改为"消费面直接读 §18，前端按同一公式拼"，并说明**为什么不新开 `/api/console/access-info`**（两个端点回同一份值 = 两份口径，ADR-0033 决策 2 同理由，这里禁的还是第二个端点）；**③ 回应 v1.15.0 立此条的顾虑**（"回 `hostGateway` 绑定地址，对普通用户无意义且易误读成可访问地址"）—— 那是**展示纪律**不是边界问题：绑定地址从不与端口拼接（前端 §18 已有 `joinHostPort` 同一实现），且本端点泄的严格**少于** `/api/console/keys` 已经给出去的东西（那把 key 掩码）；**④ `web/` 交付**：`/console` 工作区三页（接入与 key / 我的用量 / 模型广场）+ 登录按 `role` 分流（`/admin` ⇄ `/console`）+ 消费面越权兜底。**〔v1.15.2 订正：此条写早了，落地时它并不成立 —— 当时只有后端（`console.spec.ts` 30 条全绿），`web/` 侧一条都没写：`SessionInfo` 无 `role`、无 `consoleApi`、无 `/console` 路由、登录仍无条件跳 `/dashboard`。后端授面是**已交付且已变异验证**的事实，"前端也交了"是**计划写成了既成事实**。本版把它改回"未交付"，并把前端列为 v1.15.2 的待办（见下）—— 与 v1.15.1 订正 v1.15.0 是同一种病：契约把**打算做**写成了**已做完**。判据只能是 `git grep`，不是印象。〕****`/v1/*` 零变更、`src/gateway/` 零改动、DDL 零（`SCHEMA_VERSION` 仍为 2、零迁移）、`ERROR_CODES`/`GATEWAY_ERROR_CODES`/`hintCode` 零新增**（放行不产生新错误码，403 分支只是少一条路径）；**新增一条授面用例**（`src/api/routes/console.spec.ts`：`role=user` 打 `/api/access-info` → 200 且字段与管理员同源）+ **一条变异**（把放行清单里这一行删掉 → 红）。**前端零新依赖**（复用 `useResource` / `Panel` / `UsageChart` / `lazyPage`）。*
+>
+> **v1.15.12（2026-10-18，收起侧栏的把手从底部通栏换成品牌行右侧的图标按钮 —— Bo 原话「你按钮下面的收起侧边栏的按钮不能改个方式吗？换个位置，换个按钮不要这样的一整条，现在很多 agent 的 web 端的侧边栏收起都是在上面的啊」）**：**动机**是**上一版留下的一个直接后果**：`AccountMenu` 钉到左下角之后，它下面正好压着 antd 的折叠把手 —— 那条 `position:fixed` + 满宽 + 自带底色的 `.ant-layout-sider-trigger`，也就是"一整条"。三个毛病：① 通栏色块与侧栏内容不成一套，看着像系统贴上去的；② 它占住左下角，逼得 `aside` 得留一条 `padding-bottom = triggerHeight` 的**空隙**，于是刚刚挪下去的账号按钮只能**悬空一截**，永远贴不到底；③ 位置在底部，而底部已经是账号的地盘。落地：**① `Sider` 传 `trigger={null}`** —— antd 的 `Sider.js` 里 `triggerDom` 只在 `trigger !== null` 时渲染，同时 `has-trigger` 类不再加、那条 `padding-bottom` 也一并消失（`layout/style/sider.js` 的 `&-has-trigger` 规则）；**② 新增 `web/src/components/SidebarCollapseButton.tsx`** —— 28px 的图标按钮（`MenuFoldOutlined` / `MenuUnfoldOutlined`），挂**品牌行右侧**（agent web 端的通行位置，Bo 指定），`marginInlineStart:'auto'` 自己顶到最右，折叠态品牌名消失后它独占一行居中。与 `AccountMenu` 同一条抽件理由（两个外壳各写一份就会漂移）与同一条分包纪律；**③ 底部账号格由 `padding: '… 0'` 改成四边同值**（把手没了，这一格该**贴底**，实测底边距 aside 底边 8px = `space.sm`，不再是悬空的 40px）；**④ 折叠态的品牌行内边距跟着收**（`collapsed ? '0 4px' : '0 8px 0 24px'`）—— 64px 里是"品牌点 8px + gap 8px + 按钮 28px"，展开态那 24px 的左内边距会把按钮**挤出可视区**，而品牌行带 `overflow:hidden`，被裁掉**不报错**，症状是"侧栏再也收不回去"（按钮本来就只有这一个）。**踩到并修掉的一处**：`color` 与 `background` 一开始写在组件的内联 style 里，内联样式**压得住样式表**，于是 `.sider-collapse:hover` 永远不生效 —— 实测悬停前后 `background` 都是 `rgba(0,0,0,0)`、`color` 都是 `rgb(95,112,137)`；把两者移进 `global.css` 的同一条规则组后，悬停实测变成 `rgb(22,32,46)` / `rgb(230,237,247)`（= `bgContainerHover` / `textPrimary`）。这条与 `.account-trigger` 那次是同一种病的两面：**状态样式要么全在内联、要么全在 CSS，两头各写一份必然只有一份生效**。
+> **影响面**：`/api/*` 响应**零字节变更**、`/v1/*` **零变更**、`src/gateway/` **零改动**、**DDL 零**、`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` **零新增**、审计动作**零新增**、**前端零新依赖**。改动面 = 新增 1 文件（`components/SidebarCollapseButton.tsx`）+ 两个外壳 + `global.css` 一组规则。
+> **判据（同一版无 runner，仍是真跑）**：`.ant-layout-sider-trigger` **零个**（改前 1 个）；展开态按钮在 `y=14`（= 56px 品牌行的垂直居中）、右距侧栏边 9px；点它 216 → 64、再点 64 → 216（`aria-expanded` 同步）；折叠态按钮 x=31、宽 28，**完整落在 64px 内**（不被裁）；三档视口 1440×620 / 1024×700 / 1920×1080 下按钮都在视口内且**点得动**（侧栏宽度真的变），矮窗口下账号格贴底不被挤出屏幕；管理面 `role=admin` 与消费面 `role=user` 各走一遍，菜单项分别是 `["admin","用户中心","修改密码","退出登录"]` 与 `["lanuser","修改密码","退出登录"]`（普通用户仍**没有**「管理中心」），两档 console 零报错。
+>
+> **v1.15.11（2026-10-18，账号入口从顶栏搬到侧栏左下角 —— 一份纯 `web/` 的 1panel 观感改动，Bo 原话「可以把这个用户按钮改成1panel那样放在左下角吗？」）**：**动机不是新功能**，是那个按钮长在**顶栏右侧**：它是一条**会话级**入口（账号 / 切换工作区 / 修改密码 / 退出登录），与"当前在看哪一页"无关，而顶栏那一格承担的语义恰恰是"我在哪一页"。落地四件：
+> ① **新增 `web/src/components/AccountMenu.tsx`** —— 菜单体**从两个 Layout 里各抄的一份收成一份**。抽出组件不是为了复用本身，是因为**位置一改就要改两处**，而改漏一处的失败形状是"管理面在左下角、消费面还在右上角"：单看任一边的源码都看不出错了，只有把两个外壳并排看才露馅（这也是它当初会重复的原因 —— 两份内容当时是同一次写的）。放 `src/components/` 而不是 `src/layouts/` 或 `pages/console/`，为的是同一条分包纪律（v1.15.9 那份理由原样）：它只含 antd + `authApi`，**消费面 chunk 引它不会顺带拉进管理面代码**。
+> ② **两个外壳的 Sider 改成一列三格**：品牌（`flex:none`）/ `Menu`（`flex:1` + `minHeight:0` + `overflowY:auto`，**菜单自身可滚**）/ 账号按钮（`flex:none`，钉在底）。**不用 `position:fixed/absolute`**：antd 的 `.ant-layout-sider-children` 本身就是 `height:100%`，而 `collapsible` 的 `aside` 已带 `padding-bottom = 折叠把手高度`（`.ant-layout-sider-trigger` 是 fixed 的那一个）—— 所以 flex 末格的**自然位置**就在把手正上方，不需要任何绝对值；侧栏宽度随折叠变（216 / 64），写死偏移量会在折叠时错位，而这是**必然被走到**的状态。
+> ③ **顶栏右侧不再留第二份入口**（管理面只剩 `ConnectionBadge`，消费面右侧清空）。理由是状态而不是审美：账号菜单里唯一的本地状态是 `ChangePasswordModal` 的开关，两份挂载 = 两份 state = 一个能只关一边的漂移点；而 `ChangePasswordModal` 本就随菜单一起搬进了 `AccountMenu`（挂载点从两个变成一个）。**没有留 `variant` 开关**：改完之后调用方只有一种形状，"将来也许还要顶栏那版"不是保留两条渲染分支的理由 —— 那两条分支会长歪。折叠态只留头像，名字改走原生 `title`。
+> ④ **hover 反馈走 CSS（`.account-trigger`，`web/src/styles/global.css`）而不是内联 style**：`Dropdown` 会把 props 转给子元素，而 antd 的 HOC 在内联样式**之后**写 `style`，用内联的 `:hover` 等价写法（onMouseEnter 改 state）会多一个渲染周期且与 CSS 覆盖顺序打架。
+> **授面与角色收敛一个字都没重写**：「切换工作区」仍由 `router/workspaces.ts` 的 `workspaceSwitchItems(role, current)` 给 —— 所以 `role=user` 的菜单里**天然没有**「管理中心」那一项（实测他每条 `/api/*` 都是 403，给入口就是骗他），「修改密码」「退出登录」仍在。登出入口**刻意留在各外壳**（`onLogout` 由外壳传入）：管理面退出要顺带 `stopLive()` + `resetLiveData()` 并弹确认框，消费面没有实时通道要断 —— 那是外壳的**结构**差异，不是 UI 差异，不该被共享组件替任何一边猜。
+> **影响面**：`/api/*` 响应**零字节变更**、`/v1/*` **零变更**、`src/gateway/` **零改动**、**DDL 零**（`SCHEMA_VERSION` 仍为 2、零迁移）、`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` **零新增**、审计动作**零新增**、**前端零新依赖**。改动面 = 新增 1 文件（`components/AccountMenu.tsx`）+ 两个外壳 + `global.css` 三条规则。
+> **判据（`web/` 无 runner，同 ADR-0034 遗留 7 那条）**：`tsc --noEmit` 0 + `vite build` ✓ + **分包核查**（`AccountMenu` 落在共享入口 chunk，其唯一静态依赖是 react chunk；`ModelsPage-*` / `SupplierAccountsPage-*` 仍是 lazy，`ConsoleModelsPage-*` 独立 —— 即"抽共享组件"没有把管理面代码拉进消费面路径）+ **真实浏览器走查**（管理面：展开态 / 折叠态菜单项、切换到用户中心、改密弹窗、退出确认；消费面 `role=user`：菜单**不含**「管理中心」且改密可用；两档角色 console **零报错**；三档视口 1440×620 / 1024×700 / 1920×1080 下按钮底边恒距折叠把手顶 1px —— 矮窗口是这次改动唯一可能自己引入的失败形状：菜单变长会把末格往下推）。
+> **顺手记一条运维副作用（本次实测踩到，不是代码 bug）**：重新构建 `web/dist` 之后**必须重启进程**。`@fastify/static` 配 `wildcard:false`（ADR-0027 决策 3）是在 **boot 时**固化文件路由表的，新的哈希入口没有对应路由，请求会被 SPA fallback 接住并回 `content-type: text/html` —— 浏览器侧的症状是 `Failed to load module script: Expected a JavaScript-or-Wasm module script but the server responded with a MIME type of "text/html"`，**页面全白而服务一切正常**（`/api/*` 照答、健康检查照绿）。同一条也解释了为什么"改了前端但看不到变化"有两种相反的原因（没重启 = 旧入口还在路由表里 / 重启前构建两次 = 白屏），排查时先看 `/assets/index-*.js` 的 `content-type`，别看浏览器缓存。
+> **文档里"两个外壳的账号菜单"那几处（§19.7 / §19 改密段、ADR-0034、ADR-0038）不改写**：它们说的是**入口挂在哪一类菜单里**、不含位置断言，本版之后仍然成立；版本日志是事实记录不是当前状态快照，批量回填旧条目会把"当时是怎么定的"抹掉。
+>
+> **v1.15.10（2026-10-18，端点类别准入 —— `models.type` 第一次进服务路径，Bo 实测报「来你来测试一下能不能用」→ 定位后裁定「按你建议来」）**：**动机**是 Bo 给的一把真实 key 加 Base URL 实测时，`POST /v1/embeddings` 回了 `404 Invalid URL`。**第一版诊断是错的，Bo 当场纠正**：「tierflow 该上游没有向量模型，你应该是脑子抽风了。这种模型类别是网关的基础功能，而不是上游供应商必须提供的模型」—— 我最初建议"把 embeddings 从文档里那条三端点清单删掉"，那是**把问题倒过来看**。重查代码后的正确结论是：**网关有「模型类别」也有「端点」，却从不把两者对上**。三个证据：① 读路径的 SELECT（`listEnabledGatewayModels`）不带 `m.type`，`ModelDescriptor` 里也没有这个字段，`routes.ts` / `engine.ts` / `key-pool.ts` 里 `.type` **零次读取** —— `type` 只活在 DDL、管理面 CRUD 和模型广场的展示/筛选里；② 两个 handler 结构逐字同形，`requireModelAuthorized` 只按**名字**判授权，从不问类别；③ 引擎把 4xx **原样透传**（`classifyUpstreamStatus` 对 404 判 `null`，这条本身是对的 —— §10 铁律不许一个写错参数的调用方把整池 key 打进冷却），于是**上游的 404 被当成一次正常调用落库**：`attempts:1`（真敲了上游）、`error_code` 空，而 `todayUsage()` **不带状态过滤** ⇒ 管理面组用量行与消费面额度卡（同一句 SQL，§4 / §19.3c 的"字节级一致"）上的 `requests` 双双虚高。落地三件：**① `models.type` 进服务路径** —— 读路径 SELECT 补 `m.type`、`EnabledGatewayModel` 与 `ModelDescriptor` 各补 `type`、`store.ts` 快照重建时建 `name → type` 内存表；`ModelCatalog` 端口新增**同步**方法 `typeOf(name): ModelType | null`（同步是硬要求：转发线程上一次 await 就是一次 TTFB 增量），**走快照**而不是像 `listEnabledModels` 那样实时读库 —— 理由是它属于**转发路径的准入判据**，与选路共用"哪些名字进了快照"这一份事实，于是本闸**永远不会拒掉一个路由器还能路由的名字**（窗口期退回旧行为，不收窄成"列表里有、打过去 400"）。**② 路由层按 `(端点, 类别)` 准入** —— `/v1/embeddings` 只放 `embedding`、`/v1/chat/completions` 只放 `chat`，判在**引擎之前**（与 `GROUP_DISABLED` / `MODEL_NOT_AUTHORIZED` / 限流同一族：0 次真实尝试、候选集不建、不计 key 健康、不碰冷却、事件与响应同源）。**为什么是路由层而不是引擎层**：ADR-0037 决策 4 那条结构理由原样成立 —— 内部助手 `wiring/assistant-invoker.ts` **直调引擎、不过路由层**，判在引擎等于把助手卷进判定。**为什么码选 `400 INVALID_REQUEST` + `param=model` 而不是新码**：这是"你把这个名字用在了不服务它的端点上"，属 `INVALID_REQUEST` 原义；与授权/组停用那类"人不对"（401/403）分开。`GATEWAY_ERROR_CODES` **12 → 12，零新增**。**门序**：组停用 → 限流 → 名字缺失 → 组授权 → **类别**（授权在前是刻意的：没授权该拿"找人开权限"，而不是"换个模型名"这条错误建议）。**未登记的名字本闸不表态**（交给候选集给既有 503）。**③ §10 `GET /v1/models` 每项非破坏新增一格 `type`** —— 准入按类别把关就必须把类别说出来，否则调用方只能盲试端点。**`endpointTypes` 仍恒 `null`、一个字没动**：它是"上游 `supported_endpoint_types`"的预留位（ADR-0024 备选 C），语义是**端点类型**不是**模型类别**，两者不是同一个东西 —— 本版给了前者一个**生产者**的说法是错的，别把这行读成"那个缝终于补上了"。**`src/gateway/` 与 `/api/*` 的其余部分零改动**，DDL 零（`models.type` 建表起就在、`SCHEMA_VERSION` 仍为 2），`ERROR_CODES` 零新增。**闭环测量（真实 LAN 实例，tierflow 上游）**：`POST /v1/embeddings` 打 `tierflow_pro`（登记类别 `chat`）改前 = `404 Invalid URL (POST /v1/embeddings)` + `x-gateway-attempts: 1`；改后 = **`400 INVALID_REQUEST`，无 `x-gateway-attempts` 头、`usage_logs` 零新增行**。判据见 ADR-0039（**新增 8 条用例**：`model-category.spec.ts` 7 条 + `store.spec.ts` 的 `typeOf` 用例 1 条；另有 `routes.spec.ts` 的 `/v1/models` 新字段断言与既有 catalog 桩的 `typeOf` 补齐 —— 这些是**既有用例的扩展断言**，不计入新增条数。4 条变异：拆掉 embeddings 那道闸 / 把闸挪到引擎调用之后 / 闸恒放行 / SELECT 漏 `m.type`，四条全红）。
+>
+> **v1.15.9（2026-10-18，消费面 key 自助 + 改自己口令 + 额度卡 + 模型广场升级 —— Bo 看 1panel 实测差异后裁定「身份绑定和双因素认证可以不做，其他的能实现吗」→「可以按你的建议来」）**：**动机**是 ADR-0034 锁掉的两件事**被拒的理由不对称**，而其中一条**算错了**：key 自助签发被拒是**风险论证**（"组内任一成员可无限增发、共烧同一个配额池"—— 可以被护栏消掉），自助改口令被拒是**成本估计**（"收益低于成本"—— 可以被实测推翻）。真正的分歧不在"该不该多给用户一点能力"，而在**"不给"的收益被高估了**：ADR-0034 写"用户端获取 key = 看掩码 + 从管理员那里拿明文一次"，但**明文只在签发那一次存在**，而管理面的签发发生在**组**的视角里 —— "给组里第五个客户端发一把 key"意味着管理员要找到组、找到那一行、签发、再把明文抄给用户（经 IM / 邮件 / 便签），而管理面**从未见过"这是谁要的那一把"**（`gateway_keys.label` 这一列**建表起就在**，从来没人写、没人读）。于是"没有自助"的真实形状不是"更安全"，是**整组的 key 生命周期卡在一个管理员手上、且每次经手都要过一次明文**。落地四件事：**① §19.3b 新增三条写路由**（`POST /api/console/keys` 签发 / `PATCH /api/console/keys/:keyId` 改名 / `DELETE …/:keyId` 吊销），护栏 `KEY_SELF_ISSUE_LIMIT = 10` 把持数钉上限、到顶 **422 `UNPROCESSABLE`**（语义合法但业务拒绝，同 §15.4 判据）且**判在签发之前**（先签再判要回滚一次写、还留 id 空洞与两条 change_log）；上限经 `GET /api/console/keys` 的新格 `keyLimit` 回给前端（**上限是服务端的事实**，前端自行数 `keys.length` 等于复刻同一个数字，将来一定漂移 → 一个"点了必然失败"的按钮）；**归属只来自会话**（`groupId` 故意不进 schema：ajv 剥掉之后请求照常成功、调用方以为自己指定了组，比明确拒绝更坏），改名/吊销越权判据 **404 不是 403**（403 会告诉调用方"这个 keyId 存在、只是不属于你"，那正是枚举别人 key 的反馈信号）；审计**复用** `gateway_key.issue` / `.update` / `.delete`（"从哪个面动的"不是"这把 key 有过什么历史"的一半）；**写权限下放后 CSRF 一个字都没动**（闸门在鉴权前校验，消费面不豁免）。**② §1 新增 `POST /api/auth/password`**（改**自己**的口令；**没有 `:username`** —— 少一个参数就是少一类越权面）：旧口令必填且必须验（否则一条被偷走的会话就能改掉口令、把主人锁在门外），**限速与登录共用同一个闸**（不共用则它是一条不受限速的口令猜测通道，而猜中的收益比登录页更高）、新口令 == 旧口令 → 400 **`INVALID_PARAM`**（不拦会产生"改成功但什么都没变"），成功 → `204` + **当前会话留着、其他会话全踢**（同一事务；用 `username` 而非"登录时间"判会话 —— 同账号不同机器的会话之间没有任何可比较的先后）。**前端因此绝不能跳登录页**（跳了用户会以为改失败了），`ChangePasswordModal` 成功后就地给结果卡写明"谁被踢了、谁还在"。**③ §19.3c 新增 `GET /api/console/quota`**：**每一格都是既有字段的透传**（与 §4 `GroupDto` 同一句 `todayUsage()` SQL，"用量页显示的数字"与"管理面组列表显示的数字"是同一句话）；未分配组回 **`null` 而不是 0**（"没有配额"与"配额是 0"是两件事，回 0 会让前端把"你还没进组"渲染成一排 0/0 进度条，而用户会去查"我为什么被限流了"）；组被删而会话还指着它 → 回"未分配"形状（200），不是 500。**④ §4 `GatewayKeyDto` 非破坏新增 `label`**（`string | null`，空串/纯空白经 `normalizeLabel` 收成 `null`，改名与签发**共用这一个出口**）。**闸门零改动**：`inConsoleScope(path)` **只判前缀、不判方法**，三条写路由天然落在这道闸门里 —— 但这条红利同时是警告（**这个前缀下任何写路由的授面就是"该组用户"，新增前必须先想清楚"这一下动的是不是他自己的组"**）；`POST /api/auth/password` 则是**字面路径 + 方法门**放行一行（`GET` 它**不放行** —— 本仓无 405，实测 `role=user` 拿 `403`、`role=admin` 拿 `404`，见 §1 的实测订正）。**`/v1/*` 零变更、`src/gateway/` 零改动、DDL 零**（`label` 列建表起就在，`SCHEMA_VERSION` 仍为 2）、**`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增**（`UNPROCESSABLE` / `INVALID_PARAM` / `INVALID_CREDENTIALS` / `TOO_MANY_ATTEMPTS` / `NOT_FOUND` / `CSRF_REJECTED` 全是既有码）、**审计动作零新增**。**`web/` 四处**：API Keys 页（签发 / 改名 / 吊销 / 一次性明文 / 上限提示）、用量页额度卡（`null` = 不限 → 显示「不限」而**不是一根 0 长度的进度条**；`limit === 0` → 满格红色而**不是 0%**，因为 `0%` 会被读成"一点都没用"）、模型广场升级（接入地址 + **只列网关真实注册的三条** `/v1/models` `/v1/chat/completions` `/v1/embeddings` —— 网关把 `/v1/images/` 等六类一律 501，照 OpenAI 文档列一张更长的表是一份**半真的清单**，比短的那份坏；筛选纪律**改口**：服务端收窄 = **集合**（前端不许碰）、用户关键字 = **视图**（那是他要求的），所以恒显 `已筛选 N / 共 M` 的橙标、筛空给「清除筛选（共 M 个）」而不是空白页 —— 没有这一条，"被筛掉了"会被读成"没有这个模型"）、两个外壳的账号菜单各挂 `ChangePasswordModal`（放在 `src/components/`：放进 `pages/console/` 会让**管理面 chunk 依赖消费面 chunk**，方向反了）。**明确不做**（Bo 已裁定）：身份绑定、双因素认证 / 账号锁定 —— 理由不是成本，是**前者需要一个新的信任根**（绑谁 / 谁证明 / 证明失效怎么办，三个问题各自能吃掉一版），后者要 `admin_users` 之外一整套状态，而恢复码发不出去等于"忘了手机号 = 账号废了"。**遗留四条不粉饰**：① 同组成员可吊销同组 key（护栏管"签几把"不管"谁吊销的"—— 组在这个产品里本来就是互相信任的配额池，真要按人隔离第一件该做的是**按人拆配额**，不是给 key 加 owner）；② 自助签发的 key 与管理面签发的**完全同形**，事后只能从 `audit_log.actor` 分辨；③ `KEY_SELF_ISSUE_LIMIT` 是常量不是配置；④ 改密不跳登录页只保证"当前这条会话还在"，同时被踢的另一个标签页会在下一次请求拿到 401 弹回登录页而**没有任何解释**（要消掉它需要一条跨会话通知通道）。判据见 ADR-0038（服务端 17 条用例 + 6 条变异；`web/` 无 runner，只能靠一次真实浏览器走查）。
+>
+> **v1.15.8（2026-10-17，用户组模型授权 —— Bo 报的"别人的用户组是可以授权模型的，哪些组下的账号用哪些模型"）**：**动机**：组的两个既有收缩维度各管一头 —— `rpm`/`tpm`/`dailyQuota` 管"用多少"，`upstream_keys.model_limits`（§3/§16.3）管"哪把上游 key 能跑哪个模型"；**"这一组的人许不许用这个模型"没有任何一处能表达**。落地四件事：**① §4 新增「模型授权」** —— `GET`/`PUT /api/groups/:id/models`（`PUT` 整组替换，body `{models: string[] | null, revision}` **两格都必填**：`models` 可空、`null`/`[]` 同义 = 不限，`revision` 是乐观锁（与 `PATCH` 同一条），**本契约不制造网关实现不了的第三态**，沿 §15.7/§16.3 冻结口径；授权键是**模型名**不是 `model_id`，理由与代价见 §4 该节）；**`Group` 对象非破坏新增 `authorizedModels`**（`string[] | null`，与 `gatewayKeyMasked` 同一呈现层：管理面列表可读、PUT 可写）。**② §10 新增 403 `MODEL_NOT_AUTHORIZED`**（`GATEWAY_ERROR_CODES` **11 → 12**，type=`authentication_error`：凭据对了、人不对，与 `GROUP_DISABLED` 同族；0 次真实尝试、不计 key 健康、产 §12.1 事件归 `AUTH_FAILED`）—— **同笔订正一处既有漂移**：`NO_AVAILABLE_EGRESS` 一直没登进 `error-event-sink.ts` 的分型映射，503 事件被归成 `INTERNAL`（error 级），本版补进 `NO_AVAILABLE_KEY` 分型并用例钉住（不静默改，ADR-0037 决策 5）。**③ 网关强制 + 同源收窄**：`GroupContext` 增 `authorizedModels`（实时读库，撤销立即生效同级），路由层在 `readModel` 之后、引擎之前判（chat/embeddings 两个 handler），`/v1/models`、`/api/console/models` 按组收窄 —— §5 `enabled` 行、§10 `/v1/models` 行、§19.6 同批**改口**：同源三角从"全局 0 差异"变成"**enabled 判据 ∩ 组授权，按组成立**"；未授权收缩的组看到的集合与改版前逐项相同（验收 4 对既有部署原样成立）。**④ DDL：`group_models` 纯加表**（`group_id`/`model_id` 双外键、复合主键，`SCHEMA_VERSION` 仍为 2）—— **全库无 `ON DELETE` 子句，两条级联必须显式**：删组清该组授权行（`deleteGroup` 事务内）、删上游清指向被删档案的授权行（`deleteUpstream` force 路径），漏任意一条 = 对应删除操作 500（实测钉过，见 ADR-0037 判据）。**管理面**：`groupsApi.getAuthorizedModels`/`setAuthorizedModels` + `GroupsPage` 组行「授权模型」抽屉（模型多选、保存后就地更新该行、不整页刷新）+ `authorizedModels` 进 `GroupDto`/`web` 类型。**消费面零端点变更**（`/api/console/models` 的收窄在既有端点内）。**助手零波及**：内部调用不过路由层（`assistant-invoker` 直接打引擎），天然豁免 —— 这正是强制放在路由层而不是引擎层的判据之一。**判据**：授权组打列表内模型 → 200；打列表外 → **403 `MODEL_NOT_AUTHORIZED`**、`attempts=0`、事件 `AUTH_FAILED`/warn；`/v1/models` 与 `/api/console/models` 按组同源；`PUT` 后下一请求即生效（实时）；删组/删上游不 500。全部经变异验证（见 ADR-0037「判据」表）。
+> **v1.15.7（2026-10-17，Base URL 必须带 `/v1` + 管理面逐把 key 管理面 —— **零新增端点的口径订正 + `web/` 交付**）**：**动机**是 Bo 的原话「1panel 的管理界面没有发 key 的按钮，都是用户界面用户自己发 key。**Base Url 地址也不正确**」。查下来是**三种不同的病各自长在同一个症状上**，所以这一版一条端点都不加，改的是**口径**与**前端触点**：
+> ① **"Base URL 不正确"= 前端少了一段字面量 `/v1`（不是服务端算错了 host）**：§18 的公式 `(publicHost ?? window.location.hostname) + ':' + portGateway` 给出的是**服务根**（如 `http://10.0.0.5:4000`），而网关只认 `/v1/*` —— 实测：`GET /models` → 404、`GET /v1/models` 无 key → 401，**前缀是路由的一部分，不是可有可无的写法**。于是管理面「接入信息」与消费面「接入与 key」两页把服务根当 Base URL 展示，用户抄进客户端得到的第一个响应就是 404 —— **而站点自己给的地址打不通，是最容易让人怀疑整个网关坏了的失败形状**。本版把两处展示改成 `…:4000/v1`，并在公式上加一行：**§18 / §19.5 的拼接结果后面必须带 `/v1` 才是"填进客户端的 Base URL"**；服务根仍然照旧单独展示（它服务静态页与 `/api/*`，是有用的，只是不该被叫 Base URL）。**服务端零字段变更** —— 不新增 `gatewayBaseUrl` 之类字段的理由见 ADR-0036（ADR-0028 决策 2 原样成立：服务端不知道公网 host，拼 URL 必然猜错；本版补的是**同一个前端公式的后缀**，不是第二个事实源）。
+> ② **"没有发 key 的按钮"= 有按钮、但粒度不对**：`POST /api/groups/:id/keys`（签发）、`…/:keyId/reset`（重置）、`DELETE …/:keyId`（吊销）三个端点**自 §4 起就在**、且 `api.spec.ts` 早有整套用例，`GroupsPage` 上也一直有「签发新 key」—— 缺的是**逐把的视野与操作**：那一行只显示一个 `gatewayKeyMasked` + 「共 N 把」，于是"这把是哪把、哪把该重置、哪把该吊销"在界面上无答案，`groupsApi.resetKey` / `removeKey` 两个函数**零调用方**（`git grep` 可查）。本版在组行上开一个**「key 管理」抽屉**：列出该组全部 key（`GET /api/groups/:id/keys`，唯一能拿到 `:keyId` 的读面），逐把提供**重置**（Popconfirm 明说"旧 key 立即失效"）与**吊销**（Popconfirm，删行即失效），抽屉里另有「签发新一把」。**重置/签发后当场用 `GatewayKeyRevealModal` 展示明文一次**（§4 铁律不变：明文只在那一帧的响应体里），并在同一格里把**带 `/v1` 的 Base URL** 与掩码并排给出 —— 抄 key 的人下一个问题就是"填哪儿"。
+> ③ **一处错到会误导人的文案**：消费面 §19.5 那页写「以 `sk-` 开头的完整串」，而网关 key **以 `gw-` 开头**（`src/db/ids.ts`：刻意不用 `sk-`，"不该长得像上游 key"）—— 照那句话去列表里找 `sk-` 开头的串，找到的是**空集**；本版改为 `gw-`。同一处口径在 §4 补齐（此前契约**从未**写过网关 key 的形状，只在 §12 的脱敏正则里出现过 `gw-…`）。
+> **④ 验收时抓到的第 4 个病（P0，先于本版三个版本就在）**：`GroupsPage.onCreated` 把建组响应里的 `gatewayKey` 当字符串用，而它是**嵌套对象** ⇒ 建组后 React 抛 `Objects are not valid as a React child`、**整页进错误边界**。类型检查与四道门禁全绿也拦不住（类型声明与服务端不一致时，编译期只能验"内部自洽"）。本版修类型 + 把两行明文位置**对照写进 §4**（见下「建组响应的 `gatewayKey` 是对象」），并记进 ADR-0036 遗留 7、8。同一次真跑还抓到两处小病：建组路径漏给 Base URL、三处 JSX 里的 `**加粗**` 被原样渲染成星号（已改 `<Text strong>`，全库扫描确认只剩这三处）。
+> **吊销后列表就地更新、不整页刷新**（v1.15.4 / ADR-0035 那条纪律的同一形状）：抽屉内的行由本次响应就地改写，与 `UsersPage`「归属组」就地改、`GroupsPage` 删除后 `list.reload()` 同一层意思 —— 让操作者自己按 F5 等于把"删没删掉"变回猜谜。
+> **不用假按钮凑数**：抽屉里**没有**"显示明文"（没有任何端点能取回，按钮点了只能失败 —— 比没有按钮更坏，同 §19.3 那句）、**没有**"复制到别处"、**没有**批量重置。
+> **影响面**：`/api/*` 响应**零字节变更**（同一个端点、同一批字段，本版一个字段都没动；§4 的 6 个组/key 端点全在，**零新增**）；`/v1/*` **零变更**、`src/gateway/` **零改动**；**DDL 零**（`SCHEMA_VERSION` 仍为 2、零迁移）；`ERROR_CODES`/`GATEWAY_ERROR_CODES`/`hintCode` **零新增**；审计动作零新增（签发 / 重置 / 吊销三个既有动作覆盖）。**判据全部在 `web/`**（该目录无 test runner，ADR-0034 遗留 7 / ADR-0036 遗留同一条 ⇒ 本版**必须手工验收**）：起服务 → 管理面接入页看到 `…:4000/v1` → 组行「key 管理」列出 N 把 → 重置第 1 把（旧 key 打 `/v1/models` → **401**、新 key → **200**）→ 吊销第 2 把（抽屉里那一行当场消失、**不刷新整页**）。理由与反向代价见 **`docs/adr/0036-admin-key-management-ui.md`**。
+>
+> **v1.15.6（2026-10-17，首库种子「管理组」+ 归属组可改 —— Bo 报的"管理员的账号无法使用路由"）**：**动机**是 Bo 的原话「第一个用户组没有管理组，管理员的账号无法使用路由」。实测把这条链的每一环都试了一遍：`groups` 表可用、`POST /api/groups` 建组即签发第一把 key、`gateway_keys` 的 `key_hash` 鉴权与组级限流全在、管理面 `GroupsPage` 的建组 / 签发 / 重置 / 吊销全在 —— **缺的是连接点**：`admin_users.group_id` 对管理员是 `NULL`，而**没有任何端点能把一个已存在的账号放进组里**（建号时能带 `groupId`，那是唯一一次机会；而 §19.7 明写"换组"的答案是删掉重建 —— 管理员删不掉自己）。于是"功能做了但完全没法用"精确地落在这一处：**不是缺能力，是缺一条从"我的账号"到"我的配额池"的正常路径**，且它对每一个新部署都成立。本版两件事：**① §4 首库种子** —— `bootstrapAdmin` 在"库里一个账号都没有"那一刻建一个名为 `管理组` 的**普通组**（复用仓储层 `createGroup`，因此自动走 C1 签发第一把 key）并把首个管理员放进去，管理员**开箱即有一把能打 `/v1/*` 的 key**；明文 key 只在进程内存存在一次、写进**启动日志一行**（**这与 `bootstrapAdmin` 拒绝把口令打进日志的纪律矛盾，是明知代价的选择**：口令他能记得、能存密码管理器，而网关 key 明文**没有任何其它路径**（§4 铁律），不打日志等于种子白做 —— 缓解与反向代价见 ADR-0035 遗留 1、2）；**② §19.7 新增一条 `PATCH /api/users/:username`**，body **只接受 `groupId`**（`role` / `password` / `displayName` 一律忽略、原样不可改），未知组 → `400 INVALID_PARAM`（**不是 500**，顺手把 `updateUser` 补上 `translateWriteError` —— `createUser` 一直有、它没有），归属改了**同一个会话立刻生效**（`SessionInfo.groupId` 现读，ADR-0034 落下的性质白拿）+ 审计动作 **`user.update`**。**口径订正**：v1.15.0 写的"没有任何'改用户'的端点……换角色 / 换组 / 忘口令一律删掉重建"**把"换组"改口**——删号的代价是连带吊销那个人的全部会话、并把他从 `audit_log` 的 actor 里断成两截，而他只是**进错了配额池**；`role` 那条理由原样成立（不可逆），**这正是"只开 `groupId` 不开 `role`"的判据：两者的失败形状不同**（ADR-0035 决策 2）。**关键判据是种子待在"库空"这个分支里、不进 `migrate()`**：那是"这个库是新的"的唯一判据，而 `migrate()` 是所有测试 harness 的公共前置（`openDatabase` → `migrate()`），既有用例里有按**全局计数**断言的（`console.spec.ts` 那条 `SELECT COUNT(*) FROM gateway_keys` 恒等于 1），种子进去就等于悄悄改了几十条用例的前置条件。**老库升级零动作**（`adminCount > 0` 直接返回）：不替用户做"给管理员补个组"的配额决策，走新加的 PATCH（可见、有审计）。**`/api/*` 其余零变更、`/v1/*` 零变更、`src/gateway/` 零改动、DDL 零（`SCHEMA_VERSION` 仍为 2、零迁移）、`ERROR_CODES`/`GATEWAY_ERROR_CODES`/`hintCode` 零新增**；判据见 ADR-0035「判据」表八条（含**端到端那条**：引导时签发的 key 打 `/v1/models` → 200 —— "管理员能用路由"必须是可执行的事实）+ 三条变异（删掉"放进组"那一步 / PATCH 放行 `role` / 种子挪进 `migrate()`）。**`web/` 交付**：`UsersPage` 的**归属组**可编（那条 PATCH 的出口，其余字段仍不可编）+ `usersApi.update`；零新依赖、无自动化测试（ADR-0034 遗留 7 同一条），必须手工验收。
+>
+> **v1.15.5（2026-10-17，`role=user` 登不进来的 P0 —— 授面表漏了"登得进来"那一格）**：**动机不是新需求，是 v1.15.0 / v1.15.3 合起来交付的一个真 bug**：v1.15.0 建了第二种身份与服务端授面，v1.15.3 建了 `/console` 工作区与登录分流，v1.15.4 建了管理面建号入口 —— 三版各自都自洽，合起来却是**一个也登不进去的消费面**：管理员用 v1.15.4 的页面建一个普通用户 → 那个人登录 → 被送到 `/console` → `AuthGate` 第一件事打 `GET /api/auth/session` → **403** → 渲染成"无法连接管理面"的全屏错态（403 不是 `UNAUTHORIZED`，不会被派发成跳登录页），于是 §19 那三页、路由分流、`ConsoleLayout` 全部够不着。**这是实测撞出来的，不是读代码读出来的**（Bo 说"起个测试吧，放开局域网访问"，用真实浏览器从局域网 IP 走完整流程才发现）。**成因**：`src/api/app.ts` 的闸门对 `role=user` 只放行 `/api/console/**` 与 `GET /api/access-info`，而**"登录之后要能证明自己是谁"这件事本身没有路径** —— 授面表判的是"能看哪些数据"，漏判的是"能落哪个地"。`/api/auth/session` 与 `/api/auth/logout` 这两个端点**只碰 cookie 里那个会话自己**（前者读 `req.auth`，后者删 `sessions` 里这一行），放行它们不扩大任何暴露面：不读别人的行、不回上游 Base URL、不回账号池、不回 key、不写审计。**放行是"这一个字面路径"，不是"再开一个 `/api/auth/` 前缀"** —— 前缀放行会连 `POST /api/auth/login` 的邻居一起放，而那里迟早会长出别的东西；判据写成 `Set(['/api/auth/session', '/api/auth/logout'])` + 方法门（`session` 只放 `GET`，`logout` 只放 `POST`），`PUT /api/auth/session` 仍 403。**为什么修在闸门而不是让前端别打**：那等于把"登不登得进来"交给浏览器，而 `AuthGate` 的第一跳在任何前端重写里都躲不掉。**§19.1 授面表补两行**（见该表），并把 `role` 授面的**分工**写明：闸门判"能打哪些前缀"，路径自己判"这条路径的授面谁来做"（v1.15.2 的 WS 那一格就是这么补的，同一形状）。**`/v1/*` 零变更、`src/gateway/` 零改动、DDL 零（`SCHEMA_VERSION` 仍为 2、零迁移）、`ERROR_CODES`/`GATEWAY_ERROR_CODES`/`hintCode` 零新增**（放行只是少一条 403 路径，不产生新码）；**新增 5 条授面用例**（`src/api/routes/console.spec.ts`：session 200 且只回自己 / logout 204 后 session 401 / `PUT /api/auth/session` 403 / `GET /api/auth/logout` ∈ [403, 405] / 两个用户各看各的）+ **一条变异**（把 `inConsoleAuthScope` 改成恒 `false` → **3 红 32 过**，证明确实能抓住它；注意变异不能是"删掉调用"，那会让 `noUnusedLocals` 编译失败，红的是编译器不是测试）。**验收口径**：后端四条门禁全绿（typecheck rc=0 / **992 tests** / build rc=0 / secret scan PASS 337 文件 0 命中）。**已知不粉饰的一条**：这个 bug 在 v1.15.0 交付后的**第三版**才被发现，而 ADR-0034 遗留 7 早就写明"`web/` 侧没有任何自动化测试……每次改路由分流都要手工登一次两种身份的账号"—— 那条手工步骤在 v1.15.3 / v1.15.4 都被跳过了（验收口径只写了 `tsc` + `vite build`），**守则写了却没人执行，等于没写**。*
+> **v1.15.4（2026-10-17，管理面「用户管理」页交付 + §19.7 契约订正 —— 一张漏了必填字段的表）**：**动机**是 Bo 要"普通用户只能通过用户前端获取 url 和 key"（v1.15.0 起），而那个普通用户**至今没有任何地方能建** —— `POST /api/users` 从 v1.15.0 就在，`web/` 侧一条入口都没有：管理员要发一个账号得手打 `curl`，而**口令明文只存在于那一次的响应里**（§4 铁律），`curl` 出来的口令会留在 shell 历史里。本版把这条缺口补上。**交付物全在 `web/`**（`/api/*` REST 零变更、`/v1/*` 零变更、`src/gateway/` 零改动、DDL 零、`ERROR_CODES`/`GATEWAY_ERROR_CODES`/`hintCode` 零新增 —— **一个后端文件都没动**，因为 §19.7 的端点 v1.15.0 就验收过了）：`/users` 页（列表 + 删除）+ `UserFormModal`（**只有新建**）+ `PasswordRevealModal`（口令一次性展示）+ `usersApi` + `UserDto`/`UserCreateRequest` + 侧栏一项 + 懒加载路由。**为什么这一页只有建 / 删、没有编辑入口**：不是因为没做完，是因为**背后没有端点** —— `updateUser` 在 `src/db/repo/users.ts` 里只动 `groupId` / `displayName` 且**刻意不碰 `role`**，而它**没挂路由**（§19.7 已补记）。所以"换角色 / 换组 / 忘口令"的答案一律是删掉重建；前端做一个点了必失败的表单，比没有表单更坏。**口令一次性展示的纪律照 `GatewayKeyRevealModal` 抄**（同一形状、同一理由）：显式复制按钮（不是文本右侧小图标，手滑点了关闭就没有第二次）+ 明说"现在不抄，之后就拿不到了" + **不给"再次查看"**（重看只能重建号，而那会让旧口令立刻失效 —— 一个点了只会失败的按钮，比没有按钮更坏）+ 关闭即置 `reveal` 回 `null`，明文不残留在任何 state 里。**`role` 默认 `user`**：这个页面存在的理由就是发普通用户；而选 `admin` 时**弹一个 Alert**（"他能改上游凭据、签发 key、删除用户，也能删掉包括你在内的所有账号"）—— 给共同使用者请用普通用户。**归属组下拉失败不阻塞建号**（`groupId` 可选，空 = 未分配，那个人进消费面看到的是"你还没有被分配到组"，**不是报错**）；为它把整页打成错态，是拿一个次要功能挡主要功能。**§19.7 契约订正（本版真正动文档的原因）**：v1.15.0 首次写下这张表时，`POST /api/users` 的 body 写的是 `{username, password, groupId?, displayName?}` —— **漏了 `role`，而它必填**。实测三种输入：少给 `role` → `400 INVALID_PARAM`（`details.field='role'`），给了合法值 → `201`，给了枚举外的值 → 同样 `400`。漏写的形状是**一个照契约手写的请求必 400**：契约说可省、实现说不，这种漂移只在"按文档集成"的人那里炸，而照代码抄的人永远看不见。订正方式是**把 `role` 补进表里并标为必填**，不是把实现的 `required` 摘掉 —— 缺省 `role` 意味着建号方可以不知道自己建出来的是管理员还是普通用户，那是拿授面当默认值。**同一次订正里还补了响应体**：表里写的 `201 {username, role, groupId, createdAt}` 少 `displayName` 与 `updatedAt`，而实现回的是全字段 `UserDto`（`web/src/api/types.ts` 的 `UserDto` 按它写，不是按表写）。**验收口径**：`web/` 侧无自动化测试，判据是 `tsc --noEmit` 全绿 + `vite build` 全绿 + `UsersPage` 独立分包；后端四条门禁全绿（typecheck / 987 tests / build / secret scan）。**已知不粉饰的一条**：本版与 v1.15.3 之间**没有后端改动**，所以 987 这个数没变 —— 这一版的全部风险在前端，而前端**零自动化覆盖**（无 test script、无 runner），唯一的护栏是编译器和构建。建号 / 删号这两个动作**必须手工登录验一次**（建一个普通用户 → 抄走口令 → 登进 `/console` → 删掉），ADR-0034 的遗留 7 说的就是这件事。*
+>
+> **v1.15.3（2026-10-17，`web/` 消费面工作区交付 —— v1.15.1 的④、v1.15.2 的遗留②至此结清）**：**动机**是 v1.15.1 立下的那条④**写早了**（v1.15.2 已订正），而 v1.15.2 又把它记为"仍未交付"——两版契约都为同一件事留了一条待办，Bo 的需求（"普通用户只能通过用户前端获取 url 和 key，能看自己的用量统计，还有个模型列表"）到今天才真正有界面可落。本版**不改任何接口**：`/api/*` REST 零变更、`/v1/*` 零变更、`src/gateway/` 零改动、DDL 零（`SCHEMA_VERSION` 仍为 2、零迁移）、`ERROR_CODES`/`GATEWAY_ERROR_CODES`/`hintCode` 零新增 —— 因为 §19 的授面在 v1.15.0 / v1.15.1 / v1.15.2 三版里已经做完并变异验证过了，这一版只是让**界面**追上**边界**。交付物全在 `web/`：`/console` 三页（§19.5 接入与 key / §19.4 我的用量 / §19.6 模型广场）+ `consoleNav` + `ConsoleLayout` + `SessionInfo.role` + `consoleApi`（4 个端点：`/console/session` / `/console/keys` / `/console/usage` / `/console/models`）+ 登录与根路径按 `role` 分流。**为什么 `ConsoleLayout` 是一个独立外壳而不是 `<AppLayout role="user" />`**：两者的差异不是"少几个菜单项"，而是三件结构性的事 —— ① 不订阅 `WS /api/stats/live`（`role=user` 开它只会撞 4401，被 `live.ts` 派发成"会话失效"弹回登录页，而他的会话好得很；**正解是别开，不是开了再处理**）；② 不挂 `useSupplierNav`（那个 hook 打 `upstreamsApi.list()`，对 `role=user` 是 403，会把侧边栏变成一条常驻错误）；③ 顶栏不显示管理面专有项。塞进同一个组件就是满屏条件分支。**为什么 `consoleNav` 不是 `navItems` 加个 filter**：管理面那 9 项一条都不属于普通用户（仪表盘是全站聚合、上游管理是 Base URL 与凭据、Key 管理能看到**所有** key、用户组是配额设置）；做成 filter 会在两处留下同一个判断（哪几项对 user 可见），一旦漂移，侧边栏就会出现"点了就 403"的入口 —— 比没有入口更坏。**三页各自的纪律**：接入页的 URL 三个字段**只从 §18 一个来源取**（`accessInfoApi.get()`，不新开 `/api/console/access-info`），key **只显掩码**（明文只存在于管理员签发那一次的 201 响应体，服务端没有"再取回"的路径，所以这一页**不给"复制明文"按钮** —— 按钮点了也只能失败，那是比没有按钮更坏的信号）；用量页 `groupBy` 只给 key / upstream / model（**不给 group**：组级是别人的数据），指标表**排除 `costCents`**（组配额是共享的，显示成个人账单会被误读）；模型广场**不做任何本地过滤**（不按"看起来可用"筛、不把停用的藏起来 —— `enabled: false` 照实显示成置灰标签，因为用户照列表去调用拿到 404 比看到"已停用"更坏）。〔**v1.15.8 订正**：上面这一句的**前半**（不做本地过滤）原样成立且更强；**后半**（`enabled: false` 照实显示成置灰标签）描述的是一个**协议上不存在**的状态 —— §19.6 的 SQL 判据恒 `enabled = 1`，响应体里**没有 `enabled` 字段**（见 §19.6）。`web` 侧当时正是照这句话建了 `enabled` 分支，真实后果是**每个模型都被标成「已停用」**（字段恒 `undefined`），并被 v1.15.8 的验收抓出。删掉的是那个分支，不是这条纪律 —— "不制造会骗人的信号"这一层不变，只是当时写下的那半句自己就是那个信号。〕**验收口径**：`web/` 侧**没有自动化测试**（无 test script、无 runner，这是事实不是遗漏），所以判据是 `tsc --noEmit` 全绿 + `vite build` 全绿 + 三个 console chunk 各自独立分包（`role=admin` 的会话不会下载它们）；后端四条门禁（typecheck / 987 tests / build / secret scan）全绿，其中 `console.spec.ts` 30 条覆盖 §19 全部七条授面判据。**已知不粉饰的一条**：`consoleNav` 这个文件必须叫 `.tsx` 而不是 `.ts` —— 它导出的是**含 JSX 的元素**（`icon: <ApiOutlined />`），写成 `.ts` 时 `tsc` 报 6 个 `TS1005`（第 29 / 35 / 41 行各一对"`>` expected / `,` expected"），这是**命名**问题不是逻辑问题，`mv` 一下即过；列在这里是因为"为什么这个 nav 是 tsx"看起来不像需要解释的事，而下一个照抄 `.ts` 的人会再撞一次。
+>
+> **v1.15.2（2026-10-17，实时通道授面补齐 —— 一个**因为闸门有例外而打开的洞**）**：动机不是新需求，是补 v1.15.0 / v1.15.1 **自己留下的**一格：**§7 的 `WS /api/stats/live` 是 `app.ts` 鉴权闸门的唯一例外**（升级请求回不了 HTTP 401，否则浏览器只报 1006，前端分不清"会话过期"与"服务不可用"）。那个例外的代价是**闸门的 `role` 判定也一起被跳过** —— 实测 `role=user` 拿自己的会话即可握手成功并持续收到 `metrics` 帧，其中 `qps` / `successRate` / `balanceGlobal`（**全站**余额）/ `egress_pool` 全是 §19.1 明写"不给普通用户"的东西（同一个身份打 REST 的 `/api/stats/overview` 会 403）。**同一份数据两条通道、两种授面结果**，而 WS 那条是漏的。本版把它补齐：`live.ts` 的握手期会话判定（`handshakeSession`）从"只验会话活不活"改为**同时判 `role`**（`role=user` → 回绝），拒绝码取 `4401`（前端 `live.ts` 已有"跳登录页"分支，而这里要说的真话是"你的身份不该开这条通道"；WS 侧可表达的语义只有这一个码，`1008` 会走默认退避重连分支、把用户送进一个永远连不上的循环）。**为什么修在握手而不是把闸门例外缩小**：例外本身是对的（1006 vs 4401 的分辨只能这么来），要缩小的是**例外的授面代价**；而授面判据放在通道自己的握手里，等于"每条路径自己负责自己的授面"，与 §0.5"闸门判一次"的分工并不冲突 —— 闸门判不了的路径（本版就一条）由路径自己判，且判据同一份（`role`）。**`/api/*` REST 零变更、`/v1/*` 零变更、`src/gateway/` 零改动、DDL 零（`SCHEMA_VERSION` 仍为 2、零迁移）、`ERROR_CODES`/`GATEWAY_ERROR_CODES`/`hintCode` 零新增**（4401 是 §7 既有 WS 关闭码，不是新错误码）；**新增一条授面用例**（`src/api/routes/live.spec.ts`：`role=user` 走完握手 → 4401 且**一帧都不收**，同一 harness 上 admin 仍收到 `metrics` 作屏障）+ **一条变异**（删掉 `handshakeSession` 里的 `role` 判定 → 红，失败信息直接指名 `ready` 漏出去了）。**遗留两条不粉饰**：① 前端 `AppLayout` 的 `startLive()` 目前对**整个**登录区生效，`role=user` 进 `/console` 也会开这条通道并被 4401 弹回登录页 —— 这是**实现侧的 UX 缺陷**，契约不管前端怎么接线，但记在这里以免它被当成"后端又坏了"；〔**v1.15.3 订正：①已不成立** —— `role=user` 现在落在 `ConsoleLayout`（`web/src/layouts/ConsoleLayout.tsx`），那一个外壳**刻意不调 `startLive()`**：正解是别开这条连接，不是开了再处理它的错误。改动是路由层分流（`router.tsx` 的 `Workspace`）+ 一个独立的消费面外壳，**没有**去动 `live.ts` 的退避逻辑，也没有给 `role=user` 开后门。〕② **`web/` 消费面工作区仍未交付**（v1.15.1 的④写早了，见该条订正），即 §19 到目前为止是**只有后端**的一节 —— 普通用户今天仍登不进任何地方（`admin_users` 里没有 `role=user` 的账号时无所谓，一旦管理员建了一个，他登录后会被送到 `/dashboard` 然后逐个 403）。〔**v1.15.3 订正：②也已不成立**，`web/` 侧已交付：`/console` 三页（接入与 key / 我的用量 / 模型广场，`web/src/pages/console/`）+ `consoleNav` + `ConsoleLayout` + `SessionInfo.role` + `consoleApi` + 登录按 role 分流（`LoginPage` 用登录响应里的 `role` 选 `/console` 或 `/dashboard`）+ 根路径与管理面越权的兜底（`HomeRoute` / `NotFoundRoute`）。**但 v1.15.2 这一版的立论仍要保留**：WS 那条洞是真的，4401 是真的，测试与变异是真的，全部与前端何时交付无关。前端落地后 `ConsoleLayout` 不开这条通道，只是让"连不上"变成"不连"，**不改变**服务端必须拒这条握手的事实 —— 换一个客户端（脚本、第三方面板）照样能试。**前端这一侧没有自动化测试**（`web/` 无 test script、无 runner），验收口径是 `tsc --noEmit` + `vite build` 全绿 + 三个 console chunk 各自独立分包（`role=admin` 的会话不会下载它们）。〕
 >
 > **补遗 v1.0.2（2026-10-06）**：① §3 `POST /api/keys/:id/balance/refresh` 的响应补成 `202 {taskId}`（原文只写了用途、没写形状，而实现从第一天起就回 `202 {taskId}`，属于文本与实现的既存分歧，本次抹平）；② §5 新增「`POST /api/models/sync` 的字段映射」小节，把「只落能证明的、其余一律未知」写成明文规则；③ §5 补一句「同步不覆盖人工值」。除此之外 v1.0.1 全部内容不变 —— 无字段改名、无类型变更、无端点删除。动机与影响见 ADR-0009。
 >
@@ -281,6 +360,35 @@
 - `ADMIN_TOKEN` 仅作 CI 机器令牌，走 `Authorization: Bearer <ADMIN_TOKEN>`，**不参与浏览器流程**，默认关闭。
 - `READONLY_TOKEN`（v1.1.0 新增）是**只读维护令牌**：同一套 `Authorization: Bearer` 形式，但**作用域只有 `GET /api/observability/*`**，落在别的路径或用了写方法一律 `403 FORBIDDEN`。它**不等于**管理员会话、也不等于 `ADMIN_TOKEN`；未配置即关闭；两者配成同一个值会在启动时被拒。详见 §12.4。
 - `POST /api/assistant/chat`（v1.2.0，§13）**只用登录会话鉴权**：`ADMIN_TOKEN` / `READONLY_TOKEN` 落在它上面都不算通过（`ADMIN_TOKEN` 因非会话仍被 `requireSession` 挡下、`READONLY_TOKEN` 因作用域外被 `403 FORBIDDEN` 挡下）。聊天**消耗模型额度**，所以既不降格成只读、也不交给 CI 机器令牌。
+- **两种身份（v1.15.0，§19 / ADR-0034）**：会话对应的 `admin_users.role` 为 `admin` 或 `user`。
+  `admin` 打全部 `/api/*`；`user` **只能进 `/api/console/**`（只读）**，落在既有 `/api/**` 上一律 **403 `FORBIDDEN`**。
+  **`/api/console/**` 不是白名单例外** —— 它仍然全量鉴权（未登录 401），只是多一种身份能读。
+  判据在闸门里按前缀判一次（同 `inReadonlyScope()` 的纪律：新增路由不可能"忘了判作用域"）。
+  **`role` 每次鉴权从 `admin_users` 现读**，不存 `sessions`（存了就有"改了角色、旧会话还是老角色"的窗口）。
+  **`/v1/*` 与后台身份无关**（走网关 key，§10）—— 消费面改的是"谁能登进后台看数据"，不是"谁能调网关"。
+
+### 0.6 数据保留策略（v1.14.1）
+
+一张表只进不出，撞上的不是"磁盘满"，而是**一次拷不动的备份 / 跑不完的迁移**——那时候没人说得清是哪张表吃掉的。所以每张会累积的表都必须有一个**真在运行**的清理路径。
+
+| 表 | 清理函数 | 保留期 | 配置 | 节拍 |
+|---|---|---|---|---|
+| `usage_logs` | `pruneLogs` | 30 天 | `LOG_RETENTION_DAYS` | 6h（`src/server.ts`） |
+| `gateway_error_events` | `pruneGatewayErrorEvents` | **30 天（同 `usage_logs`，§12.1 明文）** | `LOG_RETENTION_DAYS` | 6h（同 `usage_logs` 那一个定时器） |
+| `audit_log` | `pruneAudit` | **180 天** | `AUDIT_RETENTION_DAYS` | 6h（同上） |
+| `tasks` | `pruneTasks` | 7 天，**只删终态** | `TASK_RETENTION_DAYS` | 6h（同上） |
+| `change_log` | `pruneChanges` | **10000 行**（行数，不是天数） | `CHANGE_LOG_KEEP_ROWS` | 6h（同上） |
+| `gateway_health_snapshots` | `pruneHealthSnapshots` | 90 天 | `HEALTH_SNAPSHOT_RETENTION_DAYS` | **自己的 1h**（`src/api/health-snapshot-writer.ts`） |
+| `balance_snapshots` | `pruneBalanceSnapshots` | 90 天 | `BALANCE_SNAPSHOT_RETENTION_DAYS` | **自己的定时器**（`src/api/balance-sync.ts`） |
+| `sessions` | `purgeExpiredSessions` | 会话过期即删 | —（无配置） | 1h |
+
+三条纪律：
+
+1. **审计的保留期独立于用量日志**。`usage_logs` 回答"跑过多少流量"，`audit_log` 回答"**谁在什么时候改过什么**"——安全事件的追溯期本就长于用量明细的有用期。拿 30 天裁审计，等于让"三个月前谁改过配置"比"三天前跑过多少请求"更早消失。`pruneAudit` **只按时间窗删**，不认 id / actor / action（逐行删审计的能力是"谁能抹掉自己的痕迹"的入口）。
+2. **`change_log` 按行数不按天数**。它是广播信道不是历史，判据是"消费者的 `seq` 追到哪了"。安全性论证（消费者 `lastSeq` 每拍推进、1s 节拍、一个节拍上界几十条）与两个前提见 `src/db/repo/change-log.ts` 头注 —— 所以 `keep` **必须是配置**，不是写死在代码里的"够大了"。
+3. **快照表留在各自的写入方**，不并进 `src/server.ts` 的全局定时器：它们的写入方已有自己的节拍，再挂一个全局清理器就成了"同一个表两个节拍"，两边保留期一旦配得不一样，**谁先跑谁后跑决定库的大小**。
+
+所有 prune 一律 `< cutoff`（不是 `<=`）：取整到毫秒边界的行应该被**留下**，它是"刚刚还在窗口内"的那一条。清理失败**不带走进程**（逐条 try/catch），下一轮还会再来。
 
 ---
 
@@ -306,6 +414,50 @@
 ### `GET /api/auth/session`
 → `200 { "username": "admin", "expiresAt": "..." }`
 未登录 → `401 UNAUTHORIZED`。前端启动时调它决定是否跳登录页。
+
+### `POST /api/auth/password`（v1.15.9 / ADR-0038 决策 3）
+```json
+{ "currentPassword": "...", "newPassword": "..." }
+```
+→ `204`（无响应体）
+
+改的是**会话本人**那一行。**没有 `:username` 路径参数** —— 本契约里**不存在**"改别人的口令"
+这个能力（少一个参数就是少一类越权面），两种身份走同一条路径。
+
+| 失败 | 码 | `details` | 副作用 |
+|---|---|---|---|
+| 未登录 | `401 UNAUTHORIZED` | — | — |
+| 当前口令不对 | `401 INVALID_CREDENTIALS` | — | 审计 `auth.password` / `fail` / `invalid_current_password`；占限速额度 |
+| 新口令与当前相同 | `400 INVALID_PARAM` | `field: 'newPassword'` | 审计 `auth.password` / `fail` / `same_as_current`；占限速额度 |
+| 限速（每 IP 5 次/分钟） | `429 TOO_MANY_ATTEMPTS` | `limitPerMinute: 5` | 审计 `auth.password` / `fail` / `rate_limited` |
+| 口令太短（< 8） | `400 INVALID_PARAM` | `field: 'newPassword'` | 无（schema 层拒，请求没进来） |
+
+- **旧口令必填且必须验**：少这一格的话，**一条被偷走的会话就能直接改掉口令、把真正的主人锁在门外**。
+  校验走 `verifyPassword`（与登录同一个函数，不复刻算法）。
+- **限速与登录共用同一个闸**（就是上面 5 次/分钟那一个）。不共用的话这条端点就是一条**不受限速的
+  口令猜测通道**，而它猜中的收益比登录页更高 —— 登录进去还得找到别的东西，改密猜中了直接接管
+  这个账号。前端因此照 `LoginPage` 的做法起 60 秒倒计时，而不是让人反复点一个必然失败的按钮。
+- **新口令与旧口令相同必须拒**：不拦的话"改密成功"可能什么都没变（散列重算一遍、其他会话被踢，
+  而口令还是那一串），用户以为自己换了。
+- **成功之后：当前会话留着、该账号的其他会话全踢**，同一个事务：
+  `UPDATE admin_users SET password_hash = ?` + `DELETE FROM sessions WHERE username = ? AND token_hash != ?`
+  （本会话的 `token_hash`；取不到时**退化成全踢** —— 宁可让本人重登一次，
+  也不要留下一条可能被别人持有的会话）。
+  - **前端因此绝不能在成功后跳登录页**：跳了用户会以为改失败了（或以为自己把自己踢了）。
+  - 用 `username` 而不是"登录时间"来判会话：同一账号在不同机器上的会话之间**没有任何可比较的先后**
+    （`last_seen_at` 是最后一次请求，不是创建时刻）。
+- **`PASSWORD_MIN_LENGTH = 8`**，与 §19.7 建号**同一把尺子**（判据在服务端，前端那格只是提示）。
+- **闸门放行是"字面路径 + 方法门"**（v1.15.9）：`POST` 放行给 `role=user`，`GET` **不放行** ——
+  **路径放行不等于方法放行**，前缀放行会把将来长在 `/api/auth/` 下的别的东西一起放掉
+  （与 `session` 只放 `GET`、`logout` 只放 `POST` 同形，§19.1）。
+  〔**v1.15.9 实测订正**：这一格的"不放行"**不是 405**，本仓根本没有 405 —— `buildApp`
+  没挂 `setNotAllowedHandler`，方法不匹配落进 `setNotFoundHandler`。真实响应按身份分两样：
+  `role=user` 打 `GET /api/auth/password` → **`403 FORBIDDEN`「当前账号只能访问消费面」**
+  （方法门不给放行 → 落到 `role` 判定的 `403`），`role=admin` 打它 → **`404 NOT_FOUND`**
+  「接口不存在」（闸门放行、但没有这条路由）。两个都不是 405，也都不是 200。
+  判据表钉的是"**路径放行 ≠ 方法放行**"这一件事，用 `[403, 404, 405]` 三者容错 ——
+  写文档时把它念成了 405 是**过度具体**，实测见 ADR-0038「手工走查」。〕
+- 写方法照旧过 CSRF（§0.5）：缺 `X-Requested-With` → `403 CSRF_REJECTED`。
 
 ---
 
@@ -355,7 +507,7 @@
 
 | 字段 | 可空 | 说明 |
 |---|---|---|
-| `supplier` | ✅ `null` | **只读语义、可写入**。`null` = 通用上游；`"tierflow"` = 走 §15 账号面。前端账号池分区的**唯一判据**（不解析 `baseUrl` 猜） |
+| `supplier` | ✅ `null` | **只读语义、可写入**。`null` = 通用上游；`"tierflow"` / `"tokenrhythm"` = 走 §15 账号面。前端账号池分区的**唯一判据**是**集合成员** `supplier ∈ SUPPLIER_ACCOUNT_KINDS`（§15.12 锚 1，v1.16.0 改口 —— 等值比较在第二家接入时不报错，只会让新供应商静默没有入口；不解析 `baseUrl` 猜） |
 | `totalBalance` | ✅ `null` | 上游合计，**分**。全部未知时为 `null`（不是 0）。**组成**：`Σ账号 quota + Σ无账号归属的 balance 类 key`（v1.4.0 修订，见 §15.6 / ADR-0018 决策 3） |
 | `balanceUnknownKeyCount` | ❌ | 余额未知的 key 数。**未知 ≠ 0**，前端必须单独呈现。口径为 `category='balance' AND unlimited=0 AND balance_cents IS NULL`（v1.4.0） |
 | `unlimitedKeyCount` | ❌ | `balanceKeyCount` 中无限额度（`unlimited=1`）的条数，**是子集、不额外相加**，也不进"未知"计数（v1.4.0） |
@@ -378,7 +530,7 @@
 | `GET` | `/api/upstreams?q=&enabled=&page=&pageSize=` | 列表 |
 | `POST` | `/api/upstreams` | 建，body `{name, baseUrl, enabled?, supplier?, balanceQuery?}` → `201` |
 | `GET` | `/api/upstreams/:id` | 详情 |
-| `PATCH` | `/api/upstreams/:id` | 改，body 任意子集 + `revision`（含 `supplier?`，取值 `null \| "tierflow"`，省略 = 不改） |
+| `PATCH` | `/api/upstreams/:id` | 改，body 任意子集 + `revision`（含 `supplier?`，取值 `null \| "tierflow" \| "tokenrhythm"`，省略 = 不改） |
 | `DELETE` | `/api/upstreams/:id?force=false` | 删。有 key **或模型档案**且 `force!=true` → `409 UPSTREAM_HAS_KEYS`，`details: {keyCount: 6, modelCount: 3}`；`force=true` 按依赖序删整棵子树 → `204`（见下） |
 | `POST` | `/api/upstreams/:id/balance/refresh` | 按模板查该上游全部 key 余额 → `202 {taskId}` |
 | `POST` | `/api/upstreams/:id/balance-template/test` | **自测**：用草稿模板真实打一次查询 → `200 BalanceTestResult`（见下） |
@@ -409,7 +561,8 @@
 ```
 ① 用户模板 enabled=true   → 现有模板引擎（上文 balanceQuery，本版零改动）
 ② host 命中内置 preset     → 内置执行器（见 balancePreset）
-③ 账号型驱动（★v1.4.0 新增）→ 上游 supplier="tierflow" 时按账号逐个查（§15），
+③ 账号型驱动（★v1.4.0 新增；★v1.16.0 扩为在册供应商）→ 上游 supplier 是 §15 在册账号型
+                             （`"tierflow"` / `"tokenrhythm"`）时按账号逐个查（§15），
                              结果汇总成该上游的余额；本档只看 supplier，不看 baseUrl host
 ④ 都没有                   → 不发请求，计入 skipped，并带 hintCode=BALANCE_QUERY_UNSUPPORTED
 ```
@@ -651,6 +804,7 @@
   "rpm": 600,
   "tpm": 120000,
   "dailyQuota": 5000000,
+  "authorizedModels": ["deepseek-chat"],
   "dailyQuotaUsed": 1832450,
   "todayUsage": { "requests": 412, "tokens": 1832450, "costCents": 4820 },
   "keyCount": 1,
@@ -661,33 +815,162 @@
 }
 ```
 `rpm` / `tpm` / `dailyQuota` 为 `null` ⇒ **不限**。（画师 §三.7 明确要求。）
+`authorizedModels` 为 `null` ⇒ **不限模型**（该组可用全部已启用模型）；为列表 ⇒ 该组**只能**请求列出的模型名（见下「模型授权」）。
+
+> **首库种子「管理组」（v1.15.6 / ADR-0035）**：一个**全新的库**首次启动时
+> （`admin_users` 为空那一刻），引导流程会建一个名为 `管理组` 的组并把首个管理员
+> 放进它 —— 于是管理员**开箱即有一把能打 `/v1/*` 的 key**。
+> 这是**普通组**，不是特权：它出现在本节的列表里，配额可改、key 可加、组可删
+> （删掉后管理员退回"未分配"，账号本身不受影响）。
+> 种子**推荐配额为空**（不限）—— 那是个政策决定，不是默认值：部署者建站后
+> 应当自己给它设 `rpm` / `tpm` / `dailyQuota`（见 ADR-0035 遗留 2）。
+> **已有账号的库（升级）零动作**：`bootstrapAdmin` 在 `adminCount > 0` 时直接返回，
+> 而"给管理员补一个组"这件事**不替用户做** —— 走 §19.7 那条 PATCH（可见、有审计）。
 
 ### 端点
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/api/groups?q=&page=&pageSize=` | 列表 |
-| `POST` | `/api/groups` | `{name, rpm?, tpm?, dailyQuota?}` → `201`；**建组时自动签发第一个网关 key**，响应**额外带 `gatewayKey` 明文（仅此一次）** |
+| `POST` | `/api/groups` | `{name, rpm?, tpm?, dailyQuota?}` → `201`；**建组时自动签发第一个网关 key**，响应**额外带 `gatewayKey`（仅此一次）**。注意**形状与下一行不同**：这里是**嵌套对象** `{id, gatewayKey, maskedKey, createdAt}`（`{...group, gatewayKey: issued}` 摊平），明文在 `gatewayKey.gatewayKey` —— 见下「建组响应的 `gatewayKey` 是对象」 |
 | `GET` | `/api/groups/:id` | 详情（**不含**明文） |
 | `PATCH` | `/api/groups/:id` | `{name?, rpm?, tpm?, dailyQuota?, enabled?, revision}` |
+| `GET` | `/api/groups/:id/models` | 该组模型授权（**只读**）→ `{models: string[] \| null, authorizedModels: [{id, name, upstreamId}]}`；`models: null` = 不限（见下「模型授权」） |
+| `PUT` | `/api/groups/:id/models` | body `{models: string[] \| null, revision}`（**两格都必填**）→ `200 {models, authorizedModels, group: Group}`；`null`/`[]` = 不限（**整组替换**，不是增量）；含未知模型名 → `400 INVALID_PARAM`（`details.field='models'`）；`revision` 不匹配 → `409 REVISION_MISMATCH` |
 | `DELETE` | `/api/groups/:id` | → `204` |
 | `GET` | `/api/groups/:id/keys?page=&pageSize=` | 该组网关 key 列表（**不含**明文）→ 分页信封，项见下 |
-| `POST` | `/api/groups/:id/keys` | 再签发一把 → `201 {id, gatewayKey, maskedKey, createdAt}`，**明文仅此一次** |
-| `POST` | `/api/groups/:id/keys/:keyId/reset` | 重置 → `200 {id, gatewayKey, maskedKey, createdAt}`，旧 key **立即失效** |
+| `POST` | `/api/groups/:id/keys` | 再签发一把，body `{label?}` → `201 {id, gatewayKey, maskedKey, label, createdAt}`，**明文仅此一次**（`label` v1.15.9） |
+| `POST` | `/api/groups/:id/keys/:keyId/reset` | 重置 → `200 {id, gatewayKey, maskedKey, label, createdAt}`，旧 key **立即失效**（**新钥匙不带名字**，见下） |
 | `DELETE` | `/api/groups/:id/keys/:keyId` | → `204` |
 
 > **网关 key 明文纪律**：只在创建/重置响应里出现**一次**，之后绝不可再取回。前端创建弹窗关闭即从内存丢弃，**不缓存、不写 localStorage**。库内只存 sha256 摘要。
+>
+> **建组响应的 `gatewayKey` 是对象，不是字符串（v1.15.7 补登，实测踩过）**：上表两行的**明文位置不同形**，
+> 这是本节最容易抄错的一处 ——
+> `POST /api/groups` 回的是 `{...group, gatewayKey: {id, gatewayKey, maskedKey, createdAt}}`
+> （仓储层 `createGroup` 的返回值就是把 `group` 与 `issued` 两件事拼在一起，路由层原样摊平），
+> 所以**明文在 `gatewayKey.gatewayKey`**、掩码在 `gatewayKey.maskedKey`；
+> 而 `POST /api/groups/:id/keys`（与 `…/:keyId/reset`）回的是**顶层四格**，明文就在 `gatewayKey`。
+> 本版实测：`web/src/api/types.ts` 曾把前者写成 `gatewayKey: string`，
+> **类型检查全绿、四道门禁全绿**，而运行期把那个对象直接喂给弹窗 →
+> React 抛 `Objects are not valid as a React child`，**建组后整页进错误边界**。
+> 教训不是"前端大意了"，是**契约此前从未把这两处形状写下来对照** ——
+> 一份没写明形状的响应，前端只能靠猜，而猜错时编译期一声不出（契约只记"额外带明文"）。
+> 服务端形状**本版不改**（改它要动 `dto.ts` 与既有用例，那是另一版的裁定）；这里补的是**对照文本**。
+>
+> **key 的形状（v1.15.7 补登）**：`gw-` + 24 字节 base64url（`src/db/ids.ts`）。
+> 前缀刻意**不是** `sk-`：这是**我们自己签发**的凭据，不该长得像上游 key
+> （上游 key 长 `sk-…`，两者出现在同一张表 / 同一份日志里时，"这把是哪种"必须一眼可判）。
+> 此前契约正文从未登记过这个形状，只在 §12 的脱敏正则里出现过 `gw-…`；
+> `web/` 消费面一度按 `sk-` 措辞引导用户去列表里找，**照它去找得到的是空集**（v1.15.7 已改）。
+>
+> **`label` 在重置腿上是 `null`（v1.15.9 登记，实测确认）**：`resetGatewayKey` 是「删旧行 + 插新行」
+> 且**不传 `label`**（管理面的两个调用点 `createGroup` / `resetGatewayKey` 都不传 ——
+> 它们的语义是"建组附赠一把"与"换掉这把"，不是"起个名"）。
+> 后果要说清：**一把改过名的 key 被重置之后，名字没了**。这不是漏写 ——
+> 重置换的是**凭据本体**，旧名字描述的是"那把被换掉的"；沿用旧名字会让列表里出现
+> "小王的笔记本"却是一把小王从没见过的新钥匙（他手里的旧钥匙已经失效了），
+> 那是比"没名字"坏得多的信号。**消费面的自助重置不存在**（自助只有签发 / 改名 / 吊销），
+> 所以用户侧看到的行为是"我改了名的 key 一直在"，只有管理员重置会清名。
+>
+> **逐把 key 的管理面（v1.15.7 登记，端点零新增）**：本节四条 key 端点（列表 / 签发 / 重置 / 吊销）
+> 都是**逐把**的，但管理面长期只把它们收在一个"整组"的视角下（每行一个 `gatewayKeyMasked` + `共 N 把`），
+> 于是"哪把该重置、哪把该吊销"在界面上无答案。**客户端该有的形状是一个组内 key 列表**：
+> 列表来自 `GET /api/groups/:id/keys`（**它是唯一给出 `:keyId` 的读面**），
+> 行上直接给重置 / 吊销（各自一个确认，重置要明说**旧 key 立即失效**），
+> 签发 / 重置成功后当场展示明文一次并**同时给出带 `/v1` 的 Base URL**。吊销成功后就地删掉那一行，
+> **不整页刷新**。`web/` 侧的落法见 ADR-0036。
 
-### 网关 key 列表项（`GET /api/groups/:id/keys`）
+### 模型授权（v1.15.8 / ADR-0037）
+
+Bo 的原话：「别人的用户组是可以授权模型的，哪些组下的账号用哪些模型。」—— 本组之前**一个字段都不缺**
+（`upstream_keys.model_limits` 管的是"哪把上游 key 能跑哪个模型"，§3 / §16.3），
+缺的是**组这一层的收缩**：没有任何地方能表达「这个组的账号只许用这几个模型」。
+
+**形状**：`POST /api/groups/:id/models` 不存在 —— 授权是**整组的一个属性**，不是可累加的集合成员，
+所以用 `PUT`（全量替换）而不是 `POST`/`DELETE` 逐项增删。这与 `PUT /api/keys/:id/balance` 同一条理由：
+**`null`（不限）与 `[]`（一个都不许）是两个不同的事实，省略字段表达不了"置回不限"**，
+所以 `models` **必填且可空**。
+
+| 请求体 | 语义 | 落库 |
+|---|---|---|
+| `{"models": null}` | **不限模型**（该组可用全部已启用模型） | 删掉该组在 `group_models` 里的**全部行** |
+| `{"models": []}` | 与 `null` **同义**（不限）—— 见下"三态" | 同 `null`：删全部行 |
+| `{"models": ["a","b"]}` | 只许请求 `a` / `b` | 删旧行 + 插 `a` / `b` 两行（**同一事务**） |
+
+**三态只有两态：不落在"不限 / 受限"之外再分一层**。本契约沿 §15.7 / §16.3 的冻结口径
+（`src/db/model-limits.ts` 的 `serializeModelLimits`）：`null` / `[]` **同义 = 不限**，
+出口恒不出现 `[]`，**本契约不制造一个网关实现不了的第三态**。
+明确**不**支持"显式一个都不许"：它要求网关把"组没有任何可用模型"与"组未授权任何模型"
+分开表达，而后者与"组被禁用"（`GROUP_DISABLED`）的失败形状几乎一样、排障含义却相反；
+真有这个需求，正确的形状是**禁用组**，不是把授权列表设空。
+
+**键是模型名，不是 `model_id`**（ADR-0037 决策 2）：
+
+- 网关侧判的是**客户端请求的模型名**（`/v1/models` 给出去的是 `m.name`，
+  `POST /v1/chat/completions` 收到的也是名字），所以授权必须**按名字**判，
+  否则得在热路径上做一次名字→id 的映射，而那个映射今天**不存在**（`resolveUpstreamModel`
+  是恒等透传，档案表没有别名列）。
+- 代价**写在这里**：`models.name` **不是全局唯一**（`UNIQUE (upstream_id, name)`，
+  两条上游可以有同名模型）。所以授权一个名字 = 授权**所有叫这个名字的档案**。
+  这是**有意的**：`/v1/models` 上本来就分不出两条同名档案（`id` 字段给的就是 `m.name`），
+  按 id 授权会造出"列表里有它、授权表里没有它"的假象。
+- 表里仍存 `model_id`（`REFERENCES models(id)`），但它是**落库时由名字解析出来的**：
+  解析不到（名字不存在 / 上游已删）→ `400 INVALID_PARAM`（`details.field = 'models'`）。
+  **不做静默忽略**：把拼错的名字静默丢掉，等于给用户一个"保存成功但什么都没授权"的面。
+
+**热生效**：授权改变的**下一个 `/v1/*` 请求**即生效，与网关 key 撤销同级
+（`src/wiring/auth.ts` 的实时读库口径，不走快照、不等 1s 轮询）。
+
+**乐观锁**：`revision` 必填（与 `PATCH /api/groups/:id` 同一条 —— 授权是组行的一个属性，
+两个管理员同时编辑同一个组的授权时，后写者必须知道前面有人写过），不匹配 →
+`409 REVISION_MISMATCH`（`details.expected` / `details.actual`）。**PUT 成功会递增
+`groups.revision`** —— 组行上的其他编辑（改名、配额）因此也能感知"授权动过了"。
+
+**级联**：删组 → 该组的 `group_models` 行一起删（组没了，它的授权无从谈起）；
+删上游 → 该上游下模型档案被硬删时，指向它们的授权行也一起删
+（**否则外键违约，删上游直接 500** —— `foreign_keys=ON` 且全库无 `ON DELETE` 子句，见 §19.9）。
+删组 / 删上游**都不删模型档案本身**，所以"授权列表里少了一个"的唯一成因是它被删了，
+不是"授权被顺带清空"。
+
+**写入侧的两条边界（`PUT` 的失败形状）**：
+
+- **名字解析先于写库**：`models` 里有一个解析不到的名字 → 整次 `PUT` 回
+  `400 INVALID_PARAM`（`details.field = 'models'`，message 列出未知的那些名字），
+  **库零变更**（`revision` 都不动）—— 不静默丢掉拼错的名字（决策 2）。
+- **未知组 → 404**：`:id` 不存在时 `GET`/`PUT` 都回 `404 NOT_FOUND`，
+  与 `PATCH /api/groups/:id` 一致。
+
+**解析面不限 `enabled`**（写侧判据，与 §5「启用/停用」是两件事）：
+授权一个**存在但当前被停用**的名字是**合法**动作 —— 停用是档案的临时状态、
+授权是组的长期策略，把前者当后者的前置条件会把"先授权、再启用"变成一条
+没人记得住的**操作顺序约束**（而那条约束的失败表现是"保存没生效"）。
+**代价说清**：这种授权当**打不通**（档案停用走不到它），但**仍然在授权列表里**，
+所以它会出现在 `GET` 的 `authorizedModels` 里、**不在** `/v1/models` 的收窄结果里 ——
+管理面抽屉对此**必须显式提示**（不然就是又一种"看得见但不生效"的会骗人的信号，
+ADR-0037 决策 9 有抽屉侧的具体落法）。
+
+### 网关 key 列表项（`GET /api/groups/:id/keys`；`GatewayKeyDto`）
 ```json
 {
   "id": "gwk_9a12",
   "maskedKey": "****9f3c",
+  "label": "小王的笔记本",
   "createdAt": "2026-10-01T03:00:00.000Z"
 }
 ```
 - `id` 就是 `:keyId` 的取值 —— **本端点存在的唯一理由**：`Group` 对象只暴露 `gatewayKeyMasked`，前端拿不到 `keyId`，重置/吊销两个端点无从触达。
+- `label` **非破坏新增**（v1.15.9 / ADR-0038）：人类给这把 key 起的名字，`string | null`（`null` = 没名字）。
+  这一列**建表起就在**（`src/db/schema.ts`），只是从来没人写、也没人读；v1.15.9 把签发权下放到消费面之后，
+  "哪把是给哪个客户端的"没有答案就成了一个真问题 —— 它是**签发（可选带上）与改名（可改可清）**共同写的一格。
+  - **空串与纯空白一律归一化成 `null`**（`normalizeLabel`），所以只有两态，**没有 `""`**：
+    库里两种"空"并存之后，前端判空的那句就得写两遍，而漏掉的那遍会把 `''` 渲染成一个看不见的 `<Tag>`。
+  - **它不参与任何判据**：不加进 `key_hash`、不影响鉴权、不影响排序（排序仍固定 `createdAt, id`）。
+    改一个名字**不会**让任何客户端掉线。
 - **不返回** `updatedAt`：网关 key 的改法是「删旧行 + 插新行」（重置即失效），`updated_at` 恒等于 `created_at`，回一个永远相等的字段只会让人以为它可以不同。
+  **〔v1.15.9 补记：改名是唯一的例外 —— 它会写 `updated_at`，而这一版**仍然不回**这个字段：
+  理由不是"它现在还恒等"（改过名的行已经不恒等了），是"回了它就要有人在界面上解释这个差异"，
+  而名字什么时候改的对使用者没有意义。这一格留着，以便将来真要"最近改名时间"时不必再动形状。〕**
 - 排序固定 `createdAt, id`，因此 **`Group.gatewayKeyMasked` 恒等于列表第一项的 `maskedKey`**（组内至少 1 把 key 时）。
 - 明文、`key_hash` 均不出现在本端点，任何情况下都不出现。
 - **吊销是硬删**（行不在即失效），不会出现在本列表；痕迹只留在 `audit_log`。因此本端点没有 `includeDeleted`（契约 §3 上游 key 的软删口径不适用于网关 key）。
@@ -719,7 +1002,7 @@
 
 | 字段 | 取值 | 说明 |
 |---|---|---|
-| `type` | `chat` \| `embedding` \| `image` \| `audio` \| `rerank` | |
+| `type` | `chat` \| `embedding` \| `image` \| `audio` \| `rerank` | **模型类别**（v1.15.10 起它**进服务路径**，见 §10「端点类别准入」）。写入面：`POST /api/models/sync` 按**名字**推断（`inferModelType`，§5 同步映射表）、`PATCH /api/models/:id` 人手改（人工优先，同步不覆盖已手工改过的行）。**建了 `image`/`audio`/`rerank` 的档案不等于那个端点能用** —— 三类端点一律 `501`（§10 `UNSUPPORTED_PREFIXES`）；类别的用途是"**哪个端点服务它**"，不是"它能不能跑"。本字段**没有** `POST /api/models` 创建端点（档案只能经同步出生） |
 | `capabilities` | `stream` \| `function_call` \| `vision` \| `json_mode` 的数组 | |
 | `capabilitiesSource` | `manual` \| `probe` \| `null` | **v1.11.0 新增、只读**（`PATCH` 不收）。来源标记，与 `capabilities` 一起解读：`manual` = 人手 `PATCH` 写的（**探测永不覆盖**）；`probe` = 机器探测写的；`null` = 从没问过。`ADMIN`/前端只读，用来区分「不知道」与「问过、不支持」 |
 | `lastProbedAt` | ISO8601 \| `null` | **v1.11.0 新增、只读**。最近一次能力探测的时刻（**探测每次都刷，与是否覆盖 `capabilities` 无关**）；`null` = 从没探测过 |
@@ -734,7 +1017,7 @@
 > 少这一条，档案卡会列出"能跑这个模型"的 key 里混进白名单外的一把 —— 而网关侧 `matchesModel()` 会拒绝它，
 > 于是页面上「可用 key 有 3 把」与实测「2 把在跑」长期对不上，且**没有任何报错**可以追。
 > `models` 是**上游事实、只读**：`PATCH /api/keys/:id` 不收该字段，本地想覆盖是 P6 `key_models` 的事（尚未落地）。
-| `enabled` | bool | 决定是否出现在 `/v1/models`。验收 4 要求两边**逐项 0 差异** |
+| `enabled` | bool | 决定是否出现在 `/v1/models`。验收 4 要求两边**逐项 0 差异** —— **v1.15.8 改口**：`/v1/models` 的集合 = `enabled` 判据 **∩ 该组授权**（§4「模型授权」）；**未授权任何收缩的组**（`authorizedModels: null`）看到的集合与改版前**逐项相同**，验收 4 的原判据对这类组原样成立 |
 
 ### 端点
 
@@ -1075,11 +1358,22 @@ costCents = round(promptTokens    / 1000 * priceInputPer1k)
 3. 前端**首帧**发 `{"type":"auth"}`（**仅就绪确认，不传 token**）。
 4. 服务端回 `{"type":"ready"}`。**5s 内未就绪 → 前端主动断开**（服务端也会关，码 `4408`）。
 
+> **本通道只对 `role=admin` 开（v1.15.2，§19.1）**。第 2 步的会话校验**同时判 `role`**：
+> `role=user` 同样在第 2 步被拒，码 **`4401`**，且**不会收到任何一帧**（连 `ready` 都没有）。
+> 理由是 `metrics` 帧里的 `qps` / `successRate` / `balanceGlobal` / `egress_pool`
+> 与 `/api/stats/overview`（§6）**同一份数据**，而 §19.1 明写那个端点不给普通用户 ——
+> 同一条链路两种授面结果就是把授面做成了筛子。
+> 判据落在 `live.ts` 的 `handshakeSession`（**建连之前**，不是连上之后挑字段），
+> 用例 `src/api/routes/live.spec.ts`「role=user 开实时通道」。
+> **为什么不用 `1008`**：1008 在前端走 `default` 退避重连分支，会把一个
+> "你的身份不该开这条通道"的事实渲染成"网络不好，再试试"，而重新登录一万次也不会变。
+
+
 ### 关闭码
 
 | code | 含义 | 前端动作 |
 |---|---|---|
-| `4401` | 会话失效 | 跳登录页 |
+| `4401` | 会话失效 **或身份不该开本通道**（`role=user`，v1.15.2） | 跳登录页 |
 | `4408` | 就绪超时 | **重连一次** |
 | `1012` | 服务重启 | 退避重连（1s→2s→4s→max 15s） |
 | `1008` | 跨站 Origin 被拒（未通过 §0.5 同源判定）—— **既有实现、文档补记** | 退避重连（走 `default` 分支，同 `1012`；源侧修好即自愈） |
@@ -1336,11 +1630,48 @@ REST 全量 `/api/stats/balance`（`live.ts` 注释里写明：通道只报"变�
 
 | 端点 | 说明 |
 |---|---|
-| `POST /v1/chat/completions` | stream / 非 stream |
-| `GET /v1/models` | 集合必须与模型档案 `enabled=true` **逐项 0 差异**（验收 4）。**v1.11.0 只加字段**：每项新增 `capabilities` / `contextLength` / `endpointTypes`（`endpointTypes` 本期恒 `null` = 未采集），既有 `id` / `object` / `created` / `owned_by` **四字段形状零变更** |
-| `POST /v1/embeddings` | |
+| `POST /v1/chat/completions` | stream / 非 stream。**只服务 `type='chat'` 的模型**（v1.15.10 端点类别准入，见下） |
+| `GET /v1/models` | 集合 = 模型档案 `enabled=true` **∩ 该组授权**（验收 4，v1.15.8 改口 —— 见 §5 `enabled` 行与 §19.6）。**v1.11.0 只加字段**：每项新增 `capabilities` / `contextLength` / `endpointTypes`（`endpointTypes` 本期恒 `null` = 未采集），既有 `id` / `object` / `created` / `owned_by` **四字段形状零变更**。**v1.15.10 再加一格 `type`**（同 §5 `ModelDto.type`，同一份 `models.type` 列）—— 准入按类别把关，就必须把类别说出来，否则调用方只能盲试端点 |
+| `POST /v1/embeddings` | **只服务 `type='embedding'` 的模型**（v1.15.10，见下） |
 | `image` / `audio` / `rerank` | 建档案，接口返回 `501 UNSUPPORTED_ENDPOINT` |
 | `GET /internal/snapshot` | 本机观测 |
+
+**端点类别准入（v1.15.10 / ADR-0039）**
+
+两个服务端点各只服务一个类别：`/v1/chat/completions` ← `chat`，`/v1/embeddings` ← `embedding`。
+登记类别与端点不符 → **`400 INVALID_REQUEST` + `param=model`**（沿用既有码，**零新增**），
+文案里报出该模型的登记类别与端点名。
+
+> **这一条修的是什么**（写清楚，否则下一个人会以为它是"顺手加的校验"）：
+> 在此之前 `models.type` **只活在建档与展示里** —— 服务路径上没有任何一层读它
+> （读路径的 SELECT 不带这一列、`ModelDescriptor` 里没有这个字段、路由与引擎里零次 `.type` 读取）。
+> 于是把任何**登记过的** chat 名字打到 `/v1/embeddings`，请求会被**原样转发**给上游的
+> `/embeddings` 路径；上游回 404，而网关把 4xx **原样透传**（`classifyUpstreamStatus` 对 404 判
+> `null` = 不是 key 的错，这是对的），于是这**一次 404 被当成一次正常调用**落进 `usage_logs`：
+> `x-gateway-attempts: 1`（真的敲了上游）、`error_code = NULL`、并且因为 `todayUsage()`
+> **不带状态过滤**，管理面的组用量行与消费面的额度卡（同一句 SQL，§4 / §19.3c）
+> 上那个 `requests` 数字会跟着虚高。**类别是网关自己的登记事实**：
+> 上游没有向量模型时，正确行为是**网关在出站之前说"这个端点不服务这个类别的模型"**，
+> 而不是把问题变成上游的一条 404 —— 后者既烧一次真实尝试，又把失败记成成功。
+
+- **判在路由层、引擎之前**（与 `GROUP_DISABLED` / `MODEL_NOT_AUTHORIZED` / 限流同一族）：
+  **0 次真实尝试**、候选集根本不建、不计任何 key 健康、不碰冷却；§12.1 事件与响应同源（归 `INVALID_REQUEST`）。
+  与授权门**同一位置、同一排**（都在 `readModel` 之后、"body 其余部分"之前），两个 handler **都要有**。
+- **门序**：组停用（403）→ 限流（429）→ 名字缺失（400）→ 组授权（403 `MODEL_NOT_AUTHORIZED`）→ **类别（400）**。
+  授权在前是刻意的：没被授权用这个模型的调用方该拿到"没授权"（方向是"找人开权限"），
+  而不是"类别不对"（方向变成"换模型名"，那是错的建议）。
+- **未登记的模型名本闸不表态**（照旧进引擎）：存在性由候选集回答（既有 `503 NO_AVAILABLE_KEY`，
+  同样是 0 次真实尝试）。这条限定了本闸**永远不会拒掉一个路由器还能路由的名字** ——
+  否则就是另一种"列表里有、打过去不通"（§19.6）。类别判据取自**快照**（与选路同一拍子），
+  未登记的窗口期退回旧行为（上游 404 透传），而不是收窄成 400。
+- **修好的形状**（同一条请求，改前 / 改后）：chat 名打 `/v1/embeddings`，
+  改前 = 上游 404 透传 + `attempts=1` + 一行 `usage_logs`（`requests` 计数 +1）；
+  改后 = 本地 `400` + `attempts` 头根本没有（`x-gateway-attempts` 只由引擎的转发结果写）+ 零 `usage_logs`。
+- **同类风险（登记备查，非本版修复）**：若某个上游对**不支持的路径**回 403（而不是 404），
+  本缺陷的旧行为会经 `classifyUpstreamStatus` 判成 `AUTH_INVALID` → `reportFailure` →
+  key 冷却 → 连续失败自动停用 —— 也就是说**调用方打错端点能打坏一池 key**。
+  TierFlow 回 404，所以这条在本部署上没有触发；准入闸落地后它从"整池"缩到"单个名字"，
+  但"正常聊天名也可能被上游回 403"这条残余风险仍归 §16.3 的 key 健康口径管辖。
 
 - 错误体：`{ "error": { "message": "...", "type": "...", "code": "..." } }`。
 - 每个 `/v1/*` 请求都带 `x-request-id`：入站值合法则沿用、否则重新生成，并在**响应头**回写最终值；同一值原样透传上游，并落 `usage_logs` / `gateway_error_events` 的 `request_id` 列（口径见 §6「关联键」）。该头是本节的**唯一新增要求**，不动错误码表、不动错误体。
@@ -1349,9 +1680,10 @@ REST 全量 `/api/stats/balance`（`live.ts` 注释里写明：通道只报"变�
 
 | code | HTTP | `type` | 触发条件 |
 |---|---|---|---|
-| `INVALID_REQUEST` | 400 | `invalid_request_error` | body 不是 JSON 对象、缺 `model`/`messages`/`input` |
+| `INVALID_REQUEST` | 400 | `invalid_request_error` | body 不是 JSON 对象、缺 `model`/`messages`/`input`；**或模型登记类别与该端点不符**（v1.15.10 / ADR-0039，`param=model` —— 消息里写清登记类别与端点名。**0 次真实尝试**、零 `usage_logs`） |
 | `INVALID_API_KEY` | 401 | `authentication_error` | 网关 key 缺失/未知/已吊销（**不区分**"不存在"与"已禁用"，避免探测窗口） |
 | `GROUP_DISABLED` | 403 | `authentication_error` | 网关 key 有效但所属用户组被禁用（`enabled=false`） |
+| `MODEL_NOT_AUTHORIZED` | 403 | `authentication_error` | **v1.15.8 新增**（ADR-0037）。网关 key 有效、组已启用，但请求的模型不在该组授权列表里。**0 次真实尝试**（在路由层就拒，候选集根本不建）、不计任何 key 健康、`failureReason: null`。**type 取 `authentication_error`** 不是 `invalid_request_error`：调用方没有写错任何东西，是**凭据（组）不被允许用这个模型** —— 与 `GROUP_DISABLED` 同一族（"你这个人进不来"，不是"这个请求格式不对"）。与 404 / 503 NO_AVAILABLE_KEY 的分界：模型存在且服务端在跑（`/v1/models` 能列出它），只是**这个组**不被授权 —— 分不清"模型不存在"与"没授权"会让调用方拿 403 去探测别的组有什么模型，所以这里**明说**是授权问题 |
 | `NOT_FOUND` | 404 | `invalid_request_error` | `/v1/*` 下未知路径 |
 | `RATE_LIMITED` | 429 | `rate_limit_error` | 用户组 RPM / TPM 超限、**网关池饱和**（候选非空、0 次真实尝试、全候选并发已满，ADR-0011），**或出口预算耗尽 / 绑定的出口全部在冷却**（v1.7.0，ADR-0021 决策 9(5)：**同样是 0 次真实尝试、不计任何 key 健康、不写出口冷却、一律带 `Retry-After`**） |
 | `QUOTA_EXCEEDED` | 429 | `insufficient_quota` | 用户组日配额（token）超限 |
@@ -1375,9 +1707,17 @@ REST 全量 `/api/stats/balance`（`live.ts` 注释里写明：通道只报"变�
 > 预算耗尽与全部冷却走 429）—— 与 `NO_AVAILABLE_KEY` 同族、同一个判据形状。
 > **§12.1 的 `category` 仍是 9 值**："出口选不出"与"key 选不出"是**同一个分诊对象**（候选为空、0 次真实尝试、查池子与配置），
 > 精确值由 `gatewayCode` 承担；新增第 10 个分型要同时动契约枚举、`observability-params.ts` 的 9 分型、前端筛选器与两条断言，信息量为零。§13.5 助手的终止帧码值表同批补入。
+> **v1.15.8 的 `MODEL_NOT_AUTHORIZED` 同样不新增第 10 个分型**：它归 **`AUTH_FAILED`**（403 / "凭据对了、人不对"，
+> 与 `GROUP_DISABLED` 同一行）—— 授权是**组身份的属性**，不是调用方写错了请求。
 > **码值落地笔**：`GATEWAY_ERROR_CODES` **10 → 11**。本条只登记**码值与触发条件**；`src/gateway/errors.ts` 的常量
 > 与其长度断言（`src/api/balance-sync.spec.ts` 的两行：`ERROR_CODES` 16 / `GATEWAY_ERROR_CODES` 10）
 > **必须与实现同笔落** —— 二者是"契约侧钉码表长度"的快照，漏改即红。
+> **v1.15.8 落地笔**：`GATEWAY_ERROR_CODES` **11 → 12**（同一判据：`src/api/balance-sync.spec.ts`
+> 的长度断言与 §10 本表、`src/wiring/error-event-sink.ts` 的分型映射**同笔落**）。
+> **同笔订正一处既有漂移**：`NO_AVAILABLE_EGRESS`（v1.7.0 进表）从未登进
+> `error-event-sink.ts` 的分型映射，503 事件一直被归成 `INTERNAL`（error 级）——
+> 而本表上方"§12.1 的 category 仍是 9 值"那句的意图**本来就是**它与 `NO_AVAILABLE_KEY`
+> 同一个分诊对象。本版把它补进 `NO_AVAILABLE_KEY` 分型并加用例钉住，**不静默改**（ADR-0037 决策 5）。
 > 另有一个不对外承诺的内部结果：客户端中途断开时引擎会构造 `499 UPSTREAM_ERROR`，此时对端已不可达，`499` 不出现在任何真实响应里，**不入本表**。
 
 - 失败枚举（计入 key 失败，仅这五类）：`AUTH_INVALID` / `RATE_LIMITED` / `INSUFFICIENT_BALANCE` / `UPSTREAM_ERROR` / `NETWORK`。400/404/422 与客户端断开**不计**失败。
@@ -1444,7 +1784,7 @@ REST 全量 `/api/stats/balance`（`live.ts` 注释里写明：通道只报"变�
 | `category` | `severity` | HTTP | 对应 §10 码 | 排障含义 |
 |---|---|---|---|---|
 | `CLIENT_REQUEST` | `warn` | 400 / 404 / 501 | `INVALID_REQUEST` / `NOT_FOUND` / `UNSUPPORTED_ENDPOINT` | 调用方写错，**不是网关问题** |
-| `AUTH_FAILED` | `warn` | 401 / 403 | `INVALID_API_KEY` / `GROUP_DISABLED` | 网关 key 缺失/未知/已吊销（401），或 key 有效但用户组被禁用（403） |
+| `AUTH_FAILED` | `warn` | 401 / 403 | `INVALID_API_KEY` / `GROUP_DISABLED` / `MODEL_NOT_AUTHORIZED`（v1.15.8） | 网关 key 缺失/未知/已吊销（401），key 有效但用户组被禁用（403），或组不被授权用该模型（403，ADR-0037） |
 | `RATE_LIMITED` | `warn` | 429 | `RATE_LIMITED`（含池饱和，ADR-0011） | 退避后可重试 |
 | `QUOTA_EXCEEDED` | `warn` | 429 | `QUOTA_EXCEEDED` | 用户组日配额用尽 |
 | `NO_AVAILABLE_KEY` | `error` | 503 | `NO_AVAILABLE_KEY` | 查池子与模型档案（候选为空的**或**密文解不出的） |
@@ -1470,7 +1810,7 @@ REST 全量 `/api/stats/balance`（`live.ts` 注释里写明：通道只报"变�
 - 网关侧只做**入队**（O(1) 内存操作），落库由定时批量完成 —— **热路径零同步 DB 写**（§9）。
 - 队列有上限；溢出时丢**最旧**的一批并计数，累计丢弃数由 `/api/observability/health` 的 `events.dropped` 暴露。**丢事件不许静默**。
 - **落盘前脱敏**：`keyMasked` 只有 4 位；`message` 过 scrub（`Bearer <token>` / `sk-…` / `gw-…` 形状一律替换成 `****`）并截断 512 字符。明文 key 不进事件、不进日志、不进错误体。
-- 保留期与 `usage_logs` 同口径（`LOG_RETENTION_DAYS`，默认 30 天）。
+- 保留期与 `usage_logs` 同口径（`LOG_RETENTION_DAYS`，默认 30 天）。**这条从 v1.1.0 起就是契约行，但实现侧直到 v1.14.1 才真正接上** —— `pruneGatewayErrorEvents` 一直存在且有 spec，生产环境里零调用方。补接时**没有**顺手改这条：真要给错误事件单独的保留期，走契约修订，不夹带在"补齐实现"里。
 
 ### 12.2 健康指标 `GET /api/observability/health`
 
@@ -1916,20 +2256,26 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 
 ---
 
-## 15. 供应商账号面（TierFlow 专用，v1.4.0 / v1.4.1）
+## 15. 供应商账号面（v1.4.0 / v1.4.1；v1.16.0 起服务在册的多家供应商）
 
-本节只服务 **TierFlow**（`upstreams.supplier = "tierflow"`），是 Bo 指定的**个例**：
+本节服务**在册的账号型供应商**（`upstreams.supplier ∈ {"tierflow", "tokenrhythm"}`），是 Bo 指定的**个例**：
 它解决"一个上游下有几十个账号、每个账号各有一套管理凭据"，**不**抽象成通用多供应商框架。
 **本节已冻结**（2026-10-07，Bo 拍板）。原 `docs/契约草案-v1.4.0-供应商账号面.md` 已并入本节，草案文件不再存在。
+
+> **〔v1.16.0：第二家 TokenRhythm 接入（ADR-0040）〕** 本节的正文（端点表、DTO、批量结果形状、
+> 节奏、凭据纪律）**逐字适用于两家**，因为结构上两家共用一个驱动器协议（六个批量端点复用同一套
+> 机制），差异**只在能力集** —— 能力集另立 **§15.14 能力表**，是"某家有没有某个概念"的唯一判据。
+> 读本节时请把「TierFlow」读作「在册的账号型供应商」，凡是**只有 TierFlow 成立**的地方
+> （套餐、key 额度、模型白名单、`quota_per_unit`）**都已在 §15.14 逐条标出**。
 
 ### 15.0 定位与边界
 
 - **通用上游零变更**：`supplier` 为 `null` 的上游，§2 / §3 / §6 / §14 的端点、字段、口径逐字不变。
-- **账号 ≠ key**：账号是**凭据容器**（手机号 + 密码 + 会话 + uid），一个账号下有 N 把 sk- key 与
+- **账号 ≠ key**：账号是**凭据容器**（账号 + 密码 + 会话 + uid），一个账号下有 N 把 sk- key 与
   M 个套餐。账号**不能**用 `/api/keys` 承载（那是网关的转发凭据）。
 - **账号面是并列的顶层资源**（`/api/supplier-accounts`），不织进 `/api/keys`、`/api/upstreams` 的既有分支。
 - **明文纪律同 ADR-0006**：账号密码与会话值**永不**出现在任何响应、日志、审计 detail、任务 result、
-  错误信息里。出口只有手机号掩码。会话生命周期见 §15.9。
+  错误信息里。出口只有账号掩码（手机号掩码 / 邮箱掩码，§15.1 `identifier` 行）。会话生命周期见 §15.9。
 
 ### 15.1 `SupplierAccount` 对象（全字段）
 
@@ -2000,6 +2346,15 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 它是**比例**不是金额）。换算基准 `quota_per_unit` 每次查询时**从上游读**、不写死 ——
 供应商改了换算比，我们的数不会跟着错。
 
+**「不写死」管两个方向，读侧与写侧都要守**（v1.14.0 补成文）：读侧是 `quota → 分`
+（`quotaToCents` / `mapSubscription`，一律收形参、无内部默认值可言）；**写侧是 `分 → quota`** ——
+`createToken` 建固定额度 key 时发出去的 `remain_quota`。写侧一度是这条纪律**唯一的例外**
+（写死 `DEFAULT_QUOTA_PER_UNIT` = 500000），站点把比值改成 250000 时，1000 分（10 元）的 key
+会发 5 000 000 quota（= **20 元**）—— **多给一倍，且 HTTP 200、不报错、管理面每个可见信号都说"成了"**。
+v1.14.0 起写侧同样走上游真值：比值由调用方给，建 key 腿**从库里读**（不为它多发一次请求，§15.5 那行不变），
+读不到才落回文档默认值 —— 那是**诚实的缺省**（缺的就是"我们不知道这个站点的比值"）。
+两列缓存的形状与四条写入腿见 ADR-0031 决策 2；**该两列不进本 DTO**（前端不换算，§「出口命名铁律」）。
+
 **出口命名铁律**：**本面任何货币字段一律以 `Cents` 结尾**，值恒为 int 分。这条是为了让"我手上这个数
 要不要 ÷500000 或 ×100"这个问题在字段名上就答完 —— 前端永远不做换算，也不该看见 `quota`
 （上游用 quota、`paid_money` 用**浮点元**、我们用**整数分**，三个单位同屏时肉眼分不出来）。
@@ -2016,6 +2371,7 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 | `GET` | `/api/supplier-accounts?upstreamId=&status=&q=&page=&pageSize=` | 列表 |
 | `GET` | `/api/supplier-accounts/:id` | 详情 |
 | `POST` | `/api/supplier-accounts/import` | 批量导入并逐个登录 → `202 {taskId}` |
+| `POST` | `/api/supplier-accounts/import-sessions` | 粘贴 Cookie 导入（**仅 TokenRhythm**，v1.16.4） → `202 {taskId}` |
 | `POST` | `/api/supplier-accounts/refresh` | 刷余额（quota + 套餐） → `202 {taskId}` |
 | `POST` | `/api/supplier-accounts/:id/login` | 单账号重登 → `200 SupplierAccount` |
 | `POST` | `/api/supplier-accounts/:id/test` | 连接自测（真实打一次） → `200 SupplierTestResult` |
@@ -2027,6 +2383,13 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 | `PATCH` | `/api/supplier-accounts/:id` | 改账号（**本版只收 `egressId` + `revision`**，见下） → `200 SupplierAccount`（§16.7 Tier 2 / v1.13.0） |
 | `DELETE` | `/api/supplier-accounts/:id?force=false` | 删除账号（见下） |
 
+> **上表是两家共用的端点集**（v1.16.0；v1.16.4 增加 `import-sessions`）。**逐端点对第二家
+> TokenRhythm 的差异**，判据全在 §15.14 能力表：① `keys` 拒收 `unlimited:false` / 非空
+> `models`（`422`，**省略即合法**）；② `rotate-key` 整体 `422`（它没有套餐）；③ `subscriptions`
+> 恒回空页（订阅腿零请求）；④ `import-sessions` 是 **TR 专属**（TierFlow 入口 `422`），
+> 而 `import` 对 TR 入口 `422`（密码型专属）。其余端点**逐字同形** —— 请求体、响应形状、
+> 任务模型、状态机一家一版是没有的。
+
 #### `POST /api/supplier-accounts/import`
 
 ```json
@@ -2035,13 +2398,40 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 
 - `text`：`手机号,密码` 行文本（粘贴或 CSV 文件名皆可）。容忍**表头行**、`+86` 前缀、空格/制表符/分号分隔。
   解析失败的行**跳过并逐行报原因**，不整批失败。
-- 上游必须 `supplier="tierflow"`，否则 `422 UNPROCESSABLE`。
+- 上游必须 `supplier` 是 §15 在册账号型（`"tierflow"` / `"tokenrhythm"`，§15.14），否则 `422 UNPROCESSABLE`。
+  **v1.16.1 起 TokenRhythm 在此处入口 422**：这家只有会话鉴权、没有密码登录（§15.14.1），
+  本端点的 `text` 管道对它**不适用** —— 不解析、不发请求。TR 入池走 §15.9 的离线一次性会话导入。
+- TierFlow：解析失败的行**跳过并逐行报原因**，不整批失败；`maskIdentifier` 对掩不了的账号
+  （纯字母用户名等）**拒绝该行并逐行报原因**，绝不存原文。
 - 已存在的 `identifier` **不重复建行**，执行"重登 + 刷新"，`action: "relogin"` 在逐行结果里标明。
 - **每号只试一次登录**（供应商风控），失败即记 `login_failed`。
 - **本端点只收密码型凭据**（`text` 管道）。会话型凭据**不走 HTTP**，见 §15.9。
 - 对已是 `credentialSource="session"` 的 `identifier` **补录密码**是本端点的正常用法（不是特例）：
   走"重登 + 刷新"，`action: "relogin"`，该行**就地升级**为 `credentialSource="password"`
   并从此纳入自动重登（§15.9）—— 不新建行、不改 `id`。
+  **〔不适用于 TokenRhythm：这家没有密码登录，补录密码无处可登；它没有"升级为密码型"这条路。〕**
+
+#### `POST /api/supplier-accounts/import-sessions`（v1.16.4，仅 TokenRhythm）
+
+```json
+{ "upstreamId": "up_7f3a", "text": "tr_session=xxxxx; Path=/\ntr_session=yyyyy; Path=/" }
+```
+
+- `text`：**每行一枚会话**。`tr_session=…; Path=/`、裸 value、带 `Cookie:` 前缀均可；
+  空行与 `#` 注释跳过；首行可带 `cookie` / `session` 等表头。同一枚会话出现两次**保留第一行**
+  并报一行（归 `skipped`），不会为重复行再打一次上游。
+- 每行发**一次** `GET /api/me` 解析身份（`data.id` / `data.name` / `data.phoneMasked`，
+  无手机号则 `emailMasked`）；判重键是**上游 uid**（`sha256('tokenrhythm:uid:<id>')`），
+  写库时按 `uid → 掩码 → 摘要` 命中既有行，只覆写会话与权威信息（§15.9 v1.16.3）。
+  `upstreams.base_url` 存的是网关根（`https://host/v1`），而 `/api/me` 在**站点根**：
+  与驱动器一致，先剥掉末尾 `/v1` 再拼（否则会打成 `/v1/api/me`，上游 404 被误判成身份不可用）。
+- 逐行结果复用 §15.3 `SupplierBatchResult`，`action="import"`。解析失败行 `code="LINE_PARSE_FAILED"`
+  归 `skipped`；401 会话失效 `code="SESSION_EXPIRED"`、连不上 `code="UPSTREAM_UNREACHABLE"` 归 `failed`；
+  403 **不是**会话过期（`code=null`，原因在 `message`，§15.14.2 钉子）。
+- 入口闸：非 TokenRhythm 上游、或排除名单非空（名单按真值匹配，而这里只有掩码）→
+  `422 UNPROCESSABLE`；空文本 / 只有表头注释 → `400 INVALID_PARAM`。全部**在任务创建前**拒绝。
+- **这是唯一收会话明文的 `POST`**：值不写日志、不进审计 `detail`、不出现在任务 result 或错误
+  `message`；落库即密文。风险取舍与边界见 §15.9 纪律 1（v1.16.4）。
 
 #### `POST /api/supplier-accounts/refresh`
 
@@ -2051,6 +2441,7 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 
 `ids` 省略 = 全部账号。会话失效**自动用存档密码重登**；**无存档密码的账号不重登**，
 直接计 `failed` 并置 `status="session_expired"`（§15.9 有解释：只有会话、没有密码时无从重登）。
+**TokenRhythm 账号全部落这一类**（这家没有密码登录，§15.14.1）：过期后请重新执行离线会话导入。
 节奏与礼貌参数见 §15.5。
 
 #### `POST /api/supplier-accounts/keys`
@@ -2076,6 +2467,12 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 | `unlimited` | `true`（**默认**）→ 上游 `unlimited_quota: true` 且**入池行落 `upstream_keys.unlimited = 1`**；`false` → 必须给 `quotaCents`（int 分，由我们换算成上游 quota，前端不乘 500000） |
 | `label` | 入池后的 `upstream_keys.label`；省略则用上游侧 key 名 |
 | `models` | **v1.4.2 新增，可选**。模型白名单，`string[]`。省略**或空数组** = **不设白名单**（落 `NULL` = 不限模型，与 v1.4.1 现状一致 —— 空数组与省略同义，见 §3）。给了值 → 上游侧 `model_limits_enabled=true` + `model_limits` = 逗号拼接，入池行**同批**落 `upstream_keys.model_limits`（上游原样 CSV） |
+
+> **`unlimited` / `quotaCents` / `models` 三格是能力位，不是通用字段**（v1.16.0，§15.14.1）：
+> 上表按 **TierFlow 口径**写。**没有这些概念的供应商**（TokenRhythm）在这三格上
+> **拒收显式值** —— `unlimited:false` → `422 UNPROCESSABLE`、非空 `models` → `422 UNPROCESSABLE`；
+> **省略**（默认 `unlimited:true`、无白名单）恰是它的**唯一合法形状**，原样放行。
+> 判据是 §15.14 能力表，**不是**"这个电话是谁打的" —— 新增第三家供应商时按同一张表判。
 
 > **`models` 的写入责任（v1.4.2）**：白名单是**上游事实**，我们只是把它落库、原样透出（§3）。
 > 建 key 时**由我们提交的值**为准；上游若在创建响应里回显 `model_limits`，以回显值覆盖提交值；
@@ -2107,6 +2504,11 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 
 **跨账号**的扁平套餐列表 —— 与 §15.1 详情里那个嵌套 `subscriptions[]` 是**同一份数据的两个切面**：
 那条回答"这个账号有哪些套餐"，这条回答"这堆账号的套餐排在一起、接下来谁到期"。
+
+> **〔v1.16.0〕没有套餐概念的供应商（§15.14.1）恒回空页**（`{items:[],total:0}`）：
+> 端点仍 `200`、形状不变 —— 不是 `404`、不是 `422`。理由：**"这家没有套餐"不是一次失败**，
+> 而"该上游下没有账号"才是（那种情形按 §15.4 走 `422`）。前端按能力位**根本不画这个页签**，
+> 这个空页是给直接调 API 的人看的诚实答案。
 
 响应：§0.3 分页信封，`items[]` = `SupplierSubscriptionRowDto` = §15.1 的 `SupplierSubscriptionDto`
 **加上三个归属字段**：
@@ -2257,6 +2659,10 @@ createdAt, updatedAt`。
 - `raw` 已抹掉所有凭据出现并截断至 8KB；`loginAttempted=true` 表示本次为验证密码而真实登录过。
 - 业务性失败（不可达 / 供应商 `success:false`）一律 `200` + `ok:false`（诊断语义，同 §2）；
   只有请求本身有问题才 4xx/5xx。
+- **〔v1.16.0〕TokenRhythm 的 `parsed` / `raw` 形状**：`balanceCents` 来自
+  `availableBalanceCny` 字符串换算（§15.14.2），`quotaPerUnit` 恒 `100`（**约定值不是上游真值**，
+  诊断"换算比改没改"要看 TR 自己的信封而不是它），`subscriptionCount` 恒 `0`；
+  `raw` 是 TR 信封两腿（`me` + `wallet/summary`）原样 —— 同样抹凭据、截断 8KB。
 
 ### 15.3 批量任务 result（四个批量端点共用形状）
 
@@ -2273,10 +2679,11 @@ createdAt, updatedAt`。
 }
 ```
 
-- `action`：`login` \| `relogin` \| `refresh` \| `create` \| `sync`。**每个值都必须有生产者**，
-  不留"枚举里有、没人发"的空值：`login` = `import` 里**新建**的账号首次登录成功；
-  `relogin` = 已有账号在 `import` / `refresh` / `keys` 中被重登；`refresh` = `refresh`；
-  `create` = `keys`；`sync` = `keys/sync`。
+- `action`：`login` \| `relogin` \| `refresh` \| `create` \| `sync` \| `rotate` \| `import`。
+  **每个值都必须有生产者**，不留"枚举里有、没人发"的空值：`login` = `import` 里**新建**的账号
+  首次登录成功；`relogin` = 已有账号在 `import` / `refresh` / `keys` 中被重登；`refresh` = `refresh`；
+  `create` = `keys`；`sync` = `keys/sync`；`rotate` = `rotate-key`（§15.13）；
+  `import` = `import-sessions`（v1.16.4，只登记会话、**没有发生登录**）。
 - `code`：供应商错误码原样（如 `LOGIN_INVALID_CREDENTIALS`）或本节错误码；`message` 一句人话。
 - **逐行结果不含任何凭据**（`keyMasked` 是掩码，`keyId` / `tokenNo` 是内部标识）。
 - 进度**只由真正干完的账号推进**（复用 `startTask` 的 `step()`），不做假进度条。
@@ -2327,11 +2734,17 @@ createdAt, updatedAt`。
 | 项 | 值 | 依据 |
 |---|---|---|
 | 账号间间隔 | **0.6s**（当前实现值） | ~~工作台 29 号跑下来未触发限流~~ —— **依据已降级**（§16.7 Tier 1.5，v1.4.8 在本行收口）：该结论只在"单出口 + 当时那种请求密度"下成立，对**按 IP 计数**的限流**不成立**。Tier 1.5 落地后本行口径改为**「同一出口共用一条速率」**，值待实测标定。**v1.8.0（#6 重算）**：出口级速率由 **§16.7.3 Tier 1.5 令牌桶**取代 —— **0.6s 保留为账号级内层纪律，管不住出口**，一轮总时长按**出口级**公式算，见本节下方重算行与重开门槛 |
-| 单账号请求数 | 刷新 = 2（`/api/user/self` + `/api/subscription/self`）；建 key = 2（创建 + 回查 `token_no`） | 少打一次是一次 |
+| 单账号请求数 | 刷新 = 2（`/api/user/self` + `/api/subscription/self`）；建 key = 2（创建 + 回查 `token_no`）—— **建 key 那格只对 TierFlow 成立，TokenRhythm = 1（§15.14.3）** | 少打一次是一次 |
+| 建 key 的换算比取值 | **从库里读** `supplier_accounts.quota_per_unit`，**不为它多发一次 `/api/user/self`**（v1.14.0）—— **没有 `quota_per_unit` 概念的供应商（§15.14.1）不适用**，它的建 key 不消费比值（1 次请求、body 只有名字） | 那会是 3 次，破坏上一行。代价是比值**可能过期**；取舍见 ADR-0031 决策 3（「可能过期的真值」对「永远错的常量」） |
 | 上游并发上限 | 复用 `REFRESH_CONCURRENCY` | 不新拍一个数，避免手动/自动漂成两个并发度 |
 | 登录重试 | **每号一次**，不重试 | 避免触发账号锁定 |
 | keyword 搜索 | 留空拉全量再本地过滤 | 供应商搜索不可靠（文档 §8.5） |
 | 删除上游 key | 无尾斜杠路径 | 带斜杠 307（文档 §8.4） |
+
+> **本表是 TierFlow 口径（v1.4.0 起）**。第二家 TokenRhythm 的**请求数差异只有一处**：
+> **建 key = 1 次**（TierFlow 是 2 —— 上游 `POST /api/api-keys` 一次就回明文，没有"种子 + 回查"两步），
+> 其余（`test` 2 / `refresh` 2 / `keys/sync` 3 —— 订阅腿零请求）**与 TierFlow 同数**，
+> 账号间间隔、并发上限、登录每号一次这三条纪律两家通用。逐行对照见 **§15.14.3**。
 
 ~~27 个账号一轮刷新 ≈ 1 分钟~~ —— **v1.8.0 重算（#6，口径见 §16.7.3）**：一轮总时长 = **`ceil(总请求数 / 有效容量) × 窗口`**，**有效容量要扣掉数据面保留额** —— 占位值下（`capacity: 5` − `reserveForData: 1` = 4 枚/窗口）：**26 把 key 记账 = `ceil(52/4)×60s` ≈ 13 分钟；27 个账号记账 = `ceil(54/4)×60s` ≈ 14 分钟（本节取这条）**。恒定补桶速率 ≈10.4 分钟只是实现说明，**不进契约承诺**。**这些数全部是「单出口」口径**（本期部署形态：1 个出口 IP + 27 个账号 + 全部 key）；**出口 > 1 时逐出口各自成立，不得把多个出口的 token 加总去凑一轮总数**。0.6s 账号间隔**保留为账号级内层纪律**，出口级速率**由 Tier 1.5 取代**。故：**一律异步任务**，不阻塞 HTTP。
 
@@ -2344,10 +2757,11 @@ createdAt, updatedAt`。
 ### 15.6 与既有口面的关系（非破坏清单）
 
 **`supplier` 怎么设**：`POST /api/upstreams` 与 `PATCH /api/upstreams/:id` 接受可选 `supplier`
-（`null` \| `"tierflow"`，默认 `null`），走既有的 `revision` + `change_log` 写入路径。
+（`null` \| `"tierflow"` \| `"tokenrhythm"`，默认 `null`；**v1.16.0 扩枚举**，ADR-0040），走既有的 `revision` + `change_log` 写入路径。
 
 - **不另加 `accountPool: {enabled, provider}` 这类包装字段**：那会和 `supplier` 说同一件事，
-  两个字段早晚漂成不一致。前端判据就是 **`upstream.supplier === "tierflow"`** —— 一个事实一个字段。
+  两个字段早晚漂成不一致。前端判据就是 **`supplier ∈ SUPPLIER_ACCOUNT_KINDS`**（§15.12 锚 1，
+  v1.16.0 改口为集合成员判定）—— 一个事实一个字段。
 - 建/改上游表单里加**一个可选「供应商」下拉**（默认「通用」），只有这一处；
   选定后该上游**详情页**才出现账号池分区。通用上游的表单其余部分逐字不变。
 - **host 判断留在后端**：前端不解析 `baseUrl` 猜供应商 —— 猜错会静默渲染出一个功能全 422 的分区。
@@ -2518,18 +2932,22 @@ createdAt, updatedAt`。
 | 来源 | 载体 | 入口 | 能否自动重登 |
 |---|---|---|---|
 | **密码型**（第一事实源） | 人工维护的「手机号,密码」清单（粘贴 / CSV） | `POST /api/supplier-accounts/import` 的 `text` | ✅ 会话过期用存档密码重登 |
-| **会话型**（冷备） | 操作员本地的一份**离线导出文件**（手机号 → uid / session / username / quota） | **离线一次性导入**（非 HTTP），见下 | ❌ **无密码即无法重登** |
+| **会话型**（冷备） | 操作员本地的一份**离线导出文件**（手机号 → uid / session / username / quota）；或**粘贴的 cookie 清单** | 离线一次性导入（`scripts/import-supplier-session.ts`）；**TokenRhythm** 另可走 `POST /api/supplier-accounts/import-sessions`（v1.16.4，粘贴），见下 | ❌ **无密码即无法重登** |
 
 同一 `identifier` 两路都到过时，`credentialSource` 取 **`password`**（密码是超集能力：有密码就一定能登，
 有会话不一定）—— 这是一个账号只有一行，两路输入**汇入同一行**，不建第二行。
 
 **会话型导入的四条纪律**：
 
-1. **不进 HTTP 面**：不给 `/api/*` 开"提交会话值"的入口 —— 那个端点一旦存在，
-   浏览器、代理日志、前端 `localStorage` 就都成了会话明文的过路点。会话型导入只由
-   **操作员在本机执行一次性导入**完成，路径由**运行时环境变量**给出（不写进配置仓库、不写进文档正文）。
-   **前端不提供任何会话值输入控件**："粘贴会话"这个词在本契约里只指**操作员在其本机导入脚本里粘贴**，
-   不存在"页面上贴 cookie"这条路径（ADR-0018 备选方案表最后一行就是否决它的理由）。
+1. **凭据原则上不进 HTTP 面；v1.16.4 起有一处显式例外**：原则上不给 `/api/*` 开"提交会话值"的
+   入口 —— 那个端点一旦存在，浏览器、代理日志、前端 `localStorage` 就都成了会话明文的过路点。
+   **例外只有一个**：`POST /api/supplier-accounts/import-sessions`（**仅 TokenRhythm**，v1.16.4）
+   接收**粘贴进页面的 cookie 文本**。这是业主（Bo）在确认成本后**显式接受的风险取舍**：
+   原话是「感觉好麻烦，还是直接做到web吧，我这个人自用项目不会泄露的」「不是上传文件，只是粘贴
+   cookie到输入框」。它换掉的是"30 个号逐个回终端跑脚本"，**不接受**的是把值留在任何可读面上 ——
+   例外只到这一条端点：**不写日志、不进审计 `detail`、不回显**（响应 / 任务 result / 错误 message
+   都只有掩码），落库即密文；前端提交后立刻 `resetFields()`，不写 `localStorage` / URL。
+   除这条端点外，**离线一次性导入仍是唯一入口**；TierFlow 不开放任何会话值 HTTP 入口。
 2. **不经 Agent / 不进本仓**：该文件的内容**不读入任何 AI 会话上下文、不进 git、不进日志、不进聊天记录**。
    仓库里只有"如何导入"的说明，没有值本身。
 3. **入库后即视为该文件作废**：`session_cipher`（aes-256-gcm，`MASTER_KEY`）落库成功后，
@@ -2540,8 +2958,56 @@ createdAt, updatedAt`。
 **已知代价（写在这里，不留给以后发现）**：**只有会话、没有密码的账号，会话一过期就回不来**。
 `session_expires_at` 到期后 `refresh` 无法自动重登（无密码可登），该账号落 `status="session_expired"`，
 需要操作员**再次执行一次性导入**（贴新会话）或**补录密码**（走 §15.2 `import`）。
-所以：长期看，**密码型凭据才是完整形态**，会话型导入是"先把今天的余额接进来"的过渡通路。
+〔**TokenRhythm：后半句不适用** —— 它没有密码登录，补录密码也无处可登，过期只能重新离线导入。〕
+所以：对**有密码登录的供应商**，长期看**密码型凭据才是完整形态**，会话型导入是"先把今天的余额接进来"的过渡通路。
 **这条不是缺陷，是取舍** —— 会话型入口的价值就在于不必先拿到 27 个密码。
+
+> **〔v1.16.1：TokenRhythm 只有"会话型"这一种来源〕** 本节上面那套**双路径**（密码型为第一事实源、
+> 会话型为冷备 / 加速通道）是 **TierFlow 的形状**，对 TokenRhythm **不成立**：TR 站点只有会话鉴权
+> （Cookie `tr_session`），**没有可用的账号密码登录**（§15.14.1 / §15.14.2 事实 1）—— 因此
+> `credentialSource` 对 TR **恒为 `session`**；「补录密码后走自动重登」这条升级路径**不存在**，
+> 会话过期只能由操作员**重新执行一次离线导入**。`POST /api/supplier-accounts/import` 对 TR
+> **入口直接 422**（不解析文本、不发请求）；TR 的入池通路是本节离线脚本，v1.16.4 起另加
+> `POST /api/supplier-accounts/import-sessions`（同一条 cookie-only 解析链，见下一条）。
+> 本节的纪律 2/3/4 对 TR 原样适用；**纪律 1 对 TR 的唯一例外就是 v1.16.4 那条端点**。
+>
+> 另有一条**写请求边界**：TR 的写失败有**两条路**，**401 `UNAUTHORIZED`** = 会话真过期，
+> **403 `CSRF_INVALID`** = CSRF 头不合规（**凭据是无辜的**）。**403 绝不映射成 `session_expired`**
+> —— 那会把一次本可自愈的 CSRF 失败报成"会话过期"，把操作员引去重新导入一枚本来还有效的会话。
+> 详见 §15.14.2。
+>
+> **〔v1.16.2：批量导入 = 同一个脚本读一份本机文件〕** 多账号不需要新入口，只需要把"一个号一次"
+> 换成"一份文件一次"：`SUPPLIER_SESSION_BATCH_FILE=/path/to/sessions.txt`（`-` = stdin）。
+> 文件每行 `标识<分隔符>会话`，分隔符 **TAB / 逗号 / 空白** 任一；空行与 `#` 注释跳过；
+> 首行可以是 `identifier,session` / `账号,cookie` 表头；会话一侧可以整段粘贴
+> `tr_session=…; Path=/`，脚本只取 value。**同一账号出现两次保留第一行**并报一行；
+> **单行失败不中断整批**（一份 30 个号的文件不该因为第 7 行少一格就只导入前 6 个）。
+> 输出仍只给**掩码 + 行号 + 原因**，会话值与标识原文都不回显；落库仍是 `status="unknown"`，
+> 导入后由一次 `refresh` 验活。四条纪律（不进 HTTP 面 / 不经 Agent 与本仓 / 入库即作废 / 只服务管理面）
+> **对批量模式逐条适用** —— 批量只放大行数，不改变风险形状。
+>
+> **〔v1.16.3：只有 cookie、没有手机号/邮箱 —— 身份问上游，不要求操作员填标识〕**
+> `SUPPLIER_SESSION_COOKIE_ONLY=1` + `SUPPLIER_SESSION_BATCH_FILE`：文件每行**只放一枚会话**
+> （`tr_session=…; Path=/`、裸 value、带 `Cookie:` 前缀均可）。脚本对每行发**一次**
+> `GET /api/me`（§15.14.2），取 `data.id` / `data.name` / `data.phoneMasked`（无手机号则
+> `emailMasked`）用于判重与展示。**判重键是上游 uid**：`identifier_hash =
+> sha256('tokenrhythm:uid:<id>')` —— 它**不是**手机号/邮箱真值的摘要，不能与密码型/真值型
+> 账号的摘要互比；写库时按 `uid → 掩码 → 摘要` 顺序找既有行，所以"先按真值导入过、后按
+> cookie 重导"仍汇入同一行，只覆写会话与权威信息，**不改**既有行的展示掩码/摘要。展示列落
+> 上游返回的掩码；上游若回未掩码值，本地再掩，掩不出即拒绝该行（绝不落真值）。**这条通路会
+> 打上游**（标识+会话模式仍是零上游请求），但值仍只从操作员本机文件读、仍只输出掩码、仍不
+> 经过管理面 HTTP —— 四条纪律逐条不变。**排除名单非空时该通路整体拒绝**：名单按真值匹配，
+> 只有掩码无法验证，静默放行等于把硬约束变成建议。**已知代价**：每行 1 次 GET（30 行 ≈ 30 次
+> 串行请求）；`status` 仍落 `unknown`，由一次 `refresh` 转 `active`。
+>
+> **〔v1.16.4：同一解析链开了管理面粘贴入口（仅 TR）—— 业主显式风险接受〕**
+> `POST /api/supplier-accounts/import-sessions` 的 `text` 每行一枚会话，服务端调用的仍是
+> `importSupplierSessionCookies`（本节的 cookie-only 解析与落库逻辑**一行未复制**），所以
+> 判重键、掩码纪律、逐行失败语义全部一致。该端点**只**为 TokenRhythm 开：TierFlow 入口 422，
+> 因为它有密码通路，没有理由把会话值送进浏览器。**四条的现状**：纪律 1 有上述唯一例外；
+> 纪律 2/3/4 **不变**（值不进聊天 / 不进日志 / 落库即作废 / 只服务管理面）。**排除名单非空时
+> 入口 422**，与离线 cookie-only 模式同一理由。**边界**：这是"自用项目 + 已接受代理/浏览器
+> 过路点"的取舍，不是"会话值可以随便放"——任何日志、审计、错误体里都不许出现它。
 
 - **`quota` 字段（离线文件里带的）只当首次对账参考**，**不入库为余额**：
   入库后余额一律以管理面拉取为准（ADR-0017：上游接口是余额唯一事实源）。
@@ -2575,6 +3041,10 @@ createdAt, updatedAt`。
 - **升级路径**：`credentialSource="session"` 的账号经 `import` 补录密码（同一 `identifier`）后，
   该行**就地**升级为 `"password"` 并纳入自动重登 —— 不新建行、不改 `id`；
   这也是把冷备升成完整形态的**唯一**路径。
+- **〔v1.16.1〕TokenRhythm 的上表两行与"升级路径"都不存在**：这家只有会话鉴权
+  （§15.14.1），没有可用密码登录。它的账号**恒为 `credentialSource="session"`**，
+  过期即落 `session_expired`，恢复方式只有**重新执行一次离线导入**；`import` / `:id/login`
+  在入口 422，所以也不会出现"补录密码升级"这一步。
 
 ### 15.10 Python 工作台退役与数据迁移口径（v1.5.1 补成文，ADR-0018 决策 6）
 
@@ -2627,10 +3097,15 @@ createdAt, updatedAt`。
 
 | # | 事实 | 唯一判据 | 正文锚点 |
 |---|---|---|---|
-| 1 | 一个上游走不走**账号面** | **`upstream.supplier === "tierflow"`** —— **不解析 `baseUrl` 猜**（"域名里带 tierflow"**不是**判据） | §2 `supplier` 行；§15.6 末段（**一个事实一个字段**） |
+| 1 | 一个上游走不走**账号面** | **`upstream.supplier ∈ SUPPLIER_ACCOUNT_KINDS`**（集合成员判定，**v1.16.0 改口**；原判据是等值比较 `=== "tierflow"`）—— **不解析 `baseUrl` 猜**（"域名里带 tierflow"**不是**判据） | §2 `supplier` 行；§15.6 末段（**一个事实一个字段**）；§15.14 能力表 |
 | 2 | 批量任务的**逐行明细** | **`result.items`** —— **终态才出现**，**上限 500 行**；超出保留**前 500 行** + `truncated: true` + `itemsTotal` 给**真实行数**；**本期不分页** | §15.3 |
 | 3 | **账号对象形状** | **`SupplierAccount` DTO（§15.1 全字段）** —— **穷尽**（**v1.13.0 起这一格里多了 `egressId`**，见下注） | §15.1；§16.7 绑定纪律之三（**已按 v1.13.0 改口**） |
 
+- **锚 1 在 v1.16.0 从等值改成集合成员**（理由，ADR-0040 决策 3）：等值比较的失败模式是**静默**的 ——
+  接入第二家时不报错、也不 404，只是**新供应商在前端一个入口都没有**（按钮不出现、页签不出现）。
+  改成 `supplier ∈ SUPPLIER_ACCOUNT_KINDS`（`hasSupplierAccountPanel()`）后，新供应商只要进了
+  `§2` 的枚举就**自动**获得全部入口；**能力差异**（有没有套餐 / 有没有 key 额度）由 `§15.14` 能力表
+  单独管，**不写进这条判据**。前端镜像表与服务端能力闸是**同一个事实的两份呈现**，锚点都指 §15.14。
 - **三条全是读面，没有一条要前端自算**：`supplier` 是字段、`items` / `truncated` / `itemsTotal` 是服务端给的、DTO 是穷尽的。
 - **出口状态没有 REST 读面**（§16.7 三条绑定纪律之三，**v1.13.0 起重新表述**）：**出口池的"状态"**
   （在线 / 冷却 / 出口 IP / 心跳）读面**只有 §7 帧**（`egress_cooldown` + v1.6.4 的池级 `egress_pool`）；
@@ -2643,6 +3118,11 @@ createdAt, updatedAt`。
 ---
 
 ### 15.13 `POST /api/supplier-accounts/rotate-key` —— 套餐专属 key 轮换 / 重置（v1.9.0，ADR-0022）
+
+> **〔v1.16.0：本节只对"有套餐概念的供应商"成立〕** 没有套餐的供应商（TokenRhythm，§15.14.1）
+> **在端点入口直接回 `422 UNPROCESSABLE`，零上游请求** —— 套餐 key 这类东西在那边不存在，
+> 走完全程只会得到一次无谓的上游往返。**端点路径与任务类型不变**（`supplier_rotate_key`），
+> 差别只在入口闸；前端按 `SUPPLIER_CAPABILITIES[.].plans` 决定画不画那个按钮。
 
 **为什么有这个端点**：TierFlow 的**套餐专属 key** 与 §4 的余额 key 是两类东西（手册 §5.5）——
 每套餐**固定 1 把、不能新建 / 删除，只能重置**，且**重置响应直接下发新 key 明文**、旧 key 立即失效。
@@ -2683,7 +3163,9 @@ Bo 的手册（§5.3）已把它标为**「✅ 实测」**，本次据 Bo 指示
 
 **落库**：新 key 写入 `upstream_keys`，`category = "token-plan"`（池内**第一把**该类行，见 §15.8 第 6/8 问的本次修订），
 `label` = `套餐-<plan_title>`，`enabled = 1`；**`token_plan_remaining` 落 `NULL`**（余量未知 ≠ 0，
-由后续 `keys/sync` / 余额刷新回填）；**`unlimited` 不适用**（`token-plan` 行不落该列，§15.7）。
+由后续 `keys/sync` / 余额刷新回填 —— **v1.13.2 起该回填真实存在**：`GET /subscriptions` 每轮同步把
+`basic_token_total - basic_token_used` 写回该账号已入池的套餐 key，见 v1.13.2 ② / ADR-0030 决策 2）；
+**`unlimited` 不适用**（`token-plan` 行不落该列，§15.7）。
 出站请求**只带 `sub_no`**；明文 key **永不**出现在响应 / 日志 / 审计 / 任务 result 里。
 
 **错误面**：
@@ -2699,6 +3181,101 @@ Bo 的手册（§5.3）已把它标为**「✅ 实测」**，本次据 Bo 指示
 > `SUBSCRIPTION_NOT_FOUND` / `KEY_PLAINTEXT_MISSING` **不进 `ERROR_CODES`**（`items[].code`，同 §15.4
 > 对 `LOGIN_INVALID_CREDENTIALS` / `KEY_MASK_AMBIGUOUS` 的处理）。鉴权同 §0.5 登录会话（不用 `READONLY_TOKEN`）；
 > 审计 `action = "supplier.rotate-key"`，`detail` 只放计数（§15.7）。
+
+---
+
+### 15.14 能力表 —— 第二家账号面供应商 TokenRhythm（v1.16.0，ADR-0040）
+
+**为什么单开一小节**：§15 其余各节的端点、字段、状态机**对两家完全同形**（同六个端点、同 DTO、
+同任务模型），差异**只在"某家有没有某个概念"**。这一节是那个**唯一判据**：服务端能力闸、前端
+`SUPPLIER_CAPABILITIES`、本契约的三处说法都锚在这里。**通用层不认识"是哪一家"**：它只问能力表。
+
+**接入方式（ADR-0018 决策 0 的兑现）**：**加一个驱动器**，不是加一套框架。两家各一个文件
+（`src/supplier/tierflow.ts` / `src/supplier/tokenrhythm.ts`），实现**同一个 `TierFlowClient` 协议**；
+`clientFor()` 按 `upstreams.supplier` 选驱动器，**六个批量端点 + 被动重登 + 账号级节奏 + 逐行累加
+一行不改**。通用层唯一改动是 `SUPPLIER_KINDS` 多一个值。`/api/*` **零新增、零删除端点**。
+
+#### 15.14.1 能力表（"有没有这个概念"的唯一判据）
+
+| 概念 | TierFlow | TokenRhythm | 表现 |
+|---|---|---|---|
+| **账号密码登录** | ✅ | ❌ | TR 站点**只有会话鉴权**（Cookie `tr_session`）。`POST /api/auth/login` 端点存在但**从不认证密码**（任何输入一律 401 `UNAUTHORIZED`，与过期同码同文案），真实登录是验证码流程，网关**不**代跑。⇒ TR **只能**走 §15.9 的离线一次性会话导入入池：`import` 与 `:id/login` **入口直接 422**，零上游请求；前端不提供会话值输入控件。只有 cookie 时用 `SUPPLIER_SESSION_COOKIE_ONLY=1`，逐行 `GET /api/me` 解析 uid / 掩码（§15.9） |
+| 套餐（`subscriptions`） | ✅ | ❌ | TR 的 `subscriptions()` **不发请求**直接回 `[]`（订阅腿天然 no-op，**总请求预算不涨**）；前端不画套餐台账页签 / 不画套餐余额列 / 不画资金池两个套餐卡 |
+| key 额度（`unlimited` / `quotaCents`） | ✅ | ❌ | TR 的 key **只有名字**，无额度概念；`tokens()` 一律按 `unlimited:true, remainQuota:null`（§15.7 无限额度落 SQL `NULL` 的既有口径）上报 |
+| 模型白名单（`models`） | ✅ | ❌ | 同上，TR 全部 `models:null`；前端建 key 弹窗不画白名单字段 |
+| 套餐 key 轮换（§15.13） | ✅ | ❌ | `rotate-key` 对 TR **端点入口直接 422**，零上游请求 |
+| `quota_per_unit` | ✅ 上游真值 | ❌ | 落常量 `100`（1 元 = 100 分），只为"分"口径自洽 —— 建 key 不消费它，**不是**上游真值 |
+| 账号钱包余额 | ✅ | ✅ | 两家都有，同为 §15.1 `balanceCents` 分口径、`currency: 'CNY'` |
+
+**入口闸（服务端权威，前端镜像表只是"少画一个控件"）**：
+
+- `POST …/keys`：`unlimited:false` → `422 UNPROCESSABLE`「TokenRhythm 的 key 没有额度概念，不支持
+  unlimited=false / quotaCents（§15.14 能力表）」；非空 `models` → `422 UNPROCESSABLE`「TokenRhythm
+  的 key 不支持模型白名单（models），请省略该字段（§15.14 能力表）」。
+- `POST …/rotate-key`（TR 上游）→ `422 UNPROCESSABLE`「TokenRhythm 无套餐概念，不支持套餐 key
+  轮换（§15.14 能力表）」。
+- `POST …/import`（TR 上游）→ `422 UNPROCESSABLE`「TokenRhythm 只支持会话凭据（tr_session）……
+  账号入池请走 §15.9 的一次性离线会话导入」；`POST …/:id/login`（TR 上游）→ **同样 422**
+  （即使库里存着一枚看起来有效的会话）。两处都**不解析文本、不发上游请求、不写库**。
+- `POST …/import-sessions`（v1.16.4）是 **TR 专属**：**TierFlow 上游入口 422**（它有密码通路）；
+  TR 上游另受"排除名单非空 → 422"约束。拒绝发生在任务创建前，零上游请求。
+- **默认路径零闸**：`parseKeySpec` 的默认值（`unlimited:true`、无白名单）恰是 TR 的**唯一合法形状**，
+  原样放行 —— 闸只拦**显式指定**了不存在概念的请求。**空池**（该上游 0 账号）仍走 §15.2 的
+  `422`「没有可处理的账号」，与能力无关。
+
+#### 15.14.2 TokenRhythm 上游实测形状（12 轮探针，2026-10-18/19；与随附文档不符处以实测为准）
+
+| # | 事实 | 文档说法 | 实测 |
+|---|---|---|---|
+| 1 | **登录方式** | **整篇没有登录端点**（文档从已持有 `tr_session` 开始） | **端点存在但不认证密码**：`POST /api/auth/login` 传 `{account,password}` 的任何取值都回 401 `UNAUTHORIZED`（与过期会话同码同文案），**从未观测到一次成功登录**；真实登录是验证码 / `login-or-register` 流程。⇒ **TR 只支持会话凭据**，入池只走 §15.9 离线导入（v1.16.1 订正：v1.16.0 把"能发通这个端点"误读成了"密码登录可用"） |
+| 2 | **写请求 CSRF 生效条件** | 「`Origin` + `Referer` + `Sec-Fetch-Site` 三件套」 | **硬性只有 `Sec-Fetch-Site: same-origin`**（单变量 A/B：只有它 200，没有它必 403 `CSRF_INVALID`；`Origin` / `Referer` 顶替不了） |
+| 3 | **CSRF token 一次性？** | 「每次请求后轮换，旧 token 立即失效」 | 确**轮换**但**非一次性**（复用最新一枚连发两次写均 200） |
+| 4 | **余额来源** | **文档没有余额接口** | `GET /api/wallet/summary` → `data.availableBalanceCny`，8 位小数 **CNY 字符串**（`"23.66510789"`）⇒ `cnyToCents()`（只在驱动器这一处换算；解析不出有限数落 `null`，不猜） |
+
+**三条硬纪律**：
+
+1. **403 与 401 是两条路，403 绝不映射成 `session_expired`**。伪造会话 + 合法 csrf 回 403；
+   真过期回 401 `UNAUTHORIZED`。把 403 当过期会把一次 CSRF 失败误报成"会话失效"，
+   把操作员引去重新导入一枚本来还有效的会话。
+2. **TR 没有"登录失败"这个状态可用**：唯一的鉴权事实是会话是否有效（401 = 失效）。驱动器
+   `login()` 是**零请求的能力缺口**，直接回 `rejected`；`import` / `:id/login` 在入口 422。
+   因此 TR 的账号状态只会落 **`session_expired`**（不会落 `login_failed`），恢复方式只有
+   **重新执行一次离线会话导入** —— 不是缺陷，是这家站点没有密码通道的直接后果。
+3. **信封 `{code,message,data,traceId}`，`code` 是数字 `0` 才算成功**（业务错误给字符串码
+   `"UNAUTHORIZED"` / `"BAD_REQUEST"` / `"CSRF_INVALID"`）。
+
+**其余实测钉子**：`GET /api/me` 的 `data` 含 `id`（UUID）、`name`、`phoneMasked`（`192****5609`）、
+`emailMasked` —— cookie-only 导入用它解析身份（每行 1 次 GET，§15.9）；key 列表 `GET /api/api-keys`（**无分页，一页全量**）；建 key `POST /api/api-keys
+{name}` = **1 次请求**（TierFlow 是 2 次），`data.key` 完整明文**只此一次**、`data.id` 是 **UUID**
+（⇒ 池内 key 的 `token_plan` / 上游 id 列落 `null` 属预期，台账按**掩码**匹配）；掩码 `sk_tr_5o****6Us8C0`
+的可见尾 4 与明文真值尾 4 **一致** ⇒ §15.2 `keys/sync` 的掩码对账判据与 TierFlow 同形；**停用的 key
+仍在列表里**（删除的才消失）⇒ 台账以"上游还认的"为准；**key 数量上限是上游侧事实**（超限时上游按钮
+置灰）—— 我们不预知上限，不本地造一个"剩余配额"数。
+
+#### 15.14.3 请求节奏（§15.5 预算表增补）
+
+| 动作 | TierFlow | TokenRhythm |
+|---|---|---|
+| `test` | 2 | 2（`/api/me` + `/api/wallet/summary`） |
+| `refresh` | 2 | 2（同上两腿） |
+| `keys/sync` | 3 | 3（self 两腿 + subscriptions[no-op **0 请求**] + tokens —— **总预算不破**） |
+| `keys`（建 key / 每把） | 2 | **1** |
+| `import` | 每号 1 次登录 | **0**（入口 422；这家没有密码登录可打） |
+| `import-sessions`（v1.16.4） | —（TierFlow 入口 422） | 每枚会话 **1**（`GET /api/me` 解析身份） |
+| `rotate-key` | 1 / 账号 | **0**（端点入口 422） |
+
+**TR 的密码型导入不是"少打一次登录"，而是整条路不存在**：`POST /api/supplier-accounts/import`
+对 TR **入口直接 422**（§15.14.1 入口闸），不解析 `text`、不发请求。入池通路是 **§15.9 的离线
+一次性会话导入**（`scripts/import-supplier-session.ts`，操作员本机；多账号用
+`SUPPLIER_SESSION_BATCH_FILE` 一份文件一次导入，见 §15.9 v1.16.2 条），以及 v1.16.4 的管理面
+粘贴入口 `POST /api/supplier-accounts/import-sessions`（每枚会话 1 次 `GET /api/me`，上表最后一行）：
+离线脚本复用与 HTTP 导入
+同一套标识纪律 —— `normalizeIdentifier` 对纯数字走手机号路、邮箱走邮箱路，**其他形态**（纯字母
+用户名）`maskIdentifier` 掩不了（手机号至少 7 位 / 邮箱要有域名）⇒ **拒绝写入**，
+**绝不退化存原文**。导入结果落 `status="unknown"`（"已落库"不等于"验过活"），
+之后由一次 `refresh`（2 次请求）把有效性确认成 `active` 或 `session_expired`。
+
+---
 
 ## 16. TierFlow 数据面（`/v1/*`）接入约束（v1.4.0，路由者车道）
 
@@ -3182,11 +3759,34 @@ SSRF 拦截（`details.field='url'`）：**IPv4 段 `0.0.0.0/8` / `10/8` / `127/
 - **不读账号凭据**：本端点只读 `egress_proxies.secret`（出口自己的凭据），不读供应商账号凭据。
 - **成功**：`ok=true` + `egressIp`（回显端点正文，必须是 IP 形状）+ `latencyMs`；**失败**：`ok=false` + `egressIp: null` + `error`（HTTP 状态或错误 message，**不含凭据**）。
 - **落库**：无论成败都写 `last_test_at` / `last_test_ok`（`lastTestOk` 列 0/1；`NULL` = 未测）。**不写审计**（诊断，无配置变更）。
-- **回显端点**：`https://api.ipify.org`（运维探针同款，pool-probe.sh 的 `--echo-url` 缺省同源）。
+- **回显端点**：缺省 `https://api.ipify.org`（运维探针同款，pool-probe.sh 的 `--echo-url` 缺省同源）。
+  **v1.14.2 起可配**（`EGRESS_ECHO_URL`，见下）：空 / 未设 = 用上面的缺省值。
 
 **`url` 的 `user:pass@` deny-case**：`POST /api/egress` 带 `user:pass@` → `400 INVALID_PARAM`（`details.field='url'`，message 含"凭据"），
 **且字面量不落库**（0 行）。同款断言在 `src/security/plaintext-scan.ts` 的 `proxy-url-credentials` 规则（check:secrets 门禁），
 deny-case 样例见 README §6 台账。
+
+**回显端点可配（v1.14.2 / ADR-0033）**：`EGRESS_ECHO_URL`（空 / 未设 = 用上面那个缺省值）。
+
+这条不是"多一个开关"，它修的是**一个会静默骗人的故障形状**：回显端点从网关所在网络不可达时，
+`/test` 会对一台**完全健康**的代理回 `ok=false`，并把那个 false 写进 `egress_proxies.last_test_ok` ——
+面板上唯一那个"我的出口通不通"的信号在最坏情况下恒假，而照着它删代理的人删掉的是能用的机器。
+心跳生产者入口 B 同源且更隐蔽：端点不可达 = 每拍一条失败证据，累计到
+`HEARTBEAT_EVICT_AFTER_FAILURES`(3) 就把好节点**静默摘除**（无报错，只是可用出口少一个）。
+
+三条纪律：
+
+1. **缺省值只有一份字面量** —— `EGRESS_ECHO_URL_DEFAULT`（`src/egress/port.ts`），
+   两个消费者（`/test` 与心跳入口 B）都从那里取。两处各写一遍的失败形状不是"以后要改两个地方"，
+   而是**两个消费者可以配不同的值而毫无症状**：面板说这台通（打新端点）、心跳说这台死了（还打旧的），
+   两边日志还都写着"探测正常"。由 `heartbeat.spec.ts` 的字面量唯一性判据守着。
+2. **缺省值不变** —— 本版不把缺省换成国内可达的目标。换缺省会**静默改变所有现存部署**的探测语义
+   （含那些"我测过、面板显示通"的记录），而那件事该由部署者显式做。
+3. **不做 URL 语法校验** —— 一个连不上的端点就是一次失败的探测，那正是探测的职责；
+   而"拒绝启动"会让填错别名的用户在启动阶段看到一句与网络无关的报错。
+
+**运维侧同款旋钮**：`deploy/vps-egress/pool-probe.sh` 的 `EGRESS_ECHO_URL`（早于本版存在，
+`--echo-url` 亦可单次覆盖）。两边**应配同一个值** —— 一个是面板/心跳在用，一个是 VPS 侧自检在用。
 
 **迁移（v1.7.1）**：`egress_proxies` 的 `last_test_at` / `last_test_ok` 是**既有表加列** ——
 早期批次（v1.4.8 Tier 2 DDL）已随开库建进**运行中的库**，`CREATE TABLE IF NOT EXISTS` 撞上已存在的表是空操作。
@@ -3299,6 +3899,17 @@ spec 三条判据：新库自带、老库真被 ALTER 到、重复跑不抛 dupl
 —— 正是 §10 铁律要防的事。**这条完全未证实**（要 P0 的带 key 往返才能定），
 **登记，不据此改 `classify`，也不据此动冷却**。
 
+> **〔v1.15.10 补一笔：这个形状已经有过一次真实触发面，只是那一次不靠 403〕**
+> ADR-0039 修的那个缺陷是它的**孪生**：`models.type` 从不进服务路径 ⇒ 任何登记过的 chat 名字
+> 都会被原样转发到上游的 `/embeddings`，也就是**调用方打错端点 = 网关替他去敲一次上游**。
+> tierflow 对不支持的路径回 404，404 在 `classify.ts` 里判 `null` ⇒ 不烧 key，所以那条路径
+> 在本部署上只污染用量；**若上游回的是 403，同样一条请求就会走 `AUTH_INVALID` → 冷却 → 连续失败自动停用**。
+> 准入闸落地后，**类别已知**的错用不再出站（0 次真实尝试）；剩下的暴露面只有
+> "**未登记**的名字"（本闸不表态，见 §10）—— 而那种名字在回 403 的上游上照样能烧 key。
+> 本条仍然**不改 `classify`**：拒绝的理由没变 —— 未经证实的形状不改冻结判据。
+> 但"客户端写错参数"**已经在网关侧被收窄了一层**，这条备注就是为了下次有人翻到这里时
+> 知道：**别再把它当成纯理论**。
+
 ### 16.7.3 出口预算令牌桶：Tier 1.5 九条（v1.8.0；ADR-0017 补遗 5 / ADR-0021 决策 8·10）
 
 **作用域（点名，一句"刷新"带过不算扩域）**：所有发往**同一出口**的请求共用一条速率 —— **§14 三个刷新端点（含自动同步）/ §15.2 六个端点 / 余额自测 / 探活 / 建 key / 重登 / 数据面 `/v1/*`**。
@@ -3363,9 +3974,507 @@ v1.11.2（**2026-10-14，sync 选 key 候选修复 + 探测口径三点补充** 
 | `hostGateway` / `hostAdmin` | **绑定地址**（config `HOST_GATEWAY` / `HOST_ADMIN`，如 `0.0.0.0` / `127.0.0.1`）——是监听语义，**不是可访问地址**；前端展示时禁止把绑定地址直接拼给用户 |
 | `publicHost` | env `PUBLIC_HOST`（默认空 = `null`）。对外基址覆盖值（如 `gw.example.com`，不带 scheme），落 `.env` 不落库；设置后 = 接入页展示的权威 host |
 | `adminWebDistEnabled` | boolean，`ADMIN_WEB_DIST` 非空即 `true`（§17 root 口径）；前端据此提示「生产直开 :4001」还是「先起 Vite」 |
-| URL 拼接责任 | 前端：`(publicHost ?? window.location.hostname)` + 端口；本端点**不回**任何完整 URL |
+| URL 拼接责任 | 前端：`(publicHost ?? window.location.hostname)` + 端口；本端点**不回**任何完整 URL。**给出的是服务根**（它同时服务静态页与 `/api/*`）；**填进 OpenAI 兼容客户端的 Base URL 还要再加 `/v1`**（v1.15.7）—— 网关只认 `/v1/*`，少这一段就是 404 |
 | 边界 | 零新存储、零 DDL、零迁移、零审计（纯只读）；`src/gateway/` 零改动 |
 
 **实现锚（2026-10-14）**：路由落在 `src/api/routes/access-info.ts`（装配注册于 `src/api/app.ts`）；`publicHost` 取值源 = `AppConfig.publicHost`（`src/config.ts`，env `PUBLIC_HOST`）。用例 `src/api/routes/access-info.spec.ts` 钉三条：形状口径、值全来自 config 现读（无第二份事实源）、只读（GET 不写审计）；`adminWebDistEnabled` 的口径 = **配置了 `ADMIN_WEB_DIST` 吗**（配了不存在的目录仍为 `true`，不做运行期 `stat` 探测 —— 目录缺失是启动期 warn + 404 的退化，不改这个配置事实）。本笔**零 DDL、零迁移、`SCHEMA_VERSION` 仍为 2、`ERROR_CODES`/`GATEWAY_ERROR_CODES`/`hintCode` 零新增、`/v1/*` 零变更、`src/gateway/` 零改动**。
 
 v1.13.0（**2026-10-14，账号绑出口写路径 + 读面** —— 新增 **§15.2 `PATCH /api/supplier-accounts/:id`**（收 `egressId` + `revision`；活性校验 = 不存在 / 已 `retired` ⇒ `400 INVALID_PARAM`、值未变短路、与写入同事务按受影响的每把 `pooled_key_id` 发 `change_log`），并**非破坏**给 **§15.1 `SupplierAccount` 加一格 `egressId`**（`null` = 未绑定、走宿主出口）；**§15.12 第 3 行 / §16.7 绑定纪律之三按本版改口**（收窄为"出口池的**状态**仍只有 §7 帧；账号**自己的绑定**进 DTO），§16.7 裁定 6 账号侧对称条落地指向本端点；新增审计动作 `supplier.account.update`；**`export` CSV 列清单本版不动并登记理由**；**无字段改名 / 删除、`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增（三种失败全是既有码）、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2、零 DDL、零迁移、`src/gateway/` 零改动**；v1.13.1（**2026-10-14，出口协议面收口 —— §16.7.2 补一句「出口只支持 HTTP(S) CONNECT；`socks5://` / `socks4://` 一类非 HTTP(S) 协议在创建 / 保存那一刻即被入口 `400 INVALID_PARAM url` 拒下，不存在静默直连」**，并新增一条入口阻断用例（`src/api/routes/egress.spec.ts`）钉住判据；**无字段改名 / 删除、无端点增删、无 DTO 变更、`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增、`/v1/*` 零变更、`SCHEMA_VERSION` 仍为 2、零 DDL、零迁移。**）*
+
+v1.14.0（**2026-10-16，站点换算比不再写死 —— `createToken` 走上游真值；附一处回填文档漂移订正** —— §15.1 金额口径补「『不写死』管两个方向，读侧与写侧都要守」一段（写侧曾是唯一例外：`createToken` 把 `quotaCents` 换算成 `remain_quota` 时写死 `DEFAULT_QUOTA_PER_UNIT` = 500000，站点比值改成 250000 时 1000 分的 key 会发 5 000 000 quota = **20 元**，多给一倍且 HTTP 200 不报错）；`createToken` 入参新增**可选** `quotaPerUnit`（省略 = 落回文档默认值，那是诚实的缺省）；`supplier_accounts` **加两列纯缓存** `quota_per_unit` INTEGER NULL / `quota_read_at` TEXT NULL（均可空无默认、**不进 `SupplierAccount` DTO**、`NULL` = 从没读到过），由登录探活 / 余额刷新 / 自测 / `keys/sync` 四条**已经在打 `/api/user/self`** 的腿顺手写、**零新增上游请求**、只在**真读到**时写；建 key 腿取值 `cred.quotaPerUnit ?? undefined`（**从库里读**，§15.5「建 key = 2 次」逐字不变，判据钉的是 `count('/api/user/self')` 前后不变）；§15.13 rotate 腿第二处写死同批修（单请求动作只读缓存不刷新缓存）；**`backfillSubscriptionTokenPlan` 的 `basic_token_used` 由 `?? 0` 订正为整行跳过**（两格任一未知 ⇒ `token_plan_remaining` 保持 `NULL`，代价只是落在"未知"档不参与精确排序，`UNKNOWN_PLAN_QUOTA` = 1 保证仍可用、仍排在余额 key 前）；**无字段改名 / 删除、无端点增删、无 DTO 变更、`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增、`/v1/*` 零变更、`src/gateway/` 零改动、零新增审计动作、上游请求数零增加；DDL = 两列纯加列，`SCHEMA_VERSION` 仍为 2、零迁移脚本。**）*
+
+v1.14.1（**2026-10-16，五张表的保留策略** —— 新增 **§0.6 数据保留策略**（八张会累积的表逐张给出清理函数 / 保留期 / 配置 / 节拍，三条纪律：**审计保留期独立于用量日志**、**`change_log` 按行数不按天数**、**快照表留在各自写入方**）；动机是清完一遍 prune 调用方之后的形状 —— `pruneGatewayErrorEvents` / `pruneChanges` **有实现、零生产调用方**（一个"存在但没人调用"的清理函数让"这张表有保留期"看起来已实现），`audit_log` / `tasks` 连函数都没有；新增 `pruneAudit`（`AUDIT_RETENTION_DAYS`，默认 **180 天**，**只按时间窗删**、不认 id/actor/action）与 `pruneTasks`（`TASK_RETENTION_DAYS`，默认 7 天，**只删终态**，`finished_at IS NOT NULL` 显式写出——变异验证：删掉谓词用例不红、换成 `COALESCE(finished_at, started_at)` 立刻红，所以它拦的是那次"嫌 NULL 比较别扭"的改写）；`gateway_error_events` **按 §12.1 既有契约行接上**、不新配旋钮（`LOG_RETENTION_DAYS`）；`change_log` 接 `CHANGE_LOG_KEEP_ROWS`（默认 10000 行）；四条同挂一个 6h 定时器、逐条 try/catch；**`/api/*` 响应零变更、`/v1/*` 零变更、`src/gateway/` 零改动、DDL 零（`SCHEMA_VERSION` 仍为 2、零迁移）、`ERROR_CODES`/`GATEWAY_ERROR_CODES`/`hintCode` 零新增、审计动作零新增**（裁剪是维护动作，给它记一条审计会自我抵消）；三个新旋钮全部有默认值；判据 `src/db/repo/retention.spec.ts` 16 条全部经变异验证）*
+
+v1.14.2（**2026-10-16，出口探活端点可配 —— 一个会静默骗人的故障形状** —— 新增环境变量 **`EGRESS_ECHO_URL`**（空 / 未设 = 用缺省端点；取值只 trim、**不做 URL 语法校验**：连不上的端点就是一次失败的探测，而"拒绝启动"会让填错别名的用户在启动阶段看到一句与网络无关的报错）；动机不是"多一个开关"：回显端点从网关所在网络不可达时，`POST /api/egress/:id/test` 会对一台**完全健康**的代理回 `ok=false` 并把那个 false 写进 `egress_proxies.last_test_ok`，面板上唯一那个"我的出口通不通"的信号在最坏情况下**恒假**，照着它删代理的人删掉的是能用的机器；心跳生产者入口 B 同源且更隐蔽：端点不可达 = 每拍一条失败证据，累计到 `HEARTBEAT_EVICT_AFTER_FAILURES`(3) 就把好节点**静默摘除**（无报错，只是可用出口少一个）；**缺省值只有一份字面量** `EGRESS_ECHO_URL_DEFAULT`（`src/egress/port.ts`），两个消费者（`/test` 与心跳入口 B）都从那里取 —— 两处各写一遍的失败形状不是"以后要改两个地方"，而是两个消费者可以配不同值而毫无症状：面板说这台通（打新端点）、心跳说这台死了（还打旧的），两边日志还都写着"探测正常"；**缺省值不变**（本版不把缺省换成国内可达的目标，换缺省会静默改变所有现存部署的探测语义）；运维侧同款旋钮 `deploy/vps-egress/pool-probe.sh` 的 `EGRESS_ECHO_URL` 早于本版存在，两边应配同一个值；**`/api/*` 响应零字节变更、`/v1/*` 零变更、`src/gateway/` 零改动、DDL 零（`SCHEMA_VERSION` 仍为 2、零迁移）、`ERROR_CODES`/`GATEWAY_ERROR_CODES`/`hintCode` 零新增、审计动作零新增**；判据 `src/egress/heartbeat.spec.ts`（缺省走缺省 / 配了走配的 / 字面量唯一性）+ `src/api/routes/egress.spec.ts`（同形两条，断言打进假件的 URL）+ `src/config.spec.ts`（空串 = null）全部经变异验证）*
+
+---
+
+## 19. 消费面 `/api/console/*`（v1.15.0；按组收窄 —— **读 + 本组 key 自助（v1.15.9）**）
+
+给**普通用户**（`role=user`）的五件事：拿接入 URL 和 key 掩码、**自己签发 / 改名 / 吊销本组的 key**、
+看自己组的用量、**看本组额度还剩多少**、看模型列表。
+动机与"为什么这不是纯前端双视图"见 **`docs/adr/0034-console-user-role.md`**；
+**v1.15.9 把"只读"这条限死了的那一半拆开**见 **`docs/adr/0038-console-key-selfservice-and-password.md`**。
+
+> **本节标题里的"只读"在 v1.15.9 被改写**，写在这里以免下一个人按老标题理解：
+> v1.15.0–v1.15.8 的消费面**一个写方法都没有**，而那条规则的理由是**一条风险论证**
+> （下发签发权 = 组内任一成员可无限增发、共烧同一个配额池）。
+> v1.15.9 用 `KEY_SELF_ISSUE_LIMIT` 那道护栏**消掉了那个代价**，于是签下放（§19.3b）。
+> **改口令那条更直接**：`POST /api/auth/password`（§1）改的恒是会话本人，
+> 而它顶掉的是 §19.7 的"忘口令 = 删掉重建"。
+> **本章唯一没有被碰过的那一句是"明文没有再取回的路径"** —— 它一个字都没动，
+> 而它才是"只读"这个词真正在守的东西。
+
+### 19.1 授面（§0.5 的扩展，不是例外）
+
+| 前缀 | `role=admin` | `role=user` |
+|---|---|---|
+| `/api/**`（既有，**一字未改**） | ✅ | **403 `FORBIDDEN`**（唯一例外见下） |
+| `/api/access-info`（§18） | ✅ | ✅ **（v1.15.1 放行**，只为拼 §19.5 那条 URL） |
+| `/api/console/**`（本节，**读 + 本组 key 自助**） | ✅ | ✅（数据按组收窄；写方法只有 §19.3b 那一组） |
+| `GET /api/auth/session`（§1） | ✅ | ✅ **（v1.15.5 放行**，见下） |
+| `POST /api/auth/logout`（§1） | ✅ | ✅ **（v1.15.5 放行**，见下） |
+| `POST /api/auth/password`（§1） | ✅ | ✅ **（v1.15.9 放行**，见下） |
+| `WS /api/stats/live`（§7） | ✅ | **4401（v1.15.2 补齐**，见下） |
+| `/v1/**`（§10） | 不适用 —— 走 `Authorization: Bearer <网关key>`，与后台身份**无关** | 同 |
+
+- 判据在 `src/api/app.ts` 的 `onRequest` 闸门里**一次判完**（前缀判定），
+  与 `inReadonlyScope()` 对 `READONLY_TOKEN` 的做法同源（`app.ts` 头注：判定放闸门，
+  新增路由不可能"忘了判作用域"）。
+- **`role` 每次鉴权从 `admin_users` 现读**，不存进 `sessions` —— 存了就要处理
+  "管理员改了角色、旧会话还是老角色"的窗口，而现读只是一次主键点查。
+- **消费面从"零写方法"变成"key 自助这一组写方法"（v1.15.9 / ADR-0038 订正决策 3）**。
+  v1.15.0–v1.15.8 本节写的是"全部是 `GET`，任何写方法落在这里 → 405"，
+  而那一句的**理由**（把签发权下放给 `user` 等于组内任一成员可无限增发、共烧同一个配额池）
+  被 `KEY_SELF_ISSUE_LIMIT` 这道护栏消掉了，见 §19.3b。
+  **"没有写方法"那条仍然成立，只是范围变了**：除 §19.3b 明列的三条之外，
+  `/api/console/**` 上仍然**没有**任何写方法（`PUT /api/console/usage` → 该用例钉的是
+  `[404, 405]` 二者之一；**实测是 `404 NOT_FOUND`「接口不存在: PUT /api/console/usage」**，
+  见 §1 那条实测订正与本 ADR 的手工走查记录）。
+- **`GET /api/auth/session` 与 `POST /api/auth/logout`（§1）必须放行（v1.15.5）**：
+  这两个端点**只碰 cookie 里那个会话自己**（`session` 读 `req.auth`，`logout` 删 `sessions`
+  里这一行），不放行的后果不是"少一个功能"，是**普通用户完全登不进来** ——
+  `web/src/auth/AuthGate.tsx` 进受保护区域第一件事就是打 `/api/auth/session`，
+  403 会被渲染成"无法连接管理面"的全屏错态（403 不是 `UNAUTHORIZED`，
+  不派发跳登录页），于是整个消费面够不着。**授面表判的是"能看哪些数据"，
+  漏判的是"能落哪个地"** —— 这两行补的是后者。
+- **`POST /api/auth/password`（§1）也必须放行（v1.15.9）**，理由与上一条**同形**：
+  它改的恒是**会话本人**那一行（`req.auth.username`），`role` 与"能不能改自己的密码"无关。
+  不放行的后果对 `role=user` 是"我永远改不了自己的密码"（消费面是他唯一的入口，
+  而 §19.7 那条"忘口令 = 删号重建"会连带吊销他全部会话、把他的审计痕迹断成两截），
+  对 `role=admin` 则毫无影响（他本来就在 `/api/**` 里面）。
+  - 同样是**字面路径 + 方法门**：`POST` 放行，`GET /api/auth/password` → **非 200**
+    （用例钉住"路径放行不等于方法放行"）。**这一格本仓不是 405** —— `buildApp` 没挂
+    `setNotAllowedHandler`，方法不匹配一律落进 `setNotFoundHandler`（`src/api/app.ts:607`），
+    而"不放行"对**两种身份有两种错法**（实测）：`role=user` → **403 `FORBIDDEN`**
+    「当前账号只能访问消费面」（先撞闸门的 `role` 判定）、`role=admin` → **404 `NOT_FOUND`**
+    「接口不存在」。用例对此**容错**（`expect([403, 404, 405]).toContain(res.statusCode)`，
+    `console.spec.ts:1409`），所以测试没红、是文档写细了 —— 详见 §1 的实测订正与
+    ADR-0038「手工走查」§2.6。
+  - 它没有扩大暴露面的新地方：不读别人的行、不回任何口令或散列、写审计用新字面量
+    `auth.password`（`audit_log.action` 是自由 TEXT，零 schema 变更）。
+  - 放行是**这两个字面路径 + 方法门**（`session` 只放 `GET`，`logout` 只放 `POST`），
+    **不是再开一个 `/api/auth/` 前缀**：前缀放行会把将来长在 `/api/auth/` 下的
+    别的东西一起放掉，而字面路径不会。`PUT /api/auth/session` 仍 403。
+  - **为什么不扩大暴露面**：两者都不读别人的行（判据来自 `req.auth`）、不回上游 Base URL、
+    不回账号池、不回 key 掩码、不写审计。`GET /api/auth/session` 回的
+    `{username, role, groupId, expiresAt}` 全部是**调用者自己的属性**。
+  - 分工与 v1.15.2 那条同形：**闸门判"能打哪些前缀"，路径自己判"这条路径的授面谁来做"**。
+- **`/api/access-info`（§18）是唯一放行的既有管理面端点**（v1.15.1 / ADR-0034 裁定）：
+  它是 `publicHost` / `portGateway` / `portAdmin` 的**唯一来源**，而 §19.5 的 URL 公式
+  要用的正是它们 —— 不放行则"通过用户前端获取 URL"这件事逻辑上办不到
+  （v1.15.0 把 §19.1 与 §19.5 写在了一起而不相容，本版按 ADR-0034 订正文本）。
+  - **为什么不是 `/api/console/**` 下的新端点**：两个端点回同一份值 = 两份口径，
+    而两份口径将来一定漂移（ADR-0033 决策 2 同理由，这里禁的是第二个端点）。
+  - **为什么这不扩大暴露面**：绑定的 `hostGateway` / `hostAdmin` 是**监听地址**
+    （`0.0.0.0` / `127.0.0.1`），按 §18 纪律**从不与端口拼接**给用户；
+    且它泄漏的严格**少于** `/api/console/keys` 已经给出去的东西（那把 key 掩码）。
+    既没有上游 Base URL、没有账号池、没有审计日志，也没有密钥明文。
+
+- **`WS /api/stats/live`（§7）对 `role=user` 一律 4401（v1.15.2）**：本路径是
+  `app.ts` 鉴权闸门的唯一例外（升级请求回不了 HTTP 401），而**例外的代价是闸门的
+  `role` 判定也被跳过** —— v1.15.0 / v1.15.1 只补了 REST 那一侧的授面，
+  WS 这一侧的同一个洞没人看见：同一个身份打 `/api/stats/overview` 得 403，
+  却能在这条通道上每秒收到同一份聚合（含 `balanceGlobal` 全站余额）。
+  判据落在 `live.ts` 的握手期会话判定里（**建连之前**，不是连上之后挑字段），
+  拒绝码 `4401` —— 前端 `live.ts` 已有"跳登录页"分支，而这里要说的真话是
+  "你的身份不该开这条通道"，重新登录也不会变。用例见 `src/api/routes/live.spec.ts`。
+
+### 19.2 `GET /api/console/session`
+
+→ `200`
+```json
+{ "username": "alice", "role": "user", "groupId": "grp_9f2c", "expiresAt": "2026-10-18T12:00:00.000Z" }
+```
+
+| 字段 | 说明 |
+|---|---|
+| `role` | `"admin"` \| `"user"`。前端据此分流 `/`（管理面）/ `/console` |
+| `groupId` | 该用户归属的组；**`null` = 未分配**（此时四个读端点回空 + `assigned:false`，**不是 500**；三个写端点回 `400 INVALID_PARAM`，见 §19.3b） |
+
+**〔v1.15.9 订正〕** 上两格都动过字面：
+- `groupId` 那格的"**三个**列表端点"是 v1.15.0 的账（keys / usage / models），
+  v1.15.9 加了 `GET /api/console/quota` 之后是**四个**读端点。**读的降级与写的拒绝故意不同形**：
+  读回空（"看不到"，无害），写回 `400`（"签一把必然打不通的废 key"比拒绝更坏），
+  见 §19.3b 最后一条。未分配的 `quota` 回的是**各格 `null`**而不是 0（§19.3c）。
+- `role` 那格原先写的是 `/admin ⇄ /console`，而**前端没有 `/admin` 这个路由**：
+  `router.tsx` 里 `HomeRoute` 对 `role=admin` 重定向到 `/dashboard`。这是 ADR-0034 末尾
+  「与 A 档的判据差别」那处假地址的同一处笔误，v1.15.3 已在其正文订正，此处一并改口。
+
+未登录 → `401 UNAUTHORIZED`（§1 同口径）。
+
+### 19.3 `GET /api/console/keys`
+
+→ `200`
+```json
+{ "groupId": "grp_9f2c", "keys": [ { "id": "gk_1a2b", "maskedKey": "****9f3c", "label": "小王的笔记本", "createdAt": "..." } ], "assigned": true, "keyLimit": 10 }
+```
+
+- 元素形状**逐字复用 §4 `GatewayKeyDto`**（`id` / `maskedKey` / `label` / `createdAt`）——
+  **不新增字段、不改名**。顺序固定 `createdAt, id`（同 §4）。
+  `label` 是 v1.15.9 随 §4 一起非破坏新增的（`string | null`，空串归一化成 `null`）。
+- `keyLimit` **非破坏新增**（v1.15.9）：自助签发的把数上限（**服务端的事实**，当前 10，见 §19.3b）。
+  前端据此把"签发新 key"按钮置灰并说明原因。
+  **为什么不要求前端自己数 `keys.length`**：那等于让前端复刻同一个数字，
+  而复刻出来的那份将来一定漂移 —— 上限改了前端还按旧数拦，用户看到的是一个"点了必然失败"的按钮。
+- **只有掩码**：网关 key 明文只存在于**签发**（`POST /api/groups/:id/keys`，§4；
+  与 §19.3b 的自助签发）的 201 响应体里（§4 铁律 / ADR-0006），
+  **没有任何"再取回"的代码路径**。本节**没有**"显示明文"的端点，本契约也**不提供**。
+  **〔v1.15.9 订正**：本节原先写"消费面因此**不含签发端点**"，理由是"下发签发权等于让组内
+  任一成员无限增发、共烧同一个配额池，要单独一条 ADR"。那条理由是**风险论证**，
+  而它已经被 `KEY_SELF_ISSUE_LIMIT` 这道护栏消掉 —— ADR-0038 就是那条 ADR，
+  签发端点见 §19.3b。**"没有再取回明文"这半句一个字都没动**，它才是本节真正要守的东西。〕**
+- `groupId: null` → `{ "groupId": null, "keys": [], "assigned": false, "keyLimit": 10 }`。
+  **`assigned:false` 时仍然回 `keyLimit`**：它是**这个端点的一条规则**，与调用方有没有组无关；
+  回 `null` 会让前端多一个"拿不到上限"的分支，而那个分支没有对应的事实。
+- 归属**不来自请求参数**：`?groupId=` 一律忽略（判据：构造别组 id 回的仍是本组）。
+- **不透传 `page` / `pageSize` / `total`**：消费面不需要翻页，而自助上限是 10 把 ——
+  列表规模有了上界之后，"翻页"这一层就更是纯粹的负担。
+
+### 19.3b 自助签发 / 改名 / 吊销（v1.15.9 / ADR-0038 决策 1）
+
+| 方法 | 路径 | body | 成功 | 明文 |
+|---|---|---|---|---|
+| `POST` | `/api/console/keys` | `{label?}` | `201 GatewayKeyIssuedDto` | ✅ **仅此一次** |
+| `PATCH` | `/api/console/keys/:keyId` | `{label?}` | `200 GatewayKeyDto` | ❌ |
+| `DELETE` | `/api/console/keys/:keyId` | — | `204` | ❌ |
+
+**这是消费面唯一的一组写方法**，所以下面每一条都同时是"授面"与"语义"。
+
+- **`label` 三处语义必须一致**（`normalizeLabel` 是唯一出口，签发与改名共用）：
+  **省略**与 `""` 与 `null` **都是"没有名字"**（落库 `NULL`）；
+  非空字符串 `trim` 后落库；`maxLength: 100`。
+  `label` **不是 required** —— `{}` 是一次合法的"不改名"，而把它设成 required 会让
+  "清掉名字"必须传 `{label: ""}` 或 `{label: null}` 两种写法之一（两种都得支持，那就不如都不要求）。
+- **护栏 `KEY_SELF_ISSUE_LIMIT`（按组的**把数**上限，当前 10）**：到顶 → **`422 UNPROCESSABLE`**，
+  `details: {limit, used}`。
+  - **422 而不是 400 / 409**：请求本身完全合法（表单填得对、身份也对），挡下它的是**这个组的现状**
+    （已经 10 把了）—— 与 §15.4「`UNPROCESSABLE` = 语义合法但业务拒绝」同一条判据。
+  - **判在签发之前**：先签再判的话，被拒的那一下也得回滚一次写（`issueGatewayKey` 不返回事务句柄），
+    而"签了再删"还会在库里留下一段没解释的 id 空洞与两条 `change_log`。
+  - **为什么是"把数"不是"每天几次"**：攻击面是**同一配额池被多方共享**，与签发频率无关 ——
+    一天签 1 把烧光池子和一天签 10 把烧光池子没有区别。把数上限直接钉住"池子的份数"。
+  - 上限是**常量不是配置**（ADR-0038 遗留 3）：真不够用时改常量 + 一次发版，
+    成本低于一个"谁能改、改了要不要通知正在签发的人"的配置面。
+- **归属只来自会话**：写入的 `group_id` 恒取 `groupIdOf(req)`。body 里的 `groupId`
+  **故意不写进 schema** —— 它会被 ajv 剥掉，而"剥掉之后请求照常成功、调用方以为自己指定了组"
+  比明确拒绝更坏（§19.4 同一条：不声明就是明确忽略）。
+- **未分配组（`groupId === null`）一律 `400 INVALID_PARAM`**（`details.field = 'groupId'`）——
+  这**与读端点的"可读降级"故意不同形**（§19.3 回空 + `assigned:false`）：
+  没有组就没有配额池，签出来的 key 打 `/v1` 会被网关判成"组不存在"。
+  **读的失败是"看不到"（无害），写的失败是"签出一把废 key"（有害）**。
+- **越权判据是 `404` 不是 `403`**：改名 / 吊销的 SQL 是 `WHERE id = ? AND group_id = ?`，
+  命中不到就 404。**403 会告诉调用方"这个 keyId 存在、只是不属于你"** ——
+  而那正是枚举别人 key 的反馈信号（§19.3 同一条，本版沿用而非新造）。
+- **CRUD 面已满，不多一个"重置"**：管理面有 `reset`（§4），消费面**刻意没有**。
+  重置的语义是"这把 key 泄了、换一把"，而自助已经能"吊销 + 签发"做到同一件事，
+  多一条路由只多一个要判的越权面。**代价**：重置在管理面会清掉 `label`（§4 已写明），
+  而"吊销 + 签发"的组合是两次显式动作、用户能自己填名字 —— 这一侧反而更清楚。
+- **审计复用管理面那一套动作名**：`gateway_key.issue` / `gateway_key.update` / `gateway_key.delete`，
+  `targetType: 'group'`、`targetId` = 本组、`detail` **只记掩码或 keyId**（§4 铁律：审计里永不出现明文）。
+  **不新造 `gateway_key.self_issue`** —— 审计的问题是"谁在什么时候动过这把 key"，
+  而"从哪个面动的"不是这个问题的一半（actor 已经回答了）；拆成两个动作会让
+  "某把 key 的全部历史"要按两个 action 查两次。
+- **CSRF 照旧**：写方法在**鉴权之前**过三层校验（§0.5），消费面不豁免 ——
+  缺 `X-Requested-With` → `403 CSRF_REJECTED`。这是"写权限下放"真正的安全底线，一个字都没动。
+- **闸门零改动**（读这一条的人最容易看错）：`inConsoleScope(path)` **只判前缀、不判方法**，
+  这三条路由天然落在那道闸门里。**但这条红利同时是警告** ——
+  这个前缀下**任何**写路由的授面就是"该组用户"，所以新增写路由前必须先想清楚
+  **"这一下动的是不是他自己的组"**，而不是先看闸门。本版三条的答案是"是"（判据来自会话）；
+  下一条写路由如果答案不是"是"，那么**它是错的，不是闸门要改**。
+
+### 19.3c `GET /api/console/quota`（v1.15.9 / ADR-0038 决策 4）
+
+→ `200`
+```json
+{
+  "groupId": "grp_9f2c", "assigned": true,
+  "rpm": 60, "tpm": 120000, "dailyQuota": 500000, "dailyQuotaUsed": 123456,
+  "todayUsage": { "requests": 431, "tokens": 123456, "costCents": 8901 }
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `rpm` / `tpm` / `dailyQuota` | 与 §4 `GroupDto` **同源**；`null` = **不限** |
+| `dailyQuotaUsed` | 今日已用 token（与 `todayUsage.tokens` 同一个数，单列一格是为了不让前端去算） |
+| `todayUsage` | 就是 §4 `GroupDto` 的那一格 |
+
+- **每一格都是既有字段的透传，本面不算第二遍**：它们与 §4 `GroupDto` 来自**同一句
+  `todayUsage()` SQL**。所以"消费面用量页显示的数字"与"管理面组列表显示的数字"
+  是**同一句话**，不是两份可能对不上的账 —— 契约用例钉的正是这一条
+  （把管理面 `GET /api/groups/:id` 的那几格取出来与消费面**逐字比对**；
+  只断言"这次读对了"并不证明"两面同一份口径"）。
+- **未分配组回 `null` 而不是 0**：`assigned: false`，各格 `null`、`dailyQuotaUsed` 与
+  `todayUsage` 为 `0`。**"没有配额"与"配额是 0"是两件事** —— 前者是"你还没进组"，
+  后者是"你今天一点都不许用"。回 0 会让前端把第一种渲染成第二种（一排 0/0 的进度条），
+  而用户会去查"我为什么被限流了"。
+- **组被管理员删掉、而会话还指着它** → 回**未分配那一形状**（`200`），**不是 500**：
+  对用户来说这就是"你暂时没有组"，而 500 会让他去报告一个不存在的问题。
+  （会话里的 `groupId` 每次鉴权现读，所以下一次请求它已经是 `null`。）
+- **前端两种 0 必须画得不一样**（`web/` 侧纪律，服务端不依赖它）：
+  `null` = 不限 → 显示「不限」，**不是一根 0 长度的进度条**；
+  `limit === 0`（封顶）→ **满格红色**，**不是 0%**。
+  （`used / 0` 是 `NaN`，而 `0%` 会被读成"一点都没用"—— 恰恰相反，"日配额 0"是**一点都不许用**。）
+
+### 19.4 `GET /api/console/usage`
+
+→ `200`（**响应体形状与 §6 `GET /api/stats/usage` 逐字相同**）
+
+| 参数 | 必填 | 说明 |
+|---|---|---|
+| `from` / `to` | ✅ | ISO8601 |
+| `groupBy` | ✅ | `key` \| `upstream` \| `model`（**不含 `group`** —— 消费面恒按本组收窄，按组分箱只会得到一根恒等的线） |
+| `bucket` | ✅ | `1m` \| `5m` \| `1h` \| `1d` |
+| `upstreamId` / `model` | ❌ | 过滤；`groupId` 参数**被忽略**（§19.3 同一条） |
+
+- `series[].key` 恒为本组范围内的 id；**别组一行都不出现**（`usage_logs.group_id = 本组`）。
+- `isEstimatedTokenCount` / `points[].promptTokens|completionTokens|estimatedTokens` / `costCents`
+  口径**与 §6 逐字相同**，不因消费面重新定义。
+- `groupId: null` → `axis` 空 + `series: []`。
+
+### 19.5 接入 URL（**不新增端点**，放行 §18 那一个）
+
+消费面**不新增**接入信息端点，直接读 §18 `GET /api/access-info`
+（**v1.15.1 起放行给 `role=user`**，见 §19.1 那张表）。URL 拼接责任在前端（同 §18）：
+
+```
+(publicHost ?? window.location.hostname) + ':' + portGateway        // 服务根
+(publicHost ?? window.location.hostname) + ':' + portGateway + '/v1' // ← 填进客户端的 Base URL
+```
+
+- **上面两条只差一段字面量 `/v1`，而少了它拿到的是 404**（v1.15.7）：网关面的路由是
+  `/v1/chat/completions` / `/v1/models` / `/v1/embeddings`，**前缀是路由的一部分**。
+  消费面因此把带 `/v1` 的那一条**当作「API 地址」展示并可复制**（业务口径的地址是它），
+  服务根只作为"本服务的入口"出现。这不是第二个公式 —— 是同一个公式加固定后缀，
+  且 **`/v1` 只写在前端一处**（拼装函数里），不在页面上手抄。
+- `publicHost` 为空（未配 `PUBLIC_HOST`）时用浏览器所在机器的名字 —— 这与管理员面
+  §18 接入页是**同一个公式、同一个兜底**，不是第二份。
+- **新开一个 `/api/console/access-info` 就会有第二份口径**，而两份口径将来一定漂移
+  （ADR-0033 决策 2 的同一条理由，这里禁的是第二个端点）。
+- key 明文**不在**本面：用户看到的是 `/api/console/keys` 的掩码列表（§19.3）。
+  **〔v1.15.9 订正**：这一条原写"明文由管理员在建用户 / 建组时给一次"，现在还有**第二条路** ——
+  用户自己签发那一次（§19.3b），明文同样只在 201 响应体里出现**一次**、没有任何取回路径。
+  **两条路给的是同一种 key**（同表、同 `key_hash` 鉴权、同配额池），只是谁能发起。
+  管理面那条路仍然在（`POST /api/groups/:id/keys`，§4），一个字都没删。〕**
+- **本页的接口说明只列网关真实注册的三条**（`GET /v1/models`、`POST /v1/chat/completions`、
+  `POST /v1/embeddings`），认证只写 `Authorization: Bearer <网关 key>`（v1.15.9）。
+  网关把 `/v1/images/`、`/v1/audio/`、`/v1/rerank`、`/v1/moderations`、`/v1/files`、
+  `/v1/fine_tuning` 一律 **501 `UNSUPPORTED_ENDPOINT`**（§10）。
+  照 OpenAI 的文档列一张更长的表 = **一份半真的清单**，比短的那份坏 ——
+  用户会照着打，然后拿到一个他没做错任何事的错误。
+
+### 19.6 `GET /api/console/models`
+
+→ `200`
+```json
+{ "models": [ { "id": "mdl_7f3a", "name": "my88/gpt-4o-mini", "displayName": "GPT-4o mini", "type": "chat", "capabilities": ["vision","stream"], "contextLength": 128000 } ] }
+```
+
+- **口径 = §5 `GET /api/models?enabled=true` 的同一判据**（`models.enabled = 1` **且**
+  其上游 `upstreams.enabled = 1`），与 `/v1/models`（§10）**同源** ——
+  用户端看到的"我能用哪些模型"必须与网关实际准入的集合一致，否则又是一个会骗人的信号。
+  **v1.15.8 收窄**：本端点**按会话的组**收窄 —— 该组授权了模型列表时，只回列表内的
+  （与该组 key 打 `/v1/models` 看到的集合**同一判据**）；未授权收缩（`authorizedModels: null`）
+  的组回全量，与改版前逐项相同。"能用哪些"与"实际准入"的一致性因此**按组成立**，不是全局。
+- **`enabled` 字段不回，因为恒为 `true`**：SQL 判据本身就是 `enabled = 1`，
+  响应里不可能出现 `false` 的行。回一个恒真字段只会教人去处理一个不存在的三态
+  （v1.15.0 初写此节时把 `enabled` 放进了示例 —— 那是照 §5 的形状多抄了一个字段，
+  实现从第一天就没回过它。这是**订正**，不是 v1.15.8 的变更：实现没有动，动的是本节的字。）
+- **分页口径（本节与 §0.3 不完全一致，如实写明）**：查询串接受 `page` / `pageSize`
+  （**缺省 `pageSize=100`、上限 200**，与 §0.3 的缺省 20 不同），但响应体**不带 §0.3 信封**
+  —— 没有 `items` / `total` / `page` / `pageSize`，只有 `{models: [...]}`。
+  所以**翻页对调用方不可见**：拿不到 `total` 就无法判断"还有没有下一页"。
+  本站模型是百量级、一次取全，消费面前端也**不传这两个参数**，所以实际不影响使用；
+  但按契约集成的调用方**不该**依赖 `?page=2` 能翻页 —— 真要分页，正确做法是把本端点
+  补成 §0.3 信封（那是一次破坏性变更，需走契约流程），不是在这里偷偷偏移。
+- **不含** `upstreamId` / `upstreamName` / 价格 / 余额：那些是管理员面的信息。
+  价格与余额对普通用户既无用又是上游信息的泄漏面。
+  调用时 `model` 字段填 `name`（§10：请求键是模型名），**不是** `id`（`mdl_*`）——
+  `id` 是档案行号，网关热路径上没有"行号→名字"的映射，填它只会 404。
+- **消费面实现的既有漂移（v1.15.8 订正）**：`web` 的 `ConsoleModel` 曾写成
+  `{id, displayName, enabled}` —— 与本节形状不符，而**两边各自类型自洽**，
+  四闸全绿也拦不住（`web/` 无测试 runner）。真实后果是**用户可见的**：
+  `enabled` 恒 `undefined` ⇒ 每个模型都渲染成「已停用」、页面上的「只看可用」
+  一按**清空列表**；可复制值给的是 `mdl_*`，照抄去调用**必 404**（本节已写明该填 `name`）。
+  修法是删掉那个开关与「已停用」分支（这个三态在协议上不存在）并把可复制值改成 `name`。
+  **登记在这里的理由**：它是"契约写对了、实现没跟上"的典型 —— 只有把**真实响应**
+  喂给**真实页面**才能发现，这正是 §19 头注那条"消费面数据归属只来自服务端"纪律的
+  另一半（前端不得自行推断服务端没给的字段）。
+- **筛选纪律：服务端收窄 = 集合，用户关键字 = 视图（v1.15.9 / ADR-0038 决策 5）**：
+  v1.15.3 写下的"模型广场**不做任何本地过滤**"针对的是**把服务端批准的模型藏起来**
+  （那个不存在的 `enabled` 三态就是这么来的，见上一条）。**那一层的禁则不变**。
+  新加的一层是：用户**主动敲的关键字 / 选的类型**是**视图**（那是他要的），可以做 ——
+  **前提是筛选器必须自报家门**：恒显 `已筛选 N / 共 M`，筛空时给的是
+  「清除筛选（共 M 个）」而不是一个空白页。**没有这一条，"被筛掉了"会被读成"没有这个模型"**，
+  而那正是本条要防的那个错，只是换了一条路径。
+  筛选项本身也**从返回数据里长出来**（type → count 的映射），不是从标签表里抄 ——
+  给一个必然产出空结果的筛选项，本身就是一种误导信号。
+  〔这一层是 `web/` 侧纪律，**契约面零变更**：本节一个字段都没动。写在这里是因为
+  它是"会骗人的信号"这条纪律的延续，而那条纪律的家在本节。〕
+
+### 19.7 管理面用户端点（`role=admin`）
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `POST` | `/api/users` | body `{username, password, role, groupId?, displayName?}` → `201 {username, role, groupId, displayName, createdAt, updatedAt}` |
+| `GET` | `/api/users` | 列表（分页，§0.3 信封）；**不回 `password_hash`** |
+| `PATCH` | `/api/users/:username` | body `{groupId: string \| null}` → `200 UserDto`（**只改归属组**，v1.15.6 新增） |
+| `DELETE` | `/api/users/:username` | `204`；同时吊销该用户的会话（`DELETE FROM sessions WHERE username = ?`） |
+
+#### `PATCH /api/users/:username` —— 只改归属组（v1.15.6 / ADR-0035 决策 2）
+
+```json
+{ "groupId": "grp_2b91" }
+```
+
+- **接受且只接受 `groupId`**（`string` 或 `null`；`null` = 退回未分配）。请求体里
+  出现 `role` / `password` / `displayName` / `username` 一律**忽略**（`additionalProperties`
+  照 §0.2 的既有口径不写 `false`），它们照旧不可改。
+- `200` + 全字段 `UserDto`（与 `POST` 的 201 同一形状）。未知用户 → `404 NOT_FOUND`。
+- `groupId` 指向不存在的组 → **`400 INVALID_PARAM`**（`details.field = 'groupId'`），
+  **不是 500** —— 一个坏入参不该被诊成服务端故障。
+- **归属改了立刻生效**：`SessionInfo.groupId` 每次鉴权从 `admin_users` 现读
+  （ADR-0034，「为什么 role 不存进 sessions」同一理由），所以**不需要**重新登录，
+  也不需要"改完踢他下线"。
+- 审计动作 **`user.update`**，`detail` 只记 `{groupId}`（**不含口令、不含散列**）。
+- **这条端点存在的唯一理由**是"归属错了要能修"。它**不是**"用户可编辑"的开端：
+  见下面那条口径订正。
+
+- `username` 唯一、`password` 走 §1 同一套 scrypt（`hashPassword`，不复刻算法）。
+- **`role` 是必填、不是可选**：`required: ['username', 'password', 'role']`，枚举 `admin | user`，
+  缺它或值不合法都是 `400 INVALID_PARAM`（`details.field = 'role'`）。
+  **〔v1.15.4 订正：v1.15.0 首次写下这张表时把 `role` 漏在 body 外、写成可缺省，
+  而 `src/api/routes/users.ts` 的 `createUserBodySchema` 从一开始就 `required` 它。
+  漏写的形状是**一个照契约手写的请求必 400**：契约说可省、实现说不，
+  这种漂移只会在"按文档集成"的人那里炸，而按代码抄的人永远看不见。
+  订正方式是补进表里，不是把实现的 `required` 摘掉 —— 缺省 `role` 意味着
+  建号方可以不知道自己建出来的是管理员还是普通用户，那是拿授面当默认值。〕**
+- **不能删自己**：`username === 当前会话 username` → `400 INVALID_PARAM`
+  （否则管理员把自己锁在管理面外面，而库已经空了、只能改库）。
+- 不能删最后一个 `role=admin`（同上的锁死风险）。
+- **"改用户"只有一条路径，且只改归属组**（**v1.15.6 订正**）：
+  `PATCH /api/users/:username {groupId}`（见上）。**没有重置口令、没有改角色、
+  没有改 `displayName`** —— 那三件事的答案仍然是**删掉重建**。
+  **〔v1.15.0 原话是"没有任何'改用户'的端点……换角色 / 换组 / 忘口令一律删掉重建"。
+  v1.15.6 把"换组"这一项改口**，因为它与"删了重建"的代价不成比例：删号会连带吊销
+  那个人的全部会话，并把他从 `audit_log` 的 actor 里断成两截（前一段用旧名、
+  后一段用同名的新行）—— 而他只是**进错了配额池**。而 `role` 那条理由原样成立，
+  这正是"只开 `groupId` 不开 `role`"的判据：两者的失败形状不同（详见 ADR-0035 决策 2）。〕**
+  `role` 一旦可改，"把自己降级"就成了一次普通请求，而降完就改不回来
+  （§19.7 的最后一条锁死风险），这是一个只能靠"不给这个能力"防住的坑。
+  **〔v1.15.4 补记：`web/src/pages/UsersPage.tsx` 因此只有建 / 删、没有编辑入口 ——
+  前端不做那个表单，是因为那个表单背后没有端点。**〔v1.15.6 订正：这一页现在有
+  **归属组**一个可编字段（就是上面那条 PATCH 的出口），其余仍不可编。〕**〕**
+- **"忘口令 = 删掉重建"这一条作废（v1.15.9 / ADR-0038 决策 3）**：
+  用户改**自己的**口令走 `POST /api/auth/password`（§1），**管理面仍然没有
+  "重置别人的口令"这个能力**。
+  - **两件事的差别不是"多一个少一个端点"，是"谁能发起"**：前者改的恒是**会话本人**
+    （`req.auth.username`，没有路径参数），后者会让**一个管理员能静默接管任何账号**
+    （写一个新散列、原主人再也进不来，而原主人**收不到任何通知**）。
+    改自己的口令是"我的账号我说了算"，改别人的口令是"你的账号我说了算"。
+  - **所以 `web/src/pages/UsersPage.tsx` 仍然没有"重置密码"入口** ——
+    前端不做那个表单，是因为那个表单背后**仍然**没有端点。
+    用户改密码的入口在两个外壳的账号菜单里（`ChangePasswordModal`，§19.3b 同一条纪律：
+    它是会话级动作，不属于任何一页）。
+  - **删号重建的代价**（这一条是订正的动机）：删号会吊销本人全部会话、
+    并把他从 `audit_log` 的 actor 里断成两截。为一个改口令付这个代价，
+    成本估计显然算错了 —— 这正是 ADR-0038 要订正的那一处。
+- **口令明文只在 `POST` 那一次存在于调用方内存里**：响应不回它（库里只有 scrypt 散列，
+  此后无端点可取回）。所以建号界面必须**当场展示 + 显式复制 + 明说"之后拿不到"**，
+  且**不给"再次查看"按钮** —— 那个按钮点了只能失败，比没有按钮更坏。
+  **改口令的端点同样只进不出**：`POST /api/auth/password` 收两个口令、回 `204`，
+  响应体里没有任何口令或散列（§1）。
+- 审计动作：`user.create` / `user.delete` / **`user.update`**（v1.15.6；**`auth.login` 不新增** —— 它已在写且已区分成败）。
+
+### 19.8 登录响应扩展（§1）
+
+`POST /api/auth/login` 的响应体**新增** `role`：
+
+```json
+{ "username": "alice", "role": "user", "expiresAt": "2026-10-18T12:00:00.000Z" }
+```
+
+- **纯新增可选字段**：老前端不读它，行为与 v1.15.0 之前逐字节相同。
+- 为什么进登录响应而不是让前端再调一次 session：登录那一刻就要决定跳管理面首页还是
+  `/console`，多一次往返只让"跳错地方"多一个时序窗口。`role` 是用户自己的属性，回给它不扩大暴露面。
+- **〔v1.15.3 订正：本条与 v1.15.1 的④写的"跳 `/admin` ⇄ `/console`"里的 `/admin` 不存在。〕**
+  前端管理面首页是 **`/dashboard`**（`web/src/router/router.tsx` 的 `path: 'dashboard'`），
+  全仓没有 `/admin` 这个路由 —— 它是从"管理面"这个词顺手推出来的地址，落地时一对就发现对不上。
+  实际分流是 `role=admin → /dashboard`、`role=user → /console`，两处（登录响应、根路径
+  `HomeRoute`）**读同一个字段、同一个映射**，不各自写一遍。
+
+### 19.9 DDL 与迁移
+
+```sql
+ALTER TABLE admin_users ADD COLUMN role      TEXT NOT NULL DEFAULT 'admin';
+ALTER TABLE admin_users ADD COLUMN group_id  TEXT REFERENCES groups(id);
+```
+
+- **纯加列，`SCHEMA_VERSION` 仍为 2**（迁移判据是"列在不在"，同 v1.1.1 / v1.4.x / v1.14.0）。
+- `role` 的 `DEFAULT 'admin'` **不是随手填的**：老库里唯一的账号本来就是管理员，
+  填 `user` 会让升级后**现有管理员失去管理面**（"升级即锁死自己"）。判据钉这一条。
+- `group_id` **可空、无默认**：`NULL` = 未分配（§19.2 的可读降级）。
+- `sessions` **零变更**。
+- **v1.15.6 / ADR-0035 零 DDL**：管理组与"首个管理员进组"是**首启引导的动作**
+  （`bootstrapAdmin` 在"库里一个账号都没有"时建组 + 写 `group_id`），不是表结构变更 ——
+  三张表（`groups` / `gateway_keys` / `admin_users`）的列与本条**逐字不变**，
+  `SCHEMA_VERSION` 仍为 **2**。**为什么种子不放 `migrate()`**：那是所有测试的公共前置，
+  而既有用例里有按**全局计数**断言的（`console.spec.ts` 那条
+  `SELECT COUNT(*) FROM gateway_keys` 恒等于 1）—— 种子进去就等于改了几十条用例的前置条件。
+
+- **v1.15.8 / ADR-0037：`group_models` 纯加表**，`SCHEMA_VERSION` 仍为 2
+  （纯加表先例：`gateway_error_events` §12.1 / `supplier_accounts` §15 —— 加表对老库零动作）：
+
+```sql
+CREATE TABLE IF NOT EXISTS group_models (
+  group_id TEXT NOT NULL REFERENCES groups(id),
+  model_id TEXT NOT NULL REFERENCES models(id),
+  PRIMARY KEY (group_id, model_id)
+);
+```
+
+  - `PRIMARY KEY (group_id, model_id)`：同一组对同一档案重复授权是**同一件事**，不是两行。
+  - **两条显式级联（全库 `foreign_keys=ON` 且无 `ON DELETE` 子句，漏一条 = 删除操作 500）**：
+    ① `deleteGroup` 事务内 `DELETE FROM group_models WHERE group_id = ?`（在删 `groups` 行**之前**）；
+    ② `deleteUpstream` force 路径删 `models` 行**之前**
+    `DELETE FROM group_models WHERE model_id IN (被删档案的 id)`。
+  - **模型同步（§5）不产生孤儿授权**：`upsertModelFromSync` 对已存在的档案行**只 UPDATE、从不 DELETE/重建**
+    （"未知不覆盖已知"，§5 同步映射表），`models.id` 在同步下**稳定** —— 所以授权行不会因一次同步失效。
+    档案行真正消失只有一条路：`deleteUpstream`（force），那是 ② 覆盖的那条。
+  - 老库升级**零动作**：新表建好即空，空表 = 所有组不限模型，与升级前行为逐字相同。
+
+### 19.10 影响面汇总
+
+| 面 | 变更 |
+|---|---|
+| `/api/*`（管理面） | **零端点变更**；`/api/access-info` 响应体不变，但**授面多放一种身份**读它（v1.15.1，见 §19.1 表）。**v1.15.8** `GroupDto` 非破坏新增 `authorizedModels`；**v1.15.9** `GatewayKeyDto` 非破坏新增 `label`（§4）。**v1.16.0 零新增、零删除端点**：`Upstream.supplier` 取值集合由 `[null,"tierflow"]` 扩成 `[null,"tierflow","tokenrhythm"]`（§2，**schema enum 一处**；`upstreams` 路由的 `supplierProp` enum 同步 + `requireSupplierUpstream` 错误文案），六个批量端点与 `rotate-key` **复用既有路径**，第二家与本家的差异全在驱动器（`src/supplier/tokenrhythm.ts`）与两张能力闸内（§15.14.1） |
+| `/api/console/*` | **新增 3 个只读端点**（§19.2–19.4、§19.6）；**v1.15.8** `models` 按组收窄（零端点/零字段变更，集合语义变）；**v1.15.9 再加 4 个**：`GET /api/console/quota`（§19.3c）+ **三条写路由** `POST/PATCH/DELETE /api/console/keys[/:keyId]`（§19.3b，消费面唯一的一组写方法），`GET /api/console/keys` 响应非破坏新增 `keyLimit` |
+| `/api/users*` | **新增 3 个管理端点**（§19.7）；**v1.15.6 再加 1 个**（`PATCH /api/users/:username`，只改 `groupId`） |
+| `POST /api/auth/login` | 响应体**新增** `role`（纯新增） |
+| `POST /api/auth/password` | **v1.15.9 新增**（§1）：改**会话本人**的口令；**不存在**"改别人的口令"这个能力 |
+| `/v1/*` | **零端点、零路径变更**；网关 key 鉴权走 `key_hash`，与后台身份无关（**v1.15.8** 新增 1 码 `MODEL_NOT_AUTHORIZED` 是那版的事）。**v1.15.10 加一道类别准入 + `/v1/models` 每项加一格 `type`**（§10：既有四字段零变更、零新增码）。**v1.16.0 零改动** ——（第二家供应商是**管理面账号池**的概念，与数据面无关） |
+| `src/gateway/` | **零改动**（选路 / 限流 / KeyPool / cooldown 一行不动；**v1.15.9 同样零改动** —— 自助签发的 key 走的是同一条 `key_hash` 鉴权）。**v1.15.10 动了路由版（`routes.ts` 准入闸）+ 端口（`ports.ts` 一个字段一个方法）+ 装配（`stack.ts` 把 catalog 也交给路由层）** —— 但**引擎、KeyPool、limiter、cooldown 仍是一行不动**：准入判在它们**之前** |
+| DDL | 两列纯加列；`SCHEMA_VERSION` 仍为 **2**、零迁移分支（**v1.15.8** `group_models` 纯加表；**v1.15.9 零 DDL** —— `gateway_keys.label` 建表起就在；**v1.15.10 同样零 DDL** —— `models.type` 建表起就在，本版只是第一次有人**读**它；**v1.16.0 同样零 DDL** —— `supplier_accounts.supplier` 列建表起就在，本版只是把值域扩一项） |
+| `ERROR_CODES` | **零新增**（越权 `FORBIDDEN`、未登录 `UNAUTHORIZED`、删自己 `INVALID_PARAM` 全是既有码；**v1.15.8 / v1.15.9 同样零新增** —— 到上限用 `UNPROCESSABLE`、旧口令错用 `INVALID_CREDENTIALS`、限速用 `TOO_MANY_ATTEMPTS`，全是既有码；**v1.16.0 同样零新增** —— §15.14 两张能力闸用既有 `UNPROCESSABLE`，逐行码走 `items[].code` 不进口径码表） |
+| 审计动作 | 新增 `user.create` / `user.delete`（**v1.15.6** `user.update`；**v1.15.9** `auth.password`，而 key 自助**复用**既有的 `gateway_key.issue` / `.update` / `.delete`）。**v1.16.0 零新增** —— `supplier.*` 六个动作**不带供应商后缀**（本就按动作记），第二家进来不产生新动作 |
+| 强制点 | **v1.15.9 唯一的新硬判据 `KEY_SELF_ISSUE_LIMIT = 10`**（`src/api/routes/console.ts`，按组的把数上限） |
+| `web/`（前端） | **v1.15.3 交付**：`/console` 工作区三页 + `ConsoleLayout` + `consoleNav` + `SessionInfo.role` + `consoleApi` + 登录与根路径按 `role` 分流。**零新依赖、零后端改动**（这一版只是让界面追上 v1.15.0–v1.15.2 已做完的边界）；无自动化测试，判据是 `tsc --noEmit` + `vite build` 全绿 + 三个 console chunk 独立分包。**v1.15.4 追加**：`/users` 管理页 + `usersApi` + `UserDto`/`UserCreateRequest` + 两个弹窗（建号表单、口令一次性展示）—— **同样零后端改动**（§19.7 的端点 v1.15.0 就在，本版只是补上前端入口），同样无自动化测试。**v1.15.5 零改动**（本版是服务端闸门放行两条既有路径，前端早已在打它们；前端唯一的"改动"是它现在能登进来了）。**v1.15.9 追加四处**：API Keys 页（签发 / 改名 / 吊销 / 一次性明文 / 上限提示）、用量页额度卡、模型广场升级（接入地址 + 三端点清单 + 分类搜索）、两个外壳账号菜单各挂 `ChangePasswordModal`（放在 `src/components/` —— 放进 `pages/console/` 会让**管理面 chunk 依赖消费面 chunk**，方向反了）。**v1.15.11 追加**：账号入口从两个外壳的顶栏搬到**侧栏左下角**（1panel 观感）—— 菜单体收成共享的 `src/components/AccountMenu.tsx`（`ChangePasswordModal` 随之只挂载一份，顶栏不再有第二份入口；管理面顶栏只剩 `ConnectionBadge`），Sider 变一列三格（菜单自身可滚、账号格钉在底）。**v1.15.12 追加**：**收起侧栏的把手**从底部那条通栏色块换成**品牌行右侧的 28px 图标按钮**（`src/components/SidebarCollapseButton.tsx`，`Sider` 传 `trigger={null}` 关掉 antd 自带的）—— 两个外壳同一套，折叠态按钮不被裁、账号格随把手消失而**贴底**。**两版都是纯前端零后端改动**，无自动化测试，判据是 `tsc --noEmit` + `vite build` + 分包核查 + 双角色三视口真实浏览器走查（版本日志有全表） |
+| `src/api/app.ts` 闸门 | **v1.15.5 放行两行**（`GET /api/auth/session` / `POST /api/auth/logout`，见 §19.1 表）；**v1.15.9 再放行一行**（`POST /api/auth/password`，字面路径 + 方法门）；v1.15.0–v1.15.4 的既有判定（`/api/console/**` + `GET /api/access-info`）**一字未改** |
+
+**v1.16.0 的空调子们**：`/v1/*` **零端点、零路径变更**、`src/gateway/` **零改动**、
+DDL 零（`SCHEMA_VERSION` 仍为 2）、`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增、
+审计动作零新增、`/api/*` 零端点新增/删除、`web/` 零新依赖
+（`web/src/api/types.ts` 一张能力位表 + 六处消费点改判定，无新包）。
+
+**v1.15.10 的空调子们**：`/v1/*` 零端点变更（只加了一道本地准入与一格响应字段）、
+DDL 零（`SCHEMA_VERSION` 仍为 2）、`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增、
+**`engine.ts` / `key-pool.ts` / `limiter.ts` / `classify.ts` 零改动**、
+`/api/*` 与 `/api/console/*` 零改动、`web/` 零改动。
+
+**v1.15.9 的空调子们**（这一版改的东西多，所以把"没动的"列出来更省事）：
+`/v1/*` 零变更、`src/gateway/` 零改动、DDL 零（`SCHEMA_VERSION` 仍为 2）、
+`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增；`inConsoleScope()` **零改动**
+（它只判前缀不判方法，三条写路由天然落在里面）。
+
+v1.15.0（**2026-10-17，消费面用户与角色授面 —— 「普通用户前端」不是纯前端双视图** —— 新增 **§19 消费面 `/api/console/*`**（`GET /api/console/session|keys|usage|models` 四个只读端点 + `POST /api/users` / `GET /api/users` / `DELETE /api/users/:username` 三个管理端点）+ **§1 登录响应新增 `role`**（纯新增可选字段）；动机：Bo 要的是 1panel 报告 §1.4 的 **B 档**（真普通用户），A 档（纯前端 `/admin ⇄ /console` 双视图）做不出这个东西 —— 后端 `admin_users` 没有 `role` 列、`/api/*` 全量鉴权且只有一个身份，一个普通用户即使登进前端，他打的每个 `/api/*` 都会拿到**管理员能看到的一切**（上游 Base URL、上游 key 掩码、真实账号池、审计日志）；所以"加个用户前端"实际是**引入第二种身份 + 服务端授面**，`web/` 只是出口；**授面在闸门里按前缀判一次**（`user` 落在既有 `/api/**` → 403 `FORBIDDEN`），与 `inReadonlyScope()` 同一条纪律 —— 判据放闸门，新增路由不可能"忘了判作用域"；**`role` 每次鉴权从 `admin_users` 现读、不存 `sessions`**（现读只是一次主键点查，存了就有"改了角色旧会话还是老角色"的窗口）；**消费面全部是 `GET`，不含 key 签发** —— 网关 key 明文只存在于签发那一次（§4 铁律），把签发权下放给 `user` 等于组内任一成员可无限增发、共烧同一个配额池，要单独一条 ADR，本版明确不做。**〔v1.15.9 订正：那条 ADR 就是 ADR-0038 —— 消费面现在**不是**"全部 `GET`"，`POST` / `PATCH` / `DELETE /api/console/keys[/:keyId]` 三条写路由已下放（§19.3b），"无限增发"改用护栏消掉（`KEY_SELF_ISSUE_LIMIT = 10`，按组把数，到顶 `422`）。**没有被动过的是后半句的结论**：明文仍然只在 `201` 里出现一次、仍然没有"再取回"的路径 —— 它才是"只读"这个词真正在守的东西。〕**；**`usage_logs` 没有 user 维度**（按 `group_id` 记），所以"自己的用量" = 本组用量，`groupBy` 因此不含 `group`（按组分箱只会得到一根恒等的线）；**`GET /api/console/models` 与 §5 / §10 `/v1/models` 同一判据**（用户端看到的"能用哪些模型"必须与网关实际准入的集合一致，否则又是一个会骗人的信号）；**接入 URL 不新开端点**（新开就有第二份口径，ADR-0033 决策 2 同理由，这里禁的是第二个端点）；**DDL = 两列纯加列**（`admin_users.role TEXT NOT NULL DEFAULT 'admin'` / `admin_users.group_id TEXT REFERENCES groups(id)`），**`SCHEMA_VERSION` 仍为 2、零迁移分支**（判据"列在不在"，同 v1.1.1 / v1.4.x / v1.14.0）；`role` 的 `DEFAULT 'admin'` **不是随手填的** —— 老库里唯一的账号本来就是管理员，填 `user` 会让升级后现有管理员**失去管理面**（"升级即锁死自己"）；`group_id` 可空 = 未分配，此时三个列表端点回空 + `assigned:false`，**不是 500**（**〔v1.15.9：读端点从三个变四个** —— `GET /api/console/quota` 加了进来；未分配的它是各格 `null` 而非 0〕**）；**`/api/*` 管理面零端点变更、零字段变更**（`/api/access-info` 响应体不变且**不放行**给 `user` —— 它回 `hostGateway` 这类绑定地址，对普通用户无意义且易误读成可访问地址。**〔v1.15.1 订正：此句与 ADR-0034「影响面」表的裁定相反、且与本版 §19.5 的 URL 公式不相容，改口见 v1.15.1 ①②③〕**）；**`/v1/*` 零变更**（网关 key 鉴权走 `key_hash`，与后台身份无关）；**`src/gateway/` 零改动**（选路 / 限流 / KeyPool / cooldown 一行不动）；**`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增**（越权 `FORBIDDEN`、未登录 `UNAUTHORIZED`、删自己 `INVALID_PARAM` 全是既有码）；审计动作新增 `user.create` / `user.delete`（`auth.login` 不新增，它已在写且已区分成败）；判据见 ADR-0034「判据」表七条 + 三条变异（删掉前缀判定 / `WHERE group_id = ?` 改成读 `req.query.groupId` / `DEFAULT 'admin'` 改成 `'user'`）；**遗留三条不粉饰**：① **配额是组级不是人级**（`src/gateway/limiter.ts` 按 `groupId` 计 rpm/tpm/daily_quota，"多人共享同组"的真实语义是共享同一个配额池、同一批 key、同一份用量统计 —— 同组 10 人打满 `daily_quota` 时 10 人一起被 `QUOTA_EXCEEDED`；要按人拆必须动 `limiter` + `KeyPool`，是独立的一笔）；② **用户端不能自己发 key**（决策 3）；③ **没有自助改密码 / MFA / 账号锁定**（`loginLimiter` 是 IP 级的，单管理员 + 少数用户场景下收益低于成本）。**〔v1.15.9 订正这两条：② 与 ③ 的前半都被 ADR-0038 推翻** —— ② 被护栏消掉（同上），③ 的"改密码"从"收益低于成本"变成 `POST /api/auth/password`（写这条成本估计时用的是**删号重建**那个答案，而删号会吊销本人全部会话、把 `audit_log` 里的 actor 断成两截）；**③ 的后半（MFA / 账号锁定）与"身份绑定"继续不做**，理由从"收益低"改成"它要一整套新状态/新信任根，做半个比不做更坏"，且 Bo 已明确裁定不做。〕**）

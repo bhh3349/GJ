@@ -61,6 +61,12 @@ const ASSISTANT_GROUP: GroupContext = {
   rpm: null,
   tpm: null,
   dailyQuota: null,
+  // 本版（v1.15.8 / ADR-0037 决策 4）给 `GroupContext` 加了授权字段。助手这里**只能是 null**：
+  // 它是合成组，不是任何一个管理员建的组，没有授权列表可言。
+  // 而且这个字段对助手**天然不生效** —— 助手直接调引擎、不过路由层（`requireModelAuthorized`
+  // 在路由层），所以它既不会被授权门拦下，也不需要"授什么模型"。这正是把强制点放在
+  // 路由层而不是引擎层的判据之一：引擎层强制会把助手卷进一个它没有答案的问题。
+  authorizedModels: null,
 };
 
 /** 助手自身调用用的模型名由**装配侧**给定，不来自请求体（契约 §13.1 没有 `model` 字段） */

@@ -31,7 +31,9 @@
 
 import { sanitizeUpstreamBody } from '../../balance/raw.js';
 import type { Db } from '../../db/database.js';
+import { isAccountDepleted } from '../../db/depletion.js';
 import { newId } from '../../db/ids.js';
+import { latchAccountCascade, latchAccountDepleted } from '../../db/repo/depletion-latch.js';
 import { createKey, deleteKey } from '../../db/repo/keys.js';
 import {
   backfillSubscriptionTokenPlan,
@@ -733,6 +735,7 @@ async function refreshAccount(
     // 余额已经拿到了，照写；只是这一行按失败报出去 —— 刷新承诺的是"余额 + 套餐"两样。
     patch.statusMessage = safeMessage(subsCall.result.message, active);
     updateSupplierAccount(ctx.db, active.id, patch);
+    latchAccountIfDepleted(ctx, active.id, self);
     return {
       ok: false,
       relogged,
@@ -744,7 +747,34 @@ async function refreshAccount(
   replaceSupplierSubscriptions(ctx.db, active.id, mapSubscriptions(subsCall.result.data, self.quotaPerUnit));
   patch.statusMessage = null;
   updateSupplierAccount(ctx.db, active.id, patch);
+  latchAccountIfDepleted(ctx, active.id, self);
   return { ok: true, relogged, code: null, message: null };
+}
+
+/**
+ * 判定腿 5（契约 §20.4 / §20.6）：账号刷新后判账号 + 级联其名下池内 key。
+ *
+ * **必须在 `updateSupplierAccount` 之后调**：它判的是"库里刚写进去的那个余额"。
+ * 顺序反了在库里读不出来（两列独立、结果相同），但读代码的人会以为判的是旧值。
+ *
+ * 两个分支都要调 —— 套餐腿失败时余额**照样已经落库**（上面那条注释），
+ * 漏掉那个分支就会出现"余额写进去了、账号没打标"，而下一轮刷新要等一整个周期。
+ *
+ * `unlimited` / `balanceCents === null`（未知）都够不着 `isAccountDepleted`：前者
+ * 上游按设计不落余额，后者是"还没查到"不是"没钱"（ADR-0003）。判据在 `depletion.ts`，
+ * 这里不重复写一遍阈值。
+ *
+ * **只置位、不解锁**（§20.3）：余额回升**不**自动回池 —— 业主要的"用户可以自己再次核查"
+ * 正是这一步。解除只有 `POST /api/supplier-accounts/:id/undeplete` 一个人工入口。
+ */
+function latchAccountIfDepleted(
+  ctx: SupplierOps,
+  accountId: string,
+  self: { unlimited: boolean; balanceCents: number | null },
+): void {
+  if (!isAccountDepleted({ unlimited: self.unlimited, balanceCents: self.balanceCents })) return;
+  latchAccountDepleted(ctx.db, accountId);
+  latchAccountCascade(ctx.db, accountId);
 }
 
 /**

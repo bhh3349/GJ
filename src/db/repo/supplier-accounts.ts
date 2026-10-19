@@ -29,8 +29,11 @@ import { ApiError } from '../../api/errors.js';
 import { nowIso } from '../../util/time.js';
 import { decryptSecret } from '../crypto.js';
 import type { Db } from '../database.js';
+import { isTokenPlanDepleted } from '../depletion.js';
+import type { DepletedReason } from '../depletion.js';
 import { newId } from '../ids.js';
 import { appendChange } from './change-log.js';
+import { latchKeyDepleted } from './depletion-latch.js';
 import { translateWriteError } from './write-errors.js';
 
 /**
@@ -54,6 +57,9 @@ interface AccountRow {
   balance_updated_at: string | null;
   /** §16.7 Tier 2 的账号级出口绑定；`NULL` = 走宿主出口（配置事实，不是未知） */
   egress_id: string | null;
+  /** 透支锁存（§20.6）；NULL = 未锁存 */
+  depleted_at: string | null;
+  depleted_reason: DepletedReason | null;
   revision: number;
   created_at: string;
   updated_at: string;
@@ -96,7 +102,8 @@ interface SubscriptionRow {
  */
 const ACCOUNT_COLS = `
   id, upstream_id, supplier, identifier, username, uid, status, status_message,
-  balance_cents, balance_updated_at, session_expires_at, egress_id, revision, created_at, updated_at,
+  balance_cents, balance_updated_at, session_expires_at, egress_id,
+  depleted_at, depleted_reason, revision, created_at, updated_at,
   (encrypted_password IS NOT NULL) AS has_password,
   (encrypted_session  IS NOT NULL) AS has_session
 `;
@@ -222,6 +229,12 @@ function toDto(
     credentialSource: row.has_password === 1 ? 'password' : 'session',
     hasSession: row.has_session === 1,
     sessionExpiresAt: row.session_expires_at,
+    // 透支锁存（§20.6 / §20.8）。与 `status` **正交**：一个 `active` 且余额为 0 的账号是正常态，
+    // 所以这里不改 status、不借 status 表达"没钱"。账号的 `reason` 恒为 `'balance'`
+    // （它自己就是源头，没有"所属账号欠费"那种级联）。
+    depleted: row.depleted_at !== null,
+    depletedAt: row.depleted_at,
+    depletedReason: row.depleted_reason,
     revision: row.revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -231,6 +244,8 @@ function toDto(
 export interface ListSupplierAccountsQuery {
   upstreamId?: string | undefined;
   status?: string | undefined;
+  /** §20.8：透支锁存筛选。与 `status` **正交**，可与它并用 */
+  depleted?: boolean | undefined;
   /** 模糊匹配**掩码后的** identifier / username / uid —— 真值不在库里，也没法拿它搜 */
   q?: string | undefined;
   page: number;
@@ -251,6 +266,9 @@ export function listSupplierAccounts(
   if (query.status !== undefined && query.status !== '') {
     where.push('status = ?');
     params.push(query.status);
+  }
+  if (query.depleted !== undefined) {
+    where.push(query.depleted ? 'depleted_at IS NOT NULL' : 'depleted_at IS NULL');
   }
   if (query.q !== undefined && query.q !== '') {
     // 转义 LIKE 的通配符：不转义的话，用户搜 `_` 会匹配到任意单字符 ——
@@ -1188,7 +1206,7 @@ export function backfillSubscriptionTokenPlan(
      WHERE id = ? AND category = 'token-plan' AND deleted_at IS NULL`,
   );
 
-  const touched = new Set<string>();
+  const touched = new Map<string, number>();
   db.transaction(() => {
     for (const sub of subs) {
       // 纪律 1 + 2：先算余量。**任一格未知 ⇒ 这一行没有可写的数。**
@@ -1219,7 +1237,16 @@ export function backfillSubscriptionTokenPlan(
       if (pooledKeyId === undefined) continue;
 
       update.run(remainingTokens, sub.endAt ?? null, at, at, pooledKeyId);
-      touched.add(pooledKeyId);
+      touched.set(pooledKeyId, remainingTokens);
+    }
+
+    // 判定腿（§20.4）：套餐余量**回填落库**正是那五个判定点之一。录的是**这一行刚写进去的
+    // 余量**（不是循环外的某个变量）—— 一批套餐里可能只有一两把烧干。
+    // 判据走 `isTokenPlanDepleted`（唯一实现），不在本函数里再写一遍 `=== 0`。
+    // `remainingTokens` 在上面已被 `Math.max(0, …)` 夹过，所以这里只会见到 0 或正数。
+    for (const [pooled, remaining] of touched) {
+      if (!isTokenPlanDepleted({ remainingTokens: remaining })) continue;
+      latchKeyDepleted(db, pooled, 'balance');
     }
 
     // 广播与写入同一事务（同 `replaceSupplierAccountKeyLedger`）：崩在中间会让
@@ -1227,7 +1254,7 @@ export function backfillSubscriptionTokenPlan(
     // `tokenPlanRemainingTokens` 正是选路键 2 与可用性判据。`'balance'` 与 `'key'`
     // 都在 `SNAPSHOT_ENTITIES` 里，两个都能叫醒网关；取 `'balance'` 是因为这一动
     // 改的是**额度**那一族列（`token_plan_remaining` / `token_plan_expires_at`）。
-    for (const pooled of touched) appendChange(db, 'balance', pooled, 'update', null);
+    for (const [pooled] of touched) appendChange(db, 'balance', pooled, 'update', null);
   })();
 }
 

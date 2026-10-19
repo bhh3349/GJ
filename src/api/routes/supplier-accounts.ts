@@ -30,6 +30,7 @@
 
 import type { FastifyInstance } from 'fastify';
 import { appendAudit } from '../../db/repo/audit.js';
+import { clearAccountDepletedCascade } from '../../db/repo/depletion-latch.js';
 import {
   deleteSupplierAccount,
   listAllSupplierAccounts,
@@ -60,6 +61,8 @@ import {
 interface ListQuery {
   upstreamId?: string;
   status?: string;
+  /** §20.8：透支锁存筛选。与 `status` 正交（一个是会话健康，一个是资金事实） */
+  depleted?: boolean;
   q?: string;
   page: number;
   pageSize: number;
@@ -173,6 +176,7 @@ export function registerSupplierAccountRoutes(app: FastifyInstance, ctx: ApiCont
             ...pageProps,
             upstreamId: { type: 'string', maxLength: 64 },
             status: { type: 'string', enum: [...SUPPLIER_ACCOUNT_STATUSES] },
+            depleted: { type: 'boolean' },
             q: { type: 'string', maxLength: 200 },
           },
         },
@@ -182,6 +186,7 @@ export function registerSupplierAccountRoutes(app: FastifyInstance, ctx: ApiCont
       listSupplierAccounts(db, {
         upstreamId: req.query.upstreamId,
         status: req.query.status,
+        depleted: req.query.depleted,
         q: req.query.q,
         page: req.query.page,
         pageSize: req.query.pageSize,
@@ -569,6 +574,40 @@ export function registerSupplierAccountRoutes(app: FastifyInstance, ctx: ApiCont
         detail: `egress=${updated.egressId ?? 'null'}`,
       });
       return updated;
+    },
+  );
+
+  /**
+   * 解除账号透支锁存（契约 §20.5 / ADR-0041 决策 6）。回 `200 SupplierAccount`。
+   *
+   * **不要求 `revision`**（与上面 `PATCH /:id` 唯一的形式差别）：它不是"改字段"，
+   * 是"解除一个自动置位的标记"，没有可覆盖的编辑冲突。要求 `revision` 只会让
+   * "页面开着放一会儿再点"报 `409 REVISION_MISMATCH` —— 为一个不存在的冲突付交互税。
+   * 账号与其名下被级联的 key 都 `revision + 1`（那是事实）。
+   *
+   * 语义：清账号锁 + 清该账号名下 `depletedReason='account'` 的 key 锁（同样 `enabled=1`）。
+   * **只清 `'account'`**：一把自己余额不足（`'balance'`）的 key，不因解账号的锁而回池 ——
+   * 它没钱这件事没变（§20.5）。
+   *
+   * 广播：逐把 key 发 `'key'`（仓储层同一事务内完成）。账号行自己不发 —— 网关快照里没有
+   * `supplier_accounts` 这个实体（对照 ADR-0021 决策 5 那条：`egress_id` 要发是因为它
+   * **经由 join 进了快照**，而 `depleted_at` 账号列没有这个待遇）。
+   */
+  app.post<{ Params: { id: string } }>(
+    '/api/supplier-accounts/:id/undeplete',
+    { schema: { params: idParam } },
+    (req) => {
+      // 404 先行：不存在就报，别把审计写成"解除成功 0 条"（那看起来像一次有效的空操作）。
+      requireSupplierAccount(db, req.params.id);
+      const cleared = clearAccountDepletedCascade(db, req.params.id);
+      auditWrite(db, req, config, {
+        action: 'supplier.account.undeplete',
+        targetType: 'supplier_account',
+        targetId: req.params.id,
+        // 计数（§20.5：detail 只放计数或 id 串，不含凭据）
+        detail: `account=${cleared.account ? 1 : 0} keys=${cleared.keys}`,
+      });
+      return requireSupplierAccount(db, req.params.id);
     },
   );
 

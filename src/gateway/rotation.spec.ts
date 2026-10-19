@@ -37,6 +37,7 @@ function key(keyId: string, upstreamId: string, over: Partial<KeyConfig> = {}): 
     balanceCents: null,
     tokenPlanRemainingTokens: null,
     tokenPlanExpiresAt: null,
+    depleted: false,
     ...over,
   };
 }

@@ -138,6 +138,10 @@ function remainingQuotaOf(key: KeyConfig, rt: RuntimeExtras): number {
 
 function isUsable(key: KeyConfig, rt: KeyRuntimeState & RuntimeExtras, now: number, fallbackMaxConcurrency: number): boolean {
   if (key.status !== 'enabled') return false;
+  // 透支锁存（契约 §20.7 / ADR-0041）：紧接着 status 判，**在冷却/并发之前**。
+  // 与 status 是同一种"配置级事实"（落库、跨重启），且它**不可自愈** —— 先判它
+  // 省掉后面全部计算。与 autoDisabled 的区别在 §20.9：那个是内存态、一次成功就清。
+  if (key.depleted) return false;
   if (rt.autoDisabled) return false;
   if (rt.cooldownUntil !== null && rt.cooldownUntil > now) return false;
   if (rt.inflight >= (key.maxConcurrency ?? fallbackMaxConcurrency)) return false; // 满并发不算失败、不进冷却

@@ -106,6 +106,7 @@ function makeConfig(dbPath: string): AppConfig {
     modelProbeMaxModels: 10,
     // 托管默认关（契约 §17）：本套用例不挂前端，`GET /` 维持既有 JSON 404
     adminWebDist: null,
+    egressBudgetCapacity: null,
     publicHost: null,
   };
 }
@@ -384,6 +385,147 @@ describe('余额三口径与软删（ADR-0003 规则 1/4）', () => {
     expect(shown.statusCode).toBe(200);
     expect((shown.json() as { deletedAt: string | null }).deletedAt).not.toBeNull();
     expect(plan.id).not.toBe(kept.id);
+    await closeHarness(h);
+  });
+});
+
+describe('§20 透支锁存（HTTP 面：批量解除 / 筛选 / `enable` 不清锁）', () => {
+  /**
+   * 走**真实 HTTP 写路径**把一把 key 弄成锁存态：建一把余额 0 的 key（`createKey` 本身
+   * 不判锁存，§20.4 的五个落库点里没有它），再 `PUT balance=0` 触发判定腿。
+   * 走 SQL 直接改列会把"判定腿到底挂没挂在这条路上"这件事从用例里抹掉 ——
+   * 而那正是 §20.4 最容易静默坏掉的一环。
+   */
+  async function latchViaHttp(h: Harness, upstreamId: string): Promise<string> {
+    const key = await createKey(h, upstreamId, { key: probeSecret(), balance: 5000 });
+    const res = await h.app.inject({
+      method: 'PUT',
+      url: `/api/keys/${key.id}/balance`,
+      headers: auth(h),
+      payload: { balance: 0, currency: 'CNY' },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    expect((res.json() as { depleted: boolean }).depleted).toBe(true);
+    return key.id;
+  }
+
+  const latchRow = (h: Harness, id: string) =>
+    h.db
+      .prepare('SELECT depleted_at AS at, depleted_reason AS reason, enabled FROM upstream_keys WHERE id = ?')
+      .get(id) as { at: string | null; reason: string | null; enabled: number };
+
+  it('批量 undeplete：清锁 + `enabled=1` + 一条 `key.batch_undeplete` 审计；未知 id 静默不计入', async () => {
+    const h = await setup();
+    const upstreamId = await createUpstream(h);
+    const a = await latchViaHttp(h, upstreamId);
+    const b = await latchViaHttp(h, upstreamId);
+    // 先把 `enabled` 打成 0：解除的语义是"清锁**并**重新启用"，不启用就只做了一半。
+    h.db.prepare('UPDATE upstream_keys SET enabled = 0 WHERE id IN (?, ?)').run(a, b);
+
+    const res = await h.app.inject({
+      method: 'POST',
+      url: '/api/keys/batch',
+      headers: auth(h),
+      payload: { ids: [a, b, 'key_does_not_exist'], action: 'undeplete' },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    expect((res.json() as { updated: number }).updated).toBe(2);
+
+    for (const id of [a, b]) {
+      expect(latchRow(h, id), id).toMatchObject({ at: null, reason: null, enabled: 1 });
+    }
+
+    const audit = h.db
+      .prepare("SELECT target_type, detail FROM audit_log WHERE action = 'key.batch_undeplete'")
+      .get() as { target_type: string; detail: string | null } | undefined;
+    // `detail` 是 `updated/ids.length`（§20.5：detail 只放计数，不含凭据）——
+    // 它同时是"请求里带了 3 个 id、只有 2 个动了"的唯一一处可审计痕迹。
+    expect(audit?.detail).toBe('2/3');
+
+    // 幂等可重放：再来一次是 0 而不是报错。
+    const again = await h.app.inject({
+      method: 'POST',
+      url: '/api/keys/batch',
+      headers: auth(h),
+      payload: { ids: [a], action: 'undeplete' },
+    });
+    expect(again.statusCode).toBe(200);
+    await closeHarness(h);
+  });
+
+  it('`action:"enable"` **不清锁**：一次批量启用放回整池透支 key 是这一版明确要防的', async () => {
+    const h = await setup();
+    const upstreamId = await createUpstream(h);
+    const id = await latchViaHttp(h, upstreamId);
+    h.db.prepare('UPDATE upstream_keys SET enabled = 0 WHERE id = ?').run(id);
+
+    const res = await h.app.inject({
+      method: 'POST',
+      url: '/api/keys/batch',
+      headers: auth(h),
+      payload: { ids: [id], action: 'enable' },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    expect((res.json() as { updated: number }).updated).toBe(1);
+
+    // 这条断言就是"不会再回到正常的池"（业主原话）在 HTTP 面上的落点：
+    // 启用了，但锁还在 —— 两件事各自成立，谁都不许顺手带另一个。
+    const row = latchRow(h, id);
+    expect(row.enabled).toBe(1);
+    expect(row.at).not.toBeNull();
+    expect(row.reason).toBe('balance');
+    await closeHarness(h);
+  });
+
+  it('`GET /api/keys?depleted=` 只出对应的那一组，且 DTO 三列与库里同源', async () => {
+    const h = await setup();
+    const upstreamId = await createUpstream(h);
+    const latched = await latchViaHttp(h, upstreamId);
+    const healthy = await createKey(h, upstreamId, { key: probeSecret(), balance: 5000 });
+
+    const listOf = async (query: string): Promise<{ items: { id: string }[]; total: number }> => {
+      const res = await h.app.inject({ method: 'GET', url: `/api/keys${query}`, headers: auth(h) });
+      expect(res.statusCode, res.body).toBe(200);
+      return res.json() as { items: { id: string }[]; total: number };
+    };
+
+    expect((await listOf('?depleted=true')).items.map((k) => k.id)).toEqual([latched]);
+    expect((await listOf('?depleted=false')).items.map((k) => k.id)).toEqual([healthy.id]);
+    // 不带筛选时两把都在 —— 筛选是**纯加**，不是把默认集合也改成"只出没锁的"。
+    expect((await listOf('')).total).toBe(2);
+    // `depleted` 与 `enabled` 是两条正交的轴，可并用（这里故意同时给两个条件）。
+    expect((await listOf('?depleted=true&enabled=true')).items.map((k) => k.id)).toEqual([latched]);
+
+    const dto = (
+      await h.app.inject({ method: 'GET', url: `/api/keys/${latched}`, headers: auth(h) })
+    ).json() as { depleted: boolean; depletedAt: string | null; depletedReason: string | null; enabled: boolean };
+    expect(dto).toMatchObject({ depleted: true, depletedReason: 'balance', enabled: true });
+    expect(dto.depletedAt).not.toBeNull();
+    await closeHarness(h);
+  });
+
+  it('批量解除后**下一轮刷新仍透支会再次锁上**（§20.3 粘性的反向：不是一次性误判）', async () => {
+    const h = await setup();
+    const upstreamId = await createUpstream(h);
+    const id = await latchViaHttp(h, upstreamId);
+
+    await h.app.inject({
+      method: 'POST',
+      url: '/api/keys/batch',
+      headers: auth(h),
+      payload: { ids: [id], action: 'undeplete' },
+    });
+    expect(latchRow(h, id).at).toBeNull();
+
+    // 人工核查后**仍然**是 0（用户核完发现确实没钱、又录了一个 0）—— 当场重新锁。
+    const res = await h.app.inject({
+      method: 'PUT',
+      url: `/api/keys/${id}/balance`,
+      headers: auth(h),
+      payload: { balance: 0, currency: 'CNY' },
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    expect(latchRow(h, id)).toMatchObject({ reason: 'balance' });
     await closeHarness(h);
   });
 });

@@ -210,6 +210,7 @@ function makeConfig(dbPath: string): AppConfig {
     modelProbeEnabled: true,
     modelProbeMaxModels: 10,
     adminWebDist: null,
+    egressBudgetCapacity: null,
     publicHost: null,
   };
 }

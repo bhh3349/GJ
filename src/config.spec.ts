@@ -196,6 +196,34 @@ describe('其余项仍然 fail-fast', () => {
     );
   });
 
+  /**
+   * EGRESS_BUDGET_CAPACITY（ADR-0021 v11 决策 11 / 契约 §16.7.3）：出口预算上限。
+   * **空 / 未设 = null = 不限**（缺省，业主 2026-10-19 裁定 —— 写死的 5 枚/60s 是故障源）。
+   * 正整数 = 封顶。**0 / 小数 / 非十进制 → 拒绝启动**：0 会让每个出口恒拒，
+   * 那是"整台网关静默不可用"，比一句启动报错严重一个量级。
+   */
+  it('EGRESS_BUDGET_CAPACITY：空 / 空白是 null（不限，缺省）', () => {
+    assert.equal(loadConfig(env()).egressBudgetCapacity, null);
+    assert.equal(loadConfig(env({ EGRESS_BUDGET_CAPACITY: '' })).egressBudgetCapacity, null);
+    assert.equal(loadConfig(env({ EGRESS_BUDGET_CAPACITY: '   ' })).egressBudgetCapacity, null);
+  });
+
+  it('EGRESS_BUDGET_CAPACITY：正整数封顶（两侧空白仍去）', () => {
+    assert.equal(loadConfig(env({ EGRESS_BUDGET_CAPACITY: '20' })).egressBudgetCapacity, 20);
+    assert.equal(loadConfig(env({ EGRESS_BUDGET_CAPACITY: ' 30 ' })).egressBudgetCapacity, 30);
+    assert.equal(loadConfig(env({ EGRESS_BUDGET_CAPACITY: '1' })).egressBudgetCapacity, 1, '1 是合法下限');
+  });
+
+  it('EGRESS_BUDGET_CAPACITY：0 / 负数 / 小数 / 非十进制一律拒绝启动', () => {
+    for (const bad of ['0', '-1', '1.5', 'abc', '0x10', '1e3', 'Infinity', '  ']) {
+      if (bad.trim() === '') {
+        assert.equal(loadConfig(env({ EGRESS_BUDGET_CAPACITY: bad })).egressBudgetCapacity, null, `${JSON.stringify(bad)} = 未配置`);
+        continue;
+      }
+      assert.throws(() => loadConfig(env({ EGRESS_BUDGET_CAPACITY: bad })), /EGRESS_BUDGET_CAPACITY/, `应当拒绝 ${bad}`);
+    }
+  });
+
   it('十进制整数照旧生效（收紧不误伤正常写法，两侧空白仍去）', () => {
     assert.equal(loadConfig(env({ PORT_GATEWAY: '8080' })).portGateway, 8080);
     assert.equal(loadConfig(env({ PORT_ADMIN: ' 4002 ' })).portAdmin, 4002);

@@ -18,6 +18,7 @@ import {
   setKeyBalance,
   updateKey,
 } from '../../db/repo/keys.js';
+import { clearKeyDepletedAndEnable } from '../../db/repo/depletion-latch.js';
 import { ApiError } from '../errors.js';
 import { auditWrite } from '../http.js';
 import { idParam, includeDeletedProp, nullableInteger, nullableString, pageProps, revisionProp } from '../schemas.js';
@@ -34,6 +35,8 @@ interface ListKeysQuery {
   category?: KeyCategory;
   enabled?: boolean;
   health?: KeyHealth;
+  /** §20.8：透支锁存筛选（第四轴，可与 enabled / health 并用） */
+  depleted?: boolean;
   q?: string;
   includeDeleted: boolean;
 }
@@ -74,7 +77,14 @@ interface BalanceBody {
 
 interface BatchBody {
   ids: string[];
-  action: 'enable' | 'disable';
+  /**
+   * `'undeplete'`（§20.5 / ADR-0041）= 清锁存 + `enabled = 1`，一个动作。
+   *
+   * **`'enable'` 不清锁**（有意，不是遗漏）：批量启用是"把停用的都打开"，
+   * 如果它顺手清锁，一次批量启用就能把整池透支 key 放回去 —— 业主说的
+   * "不会再回到正常的池"当场作废。两条路分得很清。
+   */
+  action: 'enable' | 'disable' | 'undeplete';
 }
 
 interface BatchRefreshBody {
@@ -106,6 +116,7 @@ export function registerKeyRoutes(app: FastifyInstance, ctx: ApiContext): void {
             category: { type: 'string', enum: ['balance', 'token-plan'] },
             enabled: { type: 'boolean' },
             health: { type: 'string', enum: ['healthy', 'cooling', 'disabled'] },
+            depleted: { type: 'boolean' },
             q: { type: 'string', maxLength: 200 },
             includeDeleted: includeDeletedProp,
           },
@@ -118,6 +129,7 @@ export function registerKeyRoutes(app: FastifyInstance, ctx: ApiContext): void {
         category: req.query.category,
         enabled: req.query.enabled,
         health: req.query.health,
+        depleted: req.query.depleted,
         q: req.query.q,
         includeDeleted: req.query.includeDeleted,
         page: req.query.page,
@@ -331,14 +343,20 @@ export function registerKeyRoutes(app: FastifyInstance, ctx: ApiContext): void {
           required: ['ids', 'action'],
           properties: {
             ids: { type: 'array', items: { type: 'string', minLength: 1 }, maxItems: 500 },
-            action: { type: 'string', enum: ['enable', 'disable'] },
+            action: { type: 'string', enum: ['enable', 'disable', 'undeplete'] },
           },
         },
       },
     },
     (req) => {
       const { ids, action } = req.body;
-      const updated = batchSetEnabled(db, ids, action === 'enable');
+      // 'undeplete' 走另一个仓储函数（清锁 + enabled=1），**不复用** batchSetEnabled：
+      // 那两个动作的差别正是本条存在的理由，把它做成 batchSetEnabled 的一个开关
+      // 等于亲手把"enable 不清锁"这条纪律埋掉。
+      const updated =
+        action === 'undeplete'
+          ? clearKeyDepletedAndEnable(db, ids)
+          : batchSetEnabled(db, ids, action === 'enable');
       auditWrite(db, req, config, {
         action: `key.batch_${action}`,
         targetType: 'key',

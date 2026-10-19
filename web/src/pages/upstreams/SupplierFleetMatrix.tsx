@@ -18,6 +18,9 @@
  * - **没取全时写明覆盖范围**：池子比一页上限大时点数只覆盖取回的部分，必须说，否则是个假数。
  * - **排序稳定可复现**：按严重度成序（连接问题在前、正常在后），同档内按掩码定序 ——
  *   刷新不会让点乱跳，问题那一片永远在最左边，颜色一致时还能靠位置认出同一个号。
+ * - **透支不改点的颜色，另加一圈橙环**（§20.1 第四轴）：点的颜色是 `accountHealthOf` 那一档，
+ *   而透支是库里粘住的资金事实 —— 一个刚充完钱、余额已回到阈值之上但锁还没解的号，
+ *   颜色可以仍是绿的，橙环才说明它名下的 key 还在池外。两者合并就会把这个状态藏掉。
  */
 import { Tooltip, Typography } from 'antd';
 
@@ -68,13 +71,25 @@ function Dot({
           <Text style={{ fontFamily: tokens.font.mono, fontSize: 11 }}>{account.identifier}</Text>
           <Text style={{ fontSize: 11, color: tint.color }}>{health.label}</Text>
           <Text style={{ fontSize: 11 }}>{balanceLine}</Text>
+          {/*
+           * 透支是**第四轴**（§20.1），所以它是额外一行、不改点的颜色 ——
+           * 点的颜色是 `accountHealthOf` 那一档（能登录 / 有没有钱），透支是库里那条粘住的锁。
+           * 用一个橙色环标出来：一个已经锁着、名下 key 全在池外的号，颜色可能仍是绿的。
+           */}
+          {account.depleted ? (
+            <Text style={{ fontSize: 11, color: tokens.color.orange }}>
+              {account.depletedReason === 'account'
+                ? '透支锁存：账号欠费，名下 key 一并锁在池外'
+                : '透支锁存：余额 / 套餐余量低于阈值，已排除出选路'}
+            </Text>
+          ) : null}
           <Text style={{ fontSize: 11, opacity: 0.75 }}>{health.hint}</Text>
         </div>
       }
     >
       <button
         type="button"
-        aria-label={`账号 ${account.identifier} · ${health.label}`}
+        aria-label={`账号 ${account.identifier} · ${health.label}${account.depleted ? ' · 透支' : ''}`}
         onClick={() => {
           onSelect(account.id);
         }}
@@ -83,6 +98,8 @@ function Dot({
           height: 11,
           padding: 0,
           border: active ? `2px solid ${tokens.color.primary}` : '2px solid transparent',
+          outline: account.depleted ? `1.5px solid ${tokens.color.orange}` : 'none',
+          outlineOffset: 1,
           borderRadius: '50%',
           background: tint.color,
           boxShadow: active ? `0 0 0 2px ${tokens.color.bgContainer}` : `0 0 0 2px ${tint.background}`,

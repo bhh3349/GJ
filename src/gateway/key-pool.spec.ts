@@ -26,6 +26,9 @@ function balanceKey(keyId: string, over: Partial<KeyConfig> = {}): KeyConfig {
     balanceCents: 1000,
     tokenPlanRemainingTokens: null,
     tokenPlanExpiresAt: null,
+    // 透支锁存（§20.7）：必填字段，构造点逐一点名。测试默认"未锁存"，
+    // 需要锁存态的用例显式传 `{ depleted: true }`。
+    depleted: false,
     ...over,
   };
 }
@@ -366,6 +369,90 @@ describe('并发上限与自动禁用', () => {
     // 加列就是给镜像添一个"永不刷新"的假字段 —— 见 src/wiring/key-runtime-flusher.ts
     // 的 signatureOf：只含会被写进表里的四列，这里守的就是那句话。
     assert.equal(pool.view()[0]?.autoDisabled, true);
+  });
+});
+
+/**
+ * 透支锁存（契约 §20.7 / ADR-0041）：库里的**第四轴**，与另外三轴正交。
+ *
+ * 这一组的存在理由是它的失败形状：把 `depleted` 悄悄忽略掉**不会报错** ——
+ * 池子照常选路、客户端拿 200，只是钱已经付不起了。四个断言各自钉住一个错法：
+ *   1. `depleted` 的 key **不进候选**（这一条就是整个功能）；
+ *   2. 它与 `enabled=1` **不互斥** —— 锁存**不碰** `enabled`（§20.5 决策 6），
+ *      所以"启用的 key 也不入选"必须由 `depleted` 单独判得出来；
+ *   3. 它与 `autoDisabled` **不是一回事**（§20.9）：后者是网关自己的推断、一次成功就清；
+ *      前者是落库的资金事实。成功**不得**撤回锁存 —— 快照不换，它就该一直在池外；
+ *   4. 清锁只是换一份快照（`depleted: false`）—— 也就是"人工重启用"那条路走得通。
+ */
+describe('透支锁存：不进候选，且与 enabled / autoDisabled 互不干扰（§20.7）', () => {
+  it('`depleted: true` 的 key 不入选 —— 余额再高也一样', async () => {
+    clock = 1_700_000_000_000;
+    const pool = createKeyPool({ now });
+    pool.applySnapshot(snapshot([balanceKey('ok'), balanceKey('latched', { depleted: true, balanceCents: 999_999 })]));
+
+    const ids = (await pool.getAvailableKeys('gpt-4o')).map((c) => c.keyId);
+    assert.deepEqual(ids, ['ok'], '锁存与余额高低无关：判据是库里那个标记，不是这一列');
+    // token-plan 类同样：套餐余量还没回填成 0 时，锁存标记就是**唯一**的排除依据。
+    pool.applySnapshot(
+      snapshot([
+        balanceKey('plan-latched', {
+          category: 'token-plan',
+          balanceCents: null,
+          tokenPlanRemainingTokens: 1000,
+          depleted: true,
+        }),
+      ]),
+    );
+    assert.equal((await pool.getAvailableKeys('gpt-4o')).length, 0, '套餐 key 的锁存标记同样生效');
+  });
+
+  it('锁存**不碰** `enabled`：启用的 key 照样不入选，两者不是同一个判据', async () => {
+    clock = 1_700_000_000_000;
+    const pool = createKeyPool({ now });
+    // `status: 'enabled'` + `depleted: true` 是**合法组合**（§20.5 决策 6：锁存绝不改 enabled）。
+    // 若 isUsable 漏判 depleted，这把 key 会被当成一把完全正常的 key 选出去 —— 不报错。
+    pool.applySnapshot(snapshot([balanceKey('enabled-but-broke', { status: 'enabled', depleted: true })]));
+    assert.equal((await pool.getAvailableKeys('gpt-4o')).length, 0, 'enabled=1 不是"可用"的充分条件');
+
+    // 反向：清掉标记（= 人工 `undeplete` 换来的新快照）后同一条记录立刻回池。
+    pool.applySnapshot(snapshot([balanceKey('enabled-but-broke', { status: 'enabled', depleted: false })]));
+    assert.deepEqual(
+      (await pool.getAvailableKeys('gpt-4o')).map((c) => c.keyId),
+      ['enabled-but-broke'],
+      '解除锁存 = 换一份 depleted:false 的快照，key 当场回池（这是"重新启用"那条路）',
+    );
+  });
+
+  it('与 autoDisabled 正交：一次成功撤不回锁存（§20.9）', async () => {
+    clock = 1_700_000_000_000;
+    const pool = createKeyPool({ now });
+    pool.applySnapshot(snapshot([balanceKey('latched', { depleted: true })]));
+
+    // `reportSuccess` 会清 autoDisabled（那是网关自己的推断，被证据推翻就该撤回），
+    // 但它**够不着** depleted —— 后者是库里那一列，只有管理面写得了。
+    pool.reportSuccess('latched', usage(1), 10);
+    assert.equal(
+      (await pool.getAvailableKeys('gpt-4o')).length,
+      0,
+      '一次成功不能把透支的 key 放回选路（能敲通上游 ≠ 付得起账）',
+    );
+
+    // 两者可以同时为真且互不干扰：一把被自动禁用**且**已锁存的 key，
+    // 清掉锁存后仍因 autoDisabled 被排除 —— 两个判据各判各的。
+    pool.applySnapshot(snapshot([balanceKey('both', { depleted: true })]));
+    for (let i = 0; i < 5; i += 1) {
+      pool.reportFailure('both', 'AUTH_INVALID');
+      clock += MAX_COOLDOWN_MS + 1;
+    }
+    assert.equal(pool.view()[0]?.autoDisabled, true);
+    pool.applySnapshot(snapshot([balanceKey('both', { depleted: false })]));
+    assert.equal(
+      (await pool.getAvailableKeys('gpt-4o')).length,
+      0,
+      '清锁存救不了它：autoDisabled 是另一条独立的排除理由，仍要等一次真实成功',
+    );
+    pool.reportSuccess('both', usage(1), 10);
+    assert.equal((await pool.getAvailableKeys('gpt-4o')).length, 1, '成功撤回 autoDisabled 后回池');
   });
 });
 

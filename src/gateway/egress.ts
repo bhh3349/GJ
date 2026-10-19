@@ -23,9 +23,16 @@
  *      出口 = **解除帧永不发出**（前端永远停在「出口限流中」）。同理**预算桶不在这张表里**：
  *      一次人工刷新（几十次拒绝，验证 9）不得让 §7 帧有任何变化 ⇒ 桶另置一表，不是靠过滤。
  *
- * 数值纪律（决策 8）：容量是**每个出口**的数，不是全站的数，构造参数注入；占位值见
- * `EGRESS_BUDGET_PLACEHOLDER`（PM 已裁定写死，标定回来**只改数、不改结构**）。判据的两个数
- * （N=3 / 窗口 60s 滑动）同为**初值**，纪律同上（决策 10(1)）。
+ * 数值纪律（决策 8 + **2026-10-19 业主追加裁定，ADR-0021 v11**）：容量是**每个出口**的数，
+ * 不是全站的数，构造参数注入。**缺省 `capacity: null` = 不限** —— 写死的 `5 枚/60s` 被实测
+ * 证伪（上游从不在这个频率上拒我们，被拒的只有我们自己合成的 429），业主直接下令改不限
+ * （验收记录：连发第 6 枚起整窗拒）。要封顶走 `EGRESS_BUDGET_CAPACITY`（接线层
+ * `egressBudgetOf` 的入参），**不抄数字**。判据的两个数（N=3 / 窗口 60s 滑动）同为
+ * **初值**，纪律同上（决策 10(1)）。
+ *
+ * **不限 ≠ 不设防**：`capacity: null` 只关掉**我们自己算的桶**；上游真 429 的
+ * 归因冷却（`observeLimited` → `reserve` 第一道检查）一个字没动 —— 保护出口的依据
+ * 从「我们猜的频率」换回「对面真的在限的证据」。
  *
  * 本文件不认识 key 明文（只认识 id）：`subject.keyId` 落在足迹位，与判据无关（决策 10(2)）。
  */
@@ -59,7 +66,15 @@ const DEFAULT_DISTINCT_ACCOUNTS = 3;
 const LIMITED_TYPE = 'RATE_LIMITED';
 
 /**
- * 预算占位值（决策 8；PM 2026-10-07 裁定照此写死）。
+ * 预算缺省值（决策 8；**2026-10-19 业主裁定改为不限，ADR-0021 v11**）。
+ *
+ * 此前这里是 `EGRESS_BUDGET_PLACEHOLDER = { capacity: 5, windowMs: 60_000, reserveForData: 1 }`
+ * （PM 2026-10-07 裁定照此写死）。**实测把它证伪了**：连发第 6 枚起整窗被拒
+ * （`429 upstream egress rate limited, retry after ~52s`），而同一时段上游从未拒过我们 ——
+ * 被拒的 100% 是**我们自己**合成的 429。写死的请求数把网关自己的出口闸变成了故障源，
+ * 业主令：**改成无限制**。占位值仍是「我们没有标定数据」这一事实的表达，只是这件事的
+ * 正确缺省不是"猜一个 5"，而是"别拿猜出来的数去拒真实流量"（决策 8 的自适应兜底：
+ * 真被限了有上游证据 → 归因冷却，那条路一直在）。
  *
  * `reserveForData` 与 `capacity` **写在同一个构造参数里**是 PM 的明确要求 —— 两处分头定义
  * 就是「保留额」与「容量」各说各话的起点。接线层（`src/server.ts`）引用这一份、**不得再抄一遍数字**；
@@ -68,16 +83,28 @@ const LIMITED_TYPE = 'RATE_LIMITED';
  * 口径复述（免得被读成两个独立的数）：管理面可用 = `capacity - reserveForData`、
  * 数据面可用 = `capacity`，**两者之和不超过 `capacity`**（同一张账，不是两张）。
  * 没有保留额，一次人工全量刷新（26 key × 2 = 52 枚）可以**合规地**吃干整段预算、饿死客户端流量。
+ *
+ * **改名记录**：原名 `EGRESS_BUDGET_PLACEHOLDER`（占位值）。改成"不限的缺省"之后
+ * "占位"这个词已经说反了（它描述的是一个**结论**，不是一个待回填的猜测），随 ADR-0021 v11 一并改名。
  */
-export const EGRESS_BUDGET_PLACEHOLDER: EgressBudget = { capacity: 5, windowMs: 60_000, reserveForData: 1 };
+export const EGRESS_BUDGET_DEFAULT: EgressBudget = { capacity: null, windowMs: 60_000, reserveForData: 1 };
 
 /** 出口预算（决策 8）。**单出口口径** —— 多出口部署时这几个数须**逐出口**回填，不得加总 */
 export interface EgressBudget {
-  /** 每个出口、每个窗口可发出的请求数 */
-  capacity: number;
-  /** 预算窗口（**滑动**：连续取 `capacity` 枚后第 `capacity+1` 次即被拒，直到最早那枚滑出） */
+  /**
+   * 每个出口、每个窗口可发出的请求数。**`null` = 不限**（缺省）。
+   *
+   * 不限时桶会计**整体不参与**：`reserve` 只读冷却态（`observeLimited` 写的），
+   * 于是出口保护只剩"上游真的限了我们"这一条证据 —— 这正是决策 8「自适应兜底」的原话，
+   * 且是**唯一**一条不需要我们猜上游频率的证据。
+   */
+  capacity: number | null;
+  /** 预算窗口（**滑动**：连续取 `capacity` 枚后第 `capacity+1` 次即被拒，直到最早那枚滑出）。`capacity: null` 时被忽略 */
   windowMs: number;
-  /** 数据面保留额：该出口**剩余 ≤ reserveForData** 时 `'management'` 必须被拒（决策 8） */
+  /**
+   * 数据面保留额：该出口**剩余 ≤ reserveForData** 时 `'management'` 必须被拒（决策 8）。
+   * `capacity: null` 时无意义（没有可耗尽的额度 ⇒ 管理面永远不会被这道闸拒）。
+   */
   reserveForData: number;
 }
 
@@ -97,7 +124,10 @@ export interface EgressGateOptions {
   maxCooldownMs?: number;
   /** 升档阶梯，缺省用冻结常量；语义同 `PoolOptions.cooldownLadderMs` */
   ladderMs?: readonly number[];
-  /** 出口预算；缺省即 `EGRESS_BUDGET_PLACEHOLDER`（**接线层可显式覆写 = 标定回填的落点**） */
+  /**
+   * 出口预算；缺省即 `EGRESS_BUDGET_DEFAULT`（**不限**）。
+   * 接线层可显式覆写 = 标定/回填的落点（`EGRESS_BUDGET_CAPACITY` 走这里）。
+   */
   budget?: EgressBudget;
   /** 归因窗口（决策 10(1) 初值 60s 滑动） */
   attributionWindowMs?: number;
@@ -150,14 +180,22 @@ interface AttributionState {
  * ------------------------------------------------------------------ */
 
 function assertBudget(budget: EgressBudget): void {
-  if (!Number.isInteger(budget.capacity) || budget.capacity < 1) {
-    throw new Error(`egress budget.capacity must be a positive integer, got ${budget.capacity}`);
+  // `null` = 不限（缺省）；给了数就必须是正整数 —— 半吊子值（0 / 小数 / Infinity）当场拒，
+  // 不静默按 0 跑（0 会让整条出口恒拒，症状是"网关全挂"，比启动失败难查一个量级）
+  if (budget.capacity !== null && (!Number.isInteger(budget.capacity) || budget.capacity < 1)) {
+    throw new Error(`egress budget.capacity must be null (unlimited) or a positive integer, got ${budget.capacity}`);
   }
   if (!Number.isFinite(budget.windowMs) || budget.windowMs <= 0) {
     throw new Error(`egress budget.windowMs must be > 0, got ${budget.windowMs}`);
   }
-  // 保留额与容量是**同一张账**：reserveForData > capacity 意味着数据面自己都不够、管理面口径无意义
-  if (!Number.isInteger(budget.reserveForData) || budget.reserveForData < 0 || budget.reserveForData > budget.capacity) {
+  // 保留额与容量是**同一张账**：reserveForData > capacity 意味着数据面自己都不够、管理面口径无意义。
+  // capacity: null 时保留额没有可对照的容量 —— 它没有消费者（reserve 里整个桶分支都不走），
+  // 只要求非负整数保持形状。
+  if (
+    !Number.isInteger(budget.reserveForData) ||
+    budget.reserveForData < 0 ||
+    (budget.capacity !== null && budget.reserveForData > budget.capacity)
+  ) {
     throw new Error(
       `egress budget.reserveForData must be an integer in [0, capacity], got ${budget.reserveForData}`,
     );
@@ -171,7 +209,7 @@ function assertBudget(budget: EgressBudget): void {
 export function createEgressGate(options: EgressGateOptions = {}): EgressGate {
   const now = options.now ?? Date.now;
   const maxCooldownMs = options.maxCooldownMs ?? MAX_COOLDOWN_MS;
-  const budget = options.budget ?? EGRESS_BUDGET_PLACEHOLDER;
+  const budget = options.budget ?? EGRESS_BUDGET_DEFAULT;
   const attributionWindowMs = options.attributionWindowMs ?? DEFAULT_ATTRIBUTION_WINDOW_MS;
   const distinctAccounts = options.distinctAccounts ?? DEFAULT_DISTINCT_ACCOUNTS;
   const mode = options.mode ?? 'shadow';
@@ -233,6 +271,11 @@ export function createEgressGate(options: EgressGateOptions = {}): EgressGate {
      * `consumer` 只影响**上限**：`'management'` 的可用量是 `capacity − reserveForData`。
      * 这是**保留额**（决策 8）：池子大、一次人工刷新合规地吃干预算也能饿死数据面的反面。
      *
+     * **`capacity: null`（缺省）= 整个桶分支不走**：只做第一道的冷却检查，然后放行。
+     * **不记桶**（不往 `buckets` 里 push）—— 不限时的桶是纯摆设，记了只会白耗内存、
+     * 让"哪个出口用了多少"伪装成一种仍生效的限额。冷却闸不受影响：它写的是
+     * 「上游真的限了我们」的证据，与我们自己算的账无关。
+     *
      * **同步、无 `await`、无 Promise**（验证 13）：端口签名刻意同步，把异步挡在实现侧。
      */
     reserve(egressId: string, consumer: EgressConsumer): EgressReservation {
@@ -242,6 +285,8 @@ export function createEgressGate(options: EgressGateOptions = {}): EgressGate {
       if (cooling !== undefined && cooling.until > t) {
         return { allowed: false, reason: 'cooldown', retryAfterMs: cooling.until - t };
       }
+
+      if (budget.capacity === null) return { allowed: true };
 
       const limit = consumer === 'management' ? budget.capacity - budget.reserveForData : budget.capacity;
       const took = buckets.get(egressId) ?? [];

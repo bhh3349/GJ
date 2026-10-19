@@ -134,6 +134,7 @@ function keyConfig(keyId: string, upstreamId: string, over: Partial<KeyConfig> =
     balanceCents: 10_000,
     tokenPlanRemainingTokens: null,
     tokenPlanExpiresAt: null,
+    depleted: false,
     ...over,
   };
 }

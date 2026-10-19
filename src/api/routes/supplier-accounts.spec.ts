@@ -96,6 +96,7 @@ function makeConfig(dbPath: string, over: Partial<AppConfig> = {}): AppConfig {
     modelProbeMaxModels: 10,
     // 托管默认关（契约 §17）：本套用例不挂前端，`GET /` 维持既有 JSON 404
     adminWebDist: null,
+    egressBudgetCapacity: null,
     publicHost: null,
     ...over,
   };
@@ -272,6 +273,140 @@ describe('列表（§15.2）', () => {
     expect((await getList(h, `?upstreamId=${upA}`)).body.total).toBe(1);
     expect((await getList(h, `?upstreamId=${upB}`)).body.total).toBe(1);
     expect((await getList(h, '?upstreamId=up_nope')).body.total).toBe(0);
+  });
+
+  // §20.8：`depleted` 是这一面上的**第四轴**筛选。失败形状是静默的 ——
+  // 参数被忽略时回的是全量列表，前端"只看欠费账号"那一页会安静地显示所有人。
+  it('`depleted` 筛选：缺省两个都回，`true` 只回欠费，`false` 只回正常', async () => {
+    const h = await setup();
+    const up = createUpstream(h.db, { name: 'up-a', baseUrl: 'https://a.example.com' }).id;
+    const broke = seedAccount(h.db, up, { identifier: 'broke' });
+    seedAccount(h.db, up, { identifier: 'healthy' });
+    h.db
+      .prepare("UPDATE supplier_accounts SET depleted_at = ?, depleted_reason = 'balance' WHERE id = ?")
+      .run('2026-10-19T00:00:00.000Z', broke);
+
+    expect((await getList(h)).body.total).toBe(2); // 缺省 = 不过滤（不是"只回未锁存的"）
+    const only = await getList(h, '?depleted=true');
+    expect(only.body.total).toBe(1);
+    expect(only.body.items[0]?.id).toBe(broke);
+    expect(only.body.items[0]).toMatchObject({ depleted: true, depletedReason: 'balance' });
+    expect(only.body.items[0]?.depletedAt).toBe('2026-10-19T00:00:00.000Z');
+    const notDepleted = await getList(h, '?depleted=false');
+    expect(notDepleted.body.total).toBe(1);
+    expect(notDepleted.body.items[0]?.depleted).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 解除透支锁存（契约 §20.5 / ADR-0041）
+// ---------------------------------------------------------------------------
+
+/** 该 key 收到的 `'key'` **更新**广播条数（`createKey` 那条 `insert` 不算）。 */
+const keyUpdates = (h: Harness, id: string): number =>
+  countOf(h, "SELECT COUNT(*) AS n FROM change_log WHERE entity = 'key' AND entity_id = ? AND op = 'update'", id);
+
+const keyRow = (h: Harness, id: string): { at: string | null; reason: string | null; enabled: number } =>
+  h.db
+    .prepare('SELECT depleted_at AS at, depleted_reason AS reason, enabled AS enabled FROM upstream_keys WHERE id = ?')
+    .get(id) as { at: string | null; reason: string | null; enabled: number };
+
+const undeplete = async (
+  h: Harness,
+  id: string,
+  headers: Record<string, string> = {},
+): Promise<{ status: number; body: Record<string, unknown> }> => {
+  const res = await h.app.inject({
+    method: 'POST',
+    url: `/api/supplier-accounts/${id}/undeplete`,
+    headers: { cookie: h.cookie, 'x-requested-with': 'fetch', ...headers },
+  });
+  return { status: res.statusCode, body: res.body === '' ? {} : (res.json() as Record<string, unknown>) };
+};
+
+describe('POST /:id/undeplete（§20.5：解除账号锁 + 只清 `reason=account` 的 key）', () => {
+  it('清账号锁与名下 `account` 类 key 锁，`enabled=1`、逐把广播，回 200 账号形状 + 审计计数', async () => {
+    const h = await setup();
+    const up = createUpstream(h.db, { name: 'up-a', baseUrl: 'https://a.example.com' });
+    const acc = seedAccount(h.db, up.id);
+    const cascaded = seedPooledKey(h.db, up.id, 1280);
+    const ownBroke = seedPooledKey(h.db, up.id, 0);
+    bindKey(h.db, acc, cascaded);
+    bindKey(h.db, acc, ownBroke);
+    const orphan = seedPooledKey(h.db, up.id, 0); // 池内，但不属于这个账号
+    // 顺序是判据的一部分：`ownBroke` **先**因自己余额不足锁上（`'balance'`），
+    // 账号级联再跑 —— 级联的 SELECT/UPDATE 都带 `depleted_at IS NULL`，跳过它。
+    // （两把都 `enabled=0`：解除承诺的是"清锁 + 启用"，只清锁那一半的写法在这里会露馅。）
+    h.db
+      .prepare("UPDATE upstream_keys SET depleted_at = ?, depleted_reason = 'balance', enabled = 0 WHERE id = ?")
+      .run('2026-10-19T00:00:00.000Z', ownBroke);
+    h.db
+      .prepare("UPDATE upstream_keys SET depleted_at = ?, depleted_reason = 'account', enabled = 0 WHERE id = ?")
+      .run('2026-10-19T00:00:00.000Z', cascaded);
+    h.db
+      .prepare('UPDATE supplier_accounts SET depleted_at = ?, depleted_reason = ?, revision = 2 WHERE id = ?')
+      .run('2026-10-19T00:00:00.000Z', 'balance', acc);
+    const orphanBefore = keyUpdates(h, orphan);
+    const ownBrokeBroadcasts = keyUpdates(h, ownBroke);
+
+    const res = await undeplete(h, acc);
+    expect(res.status).toBe(200);
+    // 回的是**同一形状**的账号 DTO（与 `GET /:id` 一致）：前端拿它直接刷新那一行。
+    expect(res.body).toMatchObject({ id: acc, depleted: false, depletedAt: null, depletedReason: null });
+    expect(typeof res.body['revision']).toBe('number');
+
+    const accRow = countOf(h, 'SELECT COUNT(*) AS n FROM supplier_accounts WHERE id = ? AND depleted_at IS NULL', acc);
+    expect(accRow).toBe(1);
+    // 级联那把：清锁 + 启用 + 广播。
+    expect(keyRow(h, cascaded)).toMatchObject({ at: null, reason: null, enabled: 1 });
+    expect(keyUpdates(h, cascaded)).toBe(1);
+    // **关键那一行**：自己没钱的那把没被连带放回池 —— 账号解除够不着 `'balance'`，
+    // 而且它这一行一个字节都没动（不是"碰了又恰好写回同一个值"）。
+    expect(keyRow(h, ownBroke)).toMatchObject({ reason: 'balance' });
+    expect(keyUpdates(h, ownBroke)).toBe(ownBrokeBroadcasts);
+    // 不在这账号名下的 key 更够不着。
+    expect(keyUpdates(h, orphan)).toBe(orphanBefore);
+
+    const audit = h.db
+      .prepare("SELECT target_id, detail FROM audit_log WHERE action = 'supplier.account.undeplete'")
+      .get() as { target_id: string; detail: string } | undefined;
+    expect(audit).toMatchObject({ target_id: acc, detail: 'account=1 keys=1' });
+
+    // 幂等可重放：第二次是"0 清 0"，不是报错、也不是又发一轮广播。
+    const again = await undeplete(h, acc);
+    expect(again.status).toBe(200);
+    expect(keyUpdates(h, cascaded)).toBe(1);
+    const details = h.db
+      // `ORDER BY rowid` 而不是 `ts`：两条审计落在同一毫秒里是常态，
+      // 按时间戳排会变成一个"有时绿有时红"的用例。
+      .prepare("SELECT detail FROM audit_log WHERE action = 'supplier.account.undeplete' ORDER BY rowid")
+      .all() as { detail: string }[];
+    expect(details.map((d) => d.detail)).toEqual(['account=1 keys=1', 'account=0 keys=0']);
+  });
+
+  it('账号不存在 → 404 NOT_FOUND，且**不写审计**（别把不存在写成"解除成功 0 条"）', async () => {
+    const h = await setup();
+    const res = await undeplete(h, 'acc_missing');
+    expect(res.status).toBe(404);
+    expect(res.body).toMatchObject({ code: 'NOT_FOUND', details: { id: 'acc_missing' } });
+    expect(countOf(h, "SELECT COUNT(*) AS n FROM audit_log WHERE action = 'supplier.account.undeplete'")).toBe(0);
+  });
+
+  it('闸门先于 handler：缺 CSRF 头 → 403；带 CSRF 头但无会话 → 401', async () => {
+    const h = await setup();
+    const up = createUpstream(h.db, { name: 'up-a', baseUrl: 'https://a.example.com' });
+    const acc = seedAccount(h.db, up.id);
+
+    const noCsrf = await h.app.inject({ method: 'POST', url: `/api/supplier-accounts/${acc}/undeplete` });
+    expect(noCsrf.statusCode).toBe(403);
+    const noSession = await h.app.inject({
+      method: 'POST',
+      url: `/api/supplier-accounts/${acc}/undeplete`,
+      headers: { 'x-requested-with': 'fetch' },
+    });
+    expect(noSession.statusCode).toBe(401);
+    // 两次都被闸门拦下 ⇒ 库里那一行纹丝不动。
+    expect(countOf(h, 'SELECT COUNT(*) AS n FROM supplier_accounts WHERE id = ? AND depleted_at IS NOT NULL', acc)).toBe(0);
   });
 });
 

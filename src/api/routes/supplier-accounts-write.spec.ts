@@ -200,6 +200,7 @@ function makeConfig(dbPath: string, over: Partial<AppConfig> = {}): AppConfig {
     modelProbeMaxModels: 10,
     // 托管默认关（契约 §17）：本套用例不挂前端，`GET /` 维持既有 JSON 404
     adminWebDist: null,
+    egressBudgetCapacity: null,
     publicHost: null,
     ...over,
   };
@@ -582,6 +583,162 @@ describe('POST /refresh', () => {
     expect(res.body['code']).toBe('INVALID_PARAM');
     expect((res.body['details'] as { field?: string }).field).toBe('ids');
     expect(h.upstream.calls).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// refresh 的判定腿 5：账号透支锁存 + 级联（契约 §20.4 / §20.6 / ADR-0041）
+// ---------------------------------------------------------------------------
+
+/**
+ * 这一组的失败形状是**静默的**：退款余额写进库、账号那一列也是对的，
+ * 只是没人去打标 —— 于是账号名下整批 key 照旧在候选里，客户端打出去拿 402。
+ * 没有报错、没有告警，唯一能发现的方式就是这组用例里这种"刷新完直接读库"。
+ *
+ * 刷新是这条腿**唯一**的触发入口（余额只有它写），所以判据钉在这里而不是在纯函数层
+ * （纯函数在 `src/db/depletion.spec.ts`，落库在 `depletion-latch.spec.ts`）。
+ */
+describe('POST /refresh 的账号透支锁存与级联（§20.4 / §20.6）', () => {
+  /** 账号行 + 池内 key 的锁存三列：读面 DTO 会拦一道，库里那一列才是真实落库结果。 */
+  const accountLatch = (h: Harness, id: string): { at: string | null; reason: string | null } =>
+    h.db
+      .prepare('SELECT depleted_at AS at, depleted_reason AS reason FROM supplier_accounts WHERE id = ?')
+      .get(id) as { at: string | null; reason: string | null };
+
+  const keyLatch = (h: Harness, id: string): { at: string | null; reason: string | null; enabled: number } =>
+    h.db
+      .prepare('SELECT depleted_at AS at, depleted_reason AS reason, enabled AS enabled FROM upstream_keys WHERE id = ?')
+      .get(id) as { at: string | null; reason: string | null; enabled: number };
+
+  /**
+   * 池内 key 收到的 `'key'` **更新**广播条数。
+   *
+   * 滤 `op = 'update'`：`createKey` 那条 `insert` 也挂在同一个 id 上。而且**只用增量** ——
+   * `linkSupplierAccountKey`（本文件的夹具）自己也要发一条，断言绝对值只会把夹具的账算进来。
+   */
+  const keyBroadcasts = (h: Harness, id: string): number =>
+    (
+      h.db
+        .prepare("SELECT COUNT(*) AS n FROM change_log WHERE entity = 'key' AND entity_id = ? AND op = 'update'")
+        .get(id) as { n: number }
+    ).n;
+
+  /** 种一把入池并挂到账号名下的 key。`category` / `unlimited` 逐条点名，余额默认健康。 */
+  function seedBoundKey(
+    h: Harness,
+    upstreamId: string,
+    accountId: string,
+    over: { category?: 'balance' | 'token-plan'; unlimited?: boolean; balance?: number } = {},
+  ): string {
+    const category = over.category ?? 'balance';
+    const funds =
+      over.unlimited === true
+        ? { unlimited: true }
+        : category === 'token-plan'
+          ? { tokenPlan: { remainingTokens: 5000, expiresAt: null } }
+          : { balance: over.balance ?? 1280 };
+    const dto = createKey(
+      h.db,
+      {
+        upstreamId,
+        // 桩 key 运行时拼：`check:secrets` 会抓硬编码的 `sk-…` 字面量。尾号保证每把都不同。
+        key: 'sk-probe-' + 'Z'.repeat(20) + String(++plaintextSeq).padStart(4, '0'),
+        category,
+        ...funds,
+      },
+      MASTER_KEY,
+    );
+    linkSupplierAccountKey(h.db, accountId, dto.id, dto.maskedKey, '透支级联用');
+    return dto.id;
+  }
+
+  it('账号余额 < 10 分 → 账号打标 `balance`，名下池内 key 全被打 `account` 并各发一条广播', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+
+    const balKey = seedBoundKey(h, id, accountId);
+    const planKey = seedBoundKey(h, id, accountId, { category: 'token-plan' });
+    // 无限额度那把：§20.6 明文要求**也算在内**（账号钱包空了是账号级事实，
+    // 与这把 key 在上游是不是无限额度无关）。业主原话"关联 key 全部"。
+    const unlimitedKey = seedBoundKey(h, id, accountId, { unlimited: true });
+    // 同一上游、同一池，但**没有**台账行（= 不属于这个账号）—— 级联必须够不着它。
+    // 这一格是必需的：少了它，把 `latchAccountCascade` 误写成"锁这个上游的全部 key"
+    // 也照样全绿，而那时的后果是账号欠费把**无关账号**的 key 一并踢出选路。
+    const orphan = seedBoundKey(h, id, accountId, {});
+    h.db.prepare('DELETE FROM supplier_account_keys WHERE pooled_key_id = ?').run(orphan);
+
+    // quota 0 → 0 分 < 10（§15.1 的换算：`quotaToCents(0) === 0`）。
+    h.upstream.on('/api/user/self', () => ok({ quota: 0, id: '42' }));
+    // 基线：入池与挂台账各自发过广播（`createKey` 的 `insert` 已被滤掉，这里是 `link` 那条）。
+    // 断言只用**增量**，否则把夹具的账算到自己头上，且"漏发"会被夹具那条盖住。
+    const base = new Map([balKey, planKey, unlimitedKey, orphan].map((id) => [id, keyBroadcasts(h, id)]));
+
+    const { result } = await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id });
+
+    // 这一行刷新本身是**成功**的：上游答了、余额也落库了。锁存是它的**副产品**，
+    // 不是失败 —— 把两者混在一起，用户会看到"刷新失败"而其实是"钱不够"。
+    expect(result.items[0]).toMatchObject({ action: 'refresh', ok: true });
+    expect(accountRow(h.db, accountId)['balance_cents']).toBe(0);
+
+    expect(accountLatch(h, accountId)).toMatchObject({ reason: 'balance' });
+    for (const [name, keyId] of [['balance', balKey], ['token-plan', planKey], ['unlimited', unlimitedKey]] as const) {
+      expect(keyLatch(h, keyId), name).toMatchObject({ reason: 'account' });
+      // 锁存**绝不碰 `enabled`**（§20.5 决策 6）：库里仍是启用态，排除靠标记。
+      // 这一行同时钉住"级联不是批量 disable 的另一种写法"。
+      expect(keyLatch(h, keyId).enabled, name).toBe(1);
+      // 每把各发一条：网关 ≤1s 重建快照。漏发的表现是"页面红标、网关照选它"。
+      expect(keyBroadcasts(h, keyId) - (base.get(keyId) ?? 0), name).toBe(1);
+    }
+    expect(keyLatch(h, orphan).at).toBeNull();
+    expect(keyBroadcasts(h, orphan) - (base.get(orphan) ?? 0)).toBe(0);
+
+    // 幂等：下一轮刷新同一个欠费账号**零写**（`depleted_at IS NULL` 出现在 SELECT 与 UPDATE 两处）。
+    const before = keyBroadcasts(h, balKey);
+    await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id });
+    expect(keyBroadcasts(h, balKey)).toBe(before);
+    expect(keyLatch(h, balKey).reason).toBe('account');
+  });
+
+  it('`unlimited_quota` 的账号不锁（余额是 `null` —— "未知 ≠ 没钱"，ADR-0003）', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    const pooled = seedBoundKey(h, id, accountId);
+
+    // 上游对无限额度账号回的是 `{unlimited_quota: true, quota: -331119}` —— 那个负数是**占位**。
+    // 把它当余额落库会让这个账号（连带整批 key）以"已欠费"锁存，而这账号明明能一直用。
+    h.upstream.on('/api/user/self', () => ok({ unlimited_quota: true, quota: -331119, id: '42' }));
+    const base = keyBroadcasts(h, pooled);
+
+    const { result } = await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id });
+
+    expect(result.items[0]?.ok).toBe(true);
+    // §15.7：无限额度落 `NULL`（够不着判据的 `balanceCents === null → 不锁` 那条早退）。
+    expect(accountRow(h.db, accountId)['balance_cents']).toBeNull();
+    expect(accountLatch(h, accountId).at).toBeNull();
+    expect(keyLatch(h, pooled).at).toBeNull();
+    expect(keyBroadcasts(h, pooled)).toBe(base);
+  });
+
+  it('套餐腿失败时余额照落后**仍然**判锁存（两个分支都必须调，漏一个要等下一整轮）', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    const pooled = seedBoundKey(h, id, accountId);
+
+    h.upstream.on('/api/user/self', () => ok({ quota: 0, id: '42' }));
+    // 套餐接口抖一下：这一行按**失败**报，但余额已经写进库了（§15.5 的两条腿分开算）。
+    h.upstream.on('/api/subscription/self', () => rejected('套餐接口抖了'));
+
+    const { result } = await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id });
+
+    expect(result.items[0]?.ok).toBe(false);
+    expect(accountRow(h.db, accountId)['balance_cents']).toBe(0);
+    // 关键那一行：欠费事实已经落库，打标就不能再等 —— `ok:false` 那一支里漏调
+    // `latchAccountIfDepleted` 的话，这个账号要带着整批 key 在池里跑到下一轮刷新。
+    expect(accountLatch(h, accountId)).toMatchObject({ reason: 'balance' });
+    expect(keyLatch(h, pooled)).toMatchObject({ reason: 'account' });
   });
 });
 

@@ -101,6 +101,7 @@ import {
   type TaskAccepted,
 } from '@/api/types';
 import { BalanceText } from '@/components/BalanceText';
+import { DepletedTag } from '@/components/DepletedTag';
 import { RemainingBar } from '@/components/RemainingBar';
 import { confirmManualRefresh } from '@/components/ManualRefreshConfirm';
 import { SupplierFleetMatrix } from '@/pages/upstreams/SupplierFleetMatrix';
@@ -535,6 +536,39 @@ export default function SupplierAccountsPage() {
     task.clear();
   };
 
+  /**
+   * 逐行「解除透支」（契约 §20.5 / §20.6）：`POST /api/supplier-accounts/:id/undeplete`。
+   * 同步端点，200 回改完的那一行；**不要求 `revision`** —— 它解除的是系统自动置位的标记，
+   * 不是替换一个编辑值（对照：绑出口那条要 `revision`，因为那是覆盖一次人工编辑）。
+   * 一个动作做三件事：清账号锁 + 清名下 `reason="account"` 的 key 锁（同样 `enabled=1`）+ 广播快照重建。
+   * 确认文案必须预告「下次刷新仍透支会再次锁上」—— 这是契约写明的行为，不预告的话
+   * 它会被读成"我明明解除了怎么又锁上了"的故障报告。
+   */
+  const undepleteRow = (row: SupplierAccount): void => {
+    modal.confirm({
+      title: '解除这个账号的透支锁？',
+      content: (
+        <span>
+          解除后该账号与其名下被级联锁住（原因「账号欠费」）的 key 会<strong>回到选路池</strong>。
+          如果下一次余额刷新显示它仍然透支，会<strong>再次自动锁上</strong> —— 那是预期行为，不是故障。
+        </span>
+      ),
+      okText: '解除并启用',
+      cancelText: '取消',
+      onOk: async () => {
+        try {
+          await supplierAccountsApi.undeplete(row.id);
+          message.success('透支锁已解除；下一次余额刷新若仍透支会再次锁存');
+          accounts.reload();
+          pool.reload();
+        } catch (error) {
+          const { code, message: text } = describeError(error);
+          message.error(`${text} [${code}]`);
+        }
+      },
+    });
+  };
+
   const supplier = upstream.data?.supplier ?? null;
   /**
    * 能力位（§15.14 前端镜像）。`null` = 通用上游 —— 下面那个分支根本走不到，
@@ -600,34 +634,48 @@ export default function SupplierAccountsPage() {
       ),
     },
     {
+      // 契约依据（§20.1 的第四轴）留在注释里 —— 用户可见文案不带开发术语。
       title: (
-        <Tooltip title="这一列按「要不要动手」判，从上往下第一个命中即停：登录失败 / 会话过期 / 未查询过 → 余额未知 → 额度耗尽 → 余额偏低 → 正常。它比左边的「状态」多一层：能登录的号也再分余额够不够。">
+        <Tooltip title="这一列按「要不要动手」判，从上往下第一个命中即停：登录失败 / 会话过期 / 未查询过 → 余额未知 → 额度耗尽 → 余额偏低 → 正常。它比左边的「状态」多一层：能登录的号也再分余额够不够。「透支」是另一根独立的轴：它答的是资金事实、落库粘住，与上面这一档正交 —— 充完钱但还没解除的号会同时显示「正常」与「透支」。">
           <span>健康</span>
         </Tooltip>
       ),
       key: 'health',
-      width: 126,
+      width: 168,
       render: (_: unknown, row) => {
         const health = accountHealthOf(row);
         const tint = healthTint(health.tone);
         return (
-          <Tooltip title={health.hint}>
-            <Space size={tokens.space.xs} align="center">
-              <span
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: '50%',
-                  background: tint.color,
-                  boxShadow: `0 0 0 2px ${tint.background}`,
-                  flexShrink: 0,
-                }}
-              />
-              <Text style={{ fontSize: 12, color: tint.color, whiteSpace: 'nowrap' }}>
-                {health.label}
-              </Text>
-            </Space>
-          </Tooltip>
+          /*
+           * 两个标记**并排**画，不合并（契约 §20.1 的硬约束）：
+           * 「健康」答网关 / 余额此刻的样子，「透支」答库里那条粘住的锁存。
+           * 折进 `accountHealthOf` 会造成互斥的假象 —— 一个刚充完钱、余额已回到阈值之上
+           * 但锁还没解的号，只会画出「正常」，读的人于是以为它已经回池了（它还在池外）。
+           */
+          <Space size={tokens.space.xs} align="center" wrap>
+            <Tooltip title={health.hint}>
+              <Space size={tokens.space.xs} align="center">
+                <span
+                  style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: '50%',
+                    background: tint.color,
+                    boxShadow: `0 0 0 2px ${tint.background}`,
+                    flexShrink: 0,
+                  }}
+                />
+                <Text style={{ fontSize: 12, color: tint.color, whiteSpace: 'nowrap' }}>
+                  {health.label}
+                </Text>
+              </Space>
+            </Tooltip>
+            <DepletedTag
+              depleted={row.depleted}
+              depletedAt={row.depletedAt}
+              depletedReason={row.depletedReason}
+            />
+          </Space>
         );
       },
     },
@@ -814,9 +862,24 @@ export default function SupplierAccountsPage() {
     {
       title: '操作',
       key: 'actions',
-      width: 132,
+      width: 180,
       render: (_: unknown, row) => (
         <Space size={tokens.space.sm}>
+          {/* 只在真锁着的时候画：一个恒在的「解除透支」会变成噪声，也会让人以为它是常规维护动作。 */}
+          {row.depleted ? (
+            <Tooltip title="清账号锁 + 清名下被级联锁住的 key（原因「账号欠费」），并把它们重新启用。余额回升不会自动解锁，只有这个动作能解。">
+              <Button
+                size="small"
+                type="link"
+                style={{ padding: 0, color: tokens.color.orange }}
+                onClick={() => {
+                  undepleteRow(row);
+                }}
+              >
+                解除透支
+              </Button>
+            </Tooltip>
+          ) : null}
           <Button
             size="small"
             type="link"
@@ -1077,7 +1140,7 @@ export default function SupplierAccountsPage() {
                       columns={visibleColumns}
                       dataSource={localRows ?? accounts.data?.items ?? []}
                       loading={accounts.refreshing}
-                      scroll={{ x: 1686 }}
+                      scroll={{ x: 1776 }}
                       rowSelection={{
                         selectedRowKeys: selected,
                         onChange: (keys) => {
@@ -1334,7 +1397,13 @@ export default function SupplierAccountsPage() {
           setDetailId(null);
         }}
         onChanged={() => {
+          /*
+           * 详情浮层的动作都会改到**整池读面**看到的东西（登录状态、透支标记、账号存在与否），
+           * 而点阵 / 需要处理清单 / 资金池卡读的都是 `pool` 那一份快照 —— 只刷列表会让
+           * 「解除透支后点阵上的橙环还在」。`pool` 是只读账本请求、不打上游，多这一发没有代价。
+           */
           accounts.reload();
+          pool.reload();
         }}
         onRotateTask={(taskId) => {
           setBatchTitle('重置套餐 key');

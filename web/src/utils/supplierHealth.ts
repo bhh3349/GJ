@@ -185,6 +185,7 @@ export type PoolFilterKey =
   | 'session-expired'
   | 'never-checked'
   | 'balance-unknown'
+  | 'depleted'
   | 'exhausted'
   | 'low'
   | 'no-session'
@@ -209,6 +210,15 @@ export function matchesPoolFilter(account: SupplierAccount, key: PoolFilterKey):
     }
     case 'balance-unknown':
       return account.status !== 'unknown' && account.balanceCents === null;
+    /**
+     * 透支锁存（§20.6）。注意它**不是**上面 `exhausted` / `low` 两档的重述：
+     * - 这一条是**库里的持久标记**（`depleted`），只有人工解除；
+     * - `exhausted` / `low` 是**此刻按余额现算**的一档，余额回升当场变色。
+     * 一把刚充完钱的账号可以同时是 `depleted=true`（还锁着，名下的 key 仍在池外）
+     * 与「正常」（余额已回到阈值之上）—— 合并成一个判据就会把这个"钱到了但还没解"的状态藏掉。
+     */
+    case 'depleted':
+      return account.depleted;
     case 'expiring':
       return expiringCount(account) > 0;
   }
@@ -220,6 +230,7 @@ const FILTER_ORDER: readonly PoolFilterKey[] = [
   'session-expired',
   'no-session',
   'never-checked',
+  'depleted',
   'exhausted',
   'low',
   'balance-unknown',
@@ -231,6 +242,7 @@ const FILTER_LABEL: Record<PoolFilterKey, string> = {
   'session-expired': '会话过期',
   'no-session': '无会话',
   'never-checked': '未查询过',
+  depleted: '透支锁存',
   exhausted: '额度耗尽',
   low: '余额偏低',
   'balance-unknown': '余额未知',
@@ -242,6 +254,7 @@ const FILTER_TONE: Record<PoolFilterKey, HealthTone> = {
   'session-expired': 'error',
   'no-session': 'muted',
   'never-checked': 'muted',
+  depleted: 'orange',
   exhausted: 'orange',
   low: 'warning',
   'balance-unknown': 'muted',
@@ -253,6 +266,9 @@ const FILTER_HINT: Record<PoolFilterKey, string> = {
   'session-expired': '存档会话过期了。有存档密码的号点「重新登录」就能自动换一本；没有的只能人工重导凭据。',
   'no-session': '没有可用会话。所有要打上游的动作都得先登录一次，慢且多一次锁号风险。',
   'never-checked': '从没成功查过。「未查询过」不是「正常」，两者在数据上是两件事。',
+  // 依据在契约 §20.6 / ADR-0041；文案本身不带术语（见 `src/security/web-layout-parity.spec.ts` 的锁）。
+  depleted:
+    '这个账号的余额低于 ¥0.10，已被锁存 —— 它名下所有已入池的 key 也一并被锁在池外。余额回升**不会**自动解除，要用「解除透支」。',
   exhausted: '上游侧触到额度上限（实测超出只有几毛，是封顶特征不是欠费）。名下的 key 会开始拿不到流量。',
   low: `余额不足 ¥${(LOW_BALANCE_CENTS / 100).toFixed(2)}，还能用一阵，但离停止供应不远了。`,
   'balance-unknown': '能登录，但这次没拿到余额。未知不计入任何合计，也不参与低余额提示。',

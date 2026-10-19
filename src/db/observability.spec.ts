@@ -230,7 +230,9 @@ describe('computeHealthMetrics', () => {
   it('无 key 时 key 总览是零值而不是缺字段', () => {
     const { db } = setup();
     const m = computeHealthMetrics({ db, windowSeconds: 60, windowLabel: '60s', startedAt: new Date(), droppedEvents: 0 });
-    expect(m.keys).toEqual({ total: 0, healthy: 0, cooling: 0, disabled: 0, items: [] });
+    // `depleted`（契约 §20.8）是第四轴的合计：加它是为了健康页能回答
+    // "池里还有几把被锁在池外的 key" —— 少了它，一批永不接流量的 key 在总览上是隐形的。
+    expect(m.keys).toEqual({ total: 0, healthy: 0, cooling: 0, disabled: 0, depleted: 0, items: [] });
     expect(m.db.ok).toBe(true);
   });
 });

@@ -41,6 +41,7 @@ function keyConfig(keyId: string, over: Partial<KeyConfig> = {}): KeyConfig {
     balanceCents: 10_000,
     tokenPlanRemainingTokens: null,
     tokenPlanExpiresAt: null,
+    depleted: false,
     ...over,
   };
 }

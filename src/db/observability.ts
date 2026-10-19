@@ -129,11 +129,16 @@ function walFileSize(db: Db): number | null {
 
 function summarizeKeys(db: Db): HealthKeysDto {
   const items = listKeyHealthDetail(db);
-  const out: HealthKeysDto = { total: items.length, healthy: 0, cooling: 0, disabled: 0, items };
+  const out: HealthKeysDto = { total: items.length, healthy: 0, cooling: 0, disabled: 0, depleted: 0, items };
   for (const item of items) {
     if (item.health === 'healthy') out.healthy += 1;
     else if (item.health === 'cooling') out.cooling += 1;
     else out.disabled += 1;
+    // §12.2 / §20.8：透支是**正交轴**，单独计数、**不参与**上面那三个的划分、不得相加。
+    // 一把 key 可以同时进 healthy 与 depleted（enabled=1、没冷却、只是没钱了）。
+    // 不加这一格，健康页会把一批"永不接流量的 key"报成 healthy —— 那正是 ADR-0041
+    // 要消灭的"每个可见信号都说它好着"的故障形状。
+    if (item.depleted) out.depleted += 1;
   }
   return out;
 }

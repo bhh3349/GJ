@@ -80,6 +80,14 @@ CREATE TABLE IF NOT EXISTS upstream_keys (
   balance_source      TEXT CHECK (balance_source IN ('manual','template')),
   token_plan_remaining INTEGER,
   token_plan_expires_at TEXT,
+  -- 透支锁存（v1.17.0 / 契约 §20 / ADR-0041）。第四根轴，与 enabled（配置意图）/
+  -- key_runtime（网关运行态，ADR-0010）正交：一把 key 可以是 enabled=1 且健康且已锁存。
+  -- depleted_at 非空 = 已锁存；只由判定腿在余额/余量**落库时**置位，**只有人工能清**（§20.5）。
+  -- 可空、无默认：老库补列后 NULL = 未锁存，与加列前逐字相同（零迁移分支）。
+  -- 新库带 CHECK、老库的 ALTER 只加裸 TEXT —— SQLite 的 ADD COLUMN 加约束有限制，
+  -- 这条漂移登记在 ADR-0041 已知边界 6：判据在写路径，不靠 DDL。
+  depleted_at         TEXT,
+  depleted_reason     TEXT CHECK (depleted_reason IS NULL OR depleted_reason IN ('balance','account')),
   today_tokens        INTEGER NOT NULL DEFAULT 0,
   today_day           TEXT,                   -- UTC 自然日，切换日时把 today_tokens 归零
   revision            INTEGER NOT NULL DEFAULT 1,
@@ -361,6 +369,12 @@ CREATE TABLE IF NOT EXISTS supplier_accounts (
   balance_currency   TEXT,
   balance_updated_at TEXT,                          -- 只在**真查到**时写；查失败不动（§14.2 同纪律）
   egress_id          TEXT,                          -- §16.7 Tier 2；NULL = 用宿主出口
+  -- 透支锁存（v1.17.0 / 契约 §20.6 / ADR-0041）。账号余额 < 0.1 元 ⇒ 置位，reason 恒
+  -- 'balance'（账号没有"所属账号欠费"这种级联，它自己就是源头）。与 status **正交**：
+  -- status 说的是会话/登录健康，一个 active 且余额为 0 的账号是**正常态**，不是故障。
+  -- 同 upstream_keys：只由余额刷新落库时置位，只有人工 undeplete 能清（§20.5）。
+  depleted_at        TEXT,
+  depleted_reason    TEXT CHECK (depleted_reason IS NULL OR depleted_reason IN ('balance','account')),
   -- 该账号站点自己的换算比（/api/user/self → data.quota_per_unit）与读到它的时刻。
   -- （本段不写反引号：它在模板字符串里，反引号会当场截断整段 DDL。）
   -- **审计项 D**：createToken 一度写死 DEFAULT_QUOTA_PER_UNIT（500000），而 §15.1
@@ -666,6 +680,34 @@ export function migrate(db: SqliteDatabase): void {
     }
     if (!hasColumn(db, 'admin_users', 'display_name')) {
       db.exec('ALTER TABLE admin_users ADD COLUMN display_name TEXT');
+    }
+  })();
+
+  // v1.17.0 / ADR-0041：透支锁存两列，upstream_keys 与 supplier_accounts 各一组。**纯加列**，SCHEMA_VERSION 不递增。
+  //
+  // 两张表在跑着的库里早就存在 —— 只改上面的 DDL 文本对它们没有任何作用
+  // （`CREATE TABLE IF NOT EXISTS` 撞上已存在的表是空操作），必须真发 ALTER（同前几批的理由）。
+  // 判据仍是 `hasColumn()`：ADD COLUMN 不幂等，重复执行抛 `duplicate column name`，
+  // 而这段跑在每次 openDatabase() 里。
+  //
+  // 可空、无默认：老行 NULL = 未锁存，与加列前**逐字相同** —— 部署后不存在"一夜之间
+  // 全库被锁"的中间态，锁存只在**下一轮余额刷新**读到透支值时逐把发生（那是本版的目的，
+  // 不是回归；ADR-0041 影响面第一行登记的就是这条）。
+  //
+  // 注意 ALTER 加的是**裸 TEXT**，不带 CHECK：SQLite 的 ALTER ADD COLUMN 对带非常量
+  // DEFAULT 的约束有限制，且仓内既有批次同款。约束漂移登记在 ADR-0041 已知边界 6 ——
+  // depleted_reason 只有两个枚举值这一保证由**写路径**（src/db/depletion.ts 的类型）承担，
+  // 不靠 DDL。
+  db.transaction(() => {
+    for (const table of ['upstream_keys', 'supplier_accounts'] as const) {
+      for (const [column, decl] of [
+        ['depleted_at', 'TEXT'],
+        ['depleted_reason', 'TEXT'],
+      ] as const) {
+        if (!hasColumn(db, table, column)) {
+          db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+        }
+      }
     }
   })();
 

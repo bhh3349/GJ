@@ -32,7 +32,7 @@ import { pruneGatewayErrorEvents } from './db/repo/gateway-events.js';
 import { pruneLogs } from './db/repo/logs.js';
 import { pruneTasks } from './db/repo/tasks.js';
 import { listEgressProxies } from './db/repo/egress.js';
-import { EGRESS_BUDGET_PLACEHOLDER, createEgressGate } from './gateway/egress.js';
+import { EGRESS_BUDGET_DEFAULT, createEgressGate } from './gateway/egress.js';
 import { startHeartbeatProducer } from './egress/heartbeat.js';
 import type { EgressShadowRecord } from './egress/port.js';
 import {
@@ -85,8 +85,10 @@ async function main(): Promise<void> {
   // 建两个实例不是性能问题而是正确性问题：上游按**来源 IP** 计数，两侧扣的是同一张配额表，
   // 各持一份 = 各自以为还有额度（`src/egress/port.ts` 文件头那段"两条车道共同的约束"）。
   //
-  // 预算值引用 `EGRESS_BUDGET_PLACEHOLDER` 这**一份**常量，不在这里抄数字：
-  // 标定回填时"只改数、不改结构"（决策 8），抄第二遍就等于标定只改到了一半。
+  // 预算值引用 `EGRESS_BUDGET_DEFAULT` 这**一份**常量（capacity: null = 不限，缺省），不在这里抄数字：
+  // 要封顶走 `EGRESS_BUDGET_CAPACITY` env（config.ts 解析、null = 不限），抄第二遍就等于标定只改到了
+  // 一半。**2026-10-19 业主裁定改不限**：写死的 5 枚/60s 被实测证伪（被拒的全是我们自己合成的 429，
+  // 上游从没拒过），常量随 ADR-0021 v11 由 `EGRESS_BUDGET_PLACEHOLDER` 改名 `EGRESS_BUDGET_DEFAULT`。
   //
   // **mode: 'active'**（⑧ 转正，PM 裁定 1）：判据从此真正启用 —— 上游确认的出口级 429
   // 会真的置起冷却，§7 `egress_cooldown` 帧从此开始发射（v1.4.9「本期不发射」由本笔翻篇）。
@@ -95,7 +97,9 @@ async function main(): Promise<void> {
   // shadow 记录的去处在下面 `logShadow` 那一跳 —— 见那里的注释（为何要晚绑到网关 app 的 logger）。
   let logShadow: (record: EgressShadowRecord) => void = () => {};
   const egress = createEgressGate({
-    budget: EGRESS_BUDGET_PLACEHOLDER,
+    ...(config.egressBudgetCapacity === null
+      ? {}
+      : { budget: { ...EGRESS_BUDGET_DEFAULT, capacity: config.egressBudgetCapacity } }),
     mode: 'active',
     onShadow: (record) => logShadow(record),
   });

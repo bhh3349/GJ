@@ -155,6 +155,24 @@ export interface AppConfig {
    * 会让接入页把用户导向一个不存在的地址）。
    */
   publicHost: string | null;
+  /**
+   * 出口（IP）预算闸的**每出口、每窗口请求上限**（契约 §16.7.3 / ADR-0021 决策 8）。
+   * **`null` = 不限**（缺省，业主 2026-10-19 裁定）。
+   *
+   * 为什么缺省是"不限"而不是一个数：写死的 `5 枚/60s` 被实测证伪 —— 连发第 6 枚起整窗
+   * 被拒（`429 upstream egress rate limited`），而同一时段**上游从未拒过我们**，被拒的
+   * 100% 是网关自己合成的。在"我们并不知道上游的真实地板"这件事上，正确缺省是
+   * "别拿猜出来的数去拒真实流量"，而不是猜一个数。真正的出口保护仍在：上游真限我们时
+   * 的归因冷却（§16.7 判据）一个字没动。
+   *
+   * 为什么仍留这个旋钮：标定出真实地板后要能**只改数**就封顶（决策 8 的回填纪律），
+   * 不必改代码；也给"我就想限流"的部署一条明说出来的路。**不设默认数** ——
+   * 给个默认数等于把上面那段理由推翻。
+   *
+   * 解析：空 / 未设 = `null`；正整数 = 封顶；`0` / 小数 / 非十进制 → **拒绝启动**
+   * （0 会让每个出口恒拒 ⇒ 整台网关不可用，是比启动失败严重得多的静默故障）。
+   */
+  egressBudgetCapacity: number | null;
 }
 
 /**
@@ -333,5 +351,27 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     adminWebDist: (env['ADMIN_WEB_DIST'] ?? '').trim() === '' ? null : (env['ADMIN_WEB_DIST'] ?? '').trim(),
     // 对外 host 覆盖值（契约 §18 / ADR-0028）。空串 = 未配置，与上面几项同款写法。
     publicHost: (env['PUBLIC_HOST'] ?? '').trim() === '' ? null : (env['PUBLIC_HOST'] ?? '').trim(),
+    // 出口预算上限：空 / 未设 = 不限（null）；正整数 = 封顶（决策 8 回填的落点）。
+    // 0 / 小数 / 非十进制 → 拒绝启动：0 会让每个出口恒拒，是比启动失败更难查的静默故障。
+    egressBudgetCapacity: parseEgressBudgetCapacity(env),
   };
+}
+
+/**
+ * 出口预算上限（契约 §16.7.3 / ADR-0021 决策 8）。空 = 不限；
+ * 正整数 = 封顶；`0` / 小数 / 非十进制 → 拒绝启动（0 = 每个出口恒拒，是静默的全局故障）。
+ */
+function parseEgressBudgetCapacity(env: NodeJS.ProcessEnv): number | null {
+  const raw = (env['EGRESS_BUDGET_CAPACITY'] ?? '').trim();
+  if (raw === '') return null;
+  if (!DECIMAL_INT_RE.test(raw)) {
+    throw new Error(
+      `EGRESS_BUDGET_CAPACITY 必须是十进制整数或留空（不限），实际为 ${JSON.stringify(env['EGRESS_BUDGET_CAPACITY'])}`,
+    );
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1) {
+    throw new Error(`EGRESS_BUDGET_CAPACITY 必须 >= 1（留空 = 不限），实际为 ${JSON.stringify(env['EGRESS_BUDGET_CAPACITY'])}`);
+  }
+  return n;
 }

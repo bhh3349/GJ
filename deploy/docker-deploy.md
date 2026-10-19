@@ -62,6 +62,61 @@ curl -sI http://127.0.0.1:4101/ | head -1              # 管理面应 200
 
 管理界面：`http://<host>:4101`，用 `.env` 里的 `ADMIN_USERNAME/ADMIN_PASSWORD` 登录。
 
+## 3b. 迁移旧库进容器（实测踩过的三个坑）
+
+```bash
+# 不停机一致性快照（**不要用 cp** —— 源库有未 checkpoint 的 WAL，cp 拿到的是
+# 撕裂的库；实测源库 -wal 有 4MB）
+node -e "const d=require('better-sqlite3')('data/test-lan.db',{readonly:true});
+         d.prepare(\"VACUUM INTO '/tmp/gateway-migrate.db'\").run(); d.close();"
+
+# 灌进**带 compose 项目名前缀**的卷 —— 见坑 1
+docker run --rm -v sub_sub-gateway-data:/data -v /tmp:/src:ro alpine sh -c \
+  "rm -f /data/gateway.db*; cp /src/gateway-migrate.db /data/gateway.db"
+```
+
+`.env` 的 `MASTER_KEY` **必须是旧库那把**，否则迁过去的凭据全是解不开的废密文
+（换 key = 库内密文作废）。旧实例的 key 存在 `/root/sub-test-lan.env.bak`（600）。
+
+### 坑 1：compose 命名卷带项目名前缀
+
+`docker volume create sub-gateway-data` 建的是**裸名卷**，而 compose 挂载的是
+`<项目名>_<卷名>`（本目录项目名 = `sub` → `sub_sub-gateway-data`）。两者是**不同的卷**。
+症状：手动灌的卷"数据齐全"，但容器启动日志出现「已创建管理组」——因为它挂的是空卷，
+走了首次引导。**核对方法**：
+```bash
+docker inspect <容器> --format '{{range .Mounts}}{{.Name}} -> {{.Destination}}{{"\n"}}{{end}}'
+```
+灌数据请直接灌 inspect 报出来的那个卷名。
+
+### 坑 2：`.env` 的 `PORT_*` 被 env_file 注入容器，改了容器内监听端口
+
+`.env` 把 `PORT_GATEWAY=4100`（宿主端口）也注入了容器，进程于是**在容器内听 4100**，
+而 `ports: "4100:4000"` 往容器 4000 转发 → `ECONNREFUSED`。更阴的是健康检查脚本读
+`process.env.PORT_ADMIN`，恰好探到错端口上的真服务 → **误报 healthy**。已在 compose
+的 `environment` 段把 `PORT_GATEWAY/PORT_ADMIN` 强制覆盖回 4000/4001（宿主机端口只由
+`ports` 左半边决定）。
+
+### 坑 3：宿主机 `daemon.json` 的全局 `dns` 把容器解析全打死
+
+宿主 `/etc/docker/daemon.json` 里有 `"dns": ["127.0.0.1"]`（AdGuard Home 占宿主 :53）。
+这个全局值会被 docker 注入**每个容器**的内置解析器（`resolv.conf` 里的
+`ExtServers: [127.0.0.1]`）—— 而容器里的 127.0.0.1 是**容器自己**，那个地址上没有
+DNS，于是所有外网域名一律 SERVFAIL。症状极具误导性：网关日志里全是
+`last failure NETWORK`、上游"看起来全挂了"，但宿主机 `curl` 一切正常 ——
+因为它不是网络问题，是**只有容器瞎了**。
+
+```bash
+# 核对（两行都要有输出才算通）
+docker exec <容器> getent hosts tierflow.cn
+docker exec <容器> cat /etc/resolv.conf | grep ExtServers
+```
+
+修法在 `docker-compose.yml` 的 gateway 服务级 `dns:`（223.5.5.5 / 119.29.29.29），
+**不动 daemon.json** —— 改全局值会把这台机器上其他没坏过的容器栈一起卷进来，
+爆炸半径不可接受。别把这里的 dns 填成宿主的 172.x.0.1 网关地址：那等于绕回
+AdGuard，回到同一个坑。
+
 ## 4. 数据与备份
 
 - SQLite 在**命名卷** `sub-gateway-data`（不是 bind —— NFS/CIFS 上 fcntl 锁不可靠）。

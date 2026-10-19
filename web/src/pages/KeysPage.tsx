@@ -43,6 +43,7 @@ import {
 import { BalanceHint } from '@/components/BalanceHint';
 import { BalanceText } from '@/components/BalanceText';
 import { balanceReadiness } from '@/utils/balanceReadiness';
+import { DepletedTag } from '@/components/DepletedTag';
 import { HealthTag, failureReasonLabel } from '@/components/HealthTag';
 import { confirmManualRefresh } from '@/components/ManualRefreshConfirm';
 import { PageHeader } from '@/components/PageHeader';
@@ -60,6 +61,8 @@ interface Filters {
   category: KeyCategory | undefined;
   health: KeyHealth | undefined;
   enabled: boolean | undefined;
+  /** §20.8 第四轴筛选，与 `enabled` / `health` 并用（三轴正交，见 `DepletedTag`）。 */
+  depleted: boolean | undefined;
   q: string;
   includeDeleted: boolean;
 }
@@ -69,6 +72,7 @@ const EMPTY_FILTERS: Filters = {
   category: undefined,
   health: undefined,
   enabled: undefined,
+  depleted: undefined,
   q: '',
   includeDeleted: false,
 };
@@ -118,6 +122,7 @@ export default function KeysPage() {
       ...(filters.category ? { category: filters.category } : {}),
       ...(filters.health ? { health: filters.health } : {}),
       ...(filters.enabled === undefined ? {} : { enabled: filters.enabled }),
+      ...(filters.depleted === undefined ? {} : { depleted: filters.depleted }),
       ...(filters.q ? { q: filters.q } : {}),
       ...(filters.includeDeleted ? { includeDeleted: true } : {}),
     }),
@@ -221,6 +226,50 @@ export default function KeysPage() {
     if (result === null) return;
     setSelectedIds([]);
     list.reload();
+  };
+
+  /**
+   * 批量解除透支锁（§20.5）= 清锁 + `enabled=1`，**一个动作**（后端定死，不拆两步）。
+   *
+   * 必须二次确认，且文案里要有一句会让人停一下的话：「若仍透支会再次锁上」。
+   * 这是整页唯一一个"看起来像普通启用、但会改变资金判定状态"的按钮 —— 用户以为
+   * 点完就完事了，而事实是**下一次余额刷新会再判一次**。不说清就会出现
+   * "我明明解了它怎么又红了"的困惑（而那不是 bug，是判据按钱说话）。
+   *
+   * 这里**只选透支的那几把**：批量启用（`action:'enable'`）不清锁是有意的（§20.5），
+   * 用「启用」去解透支 key 不会报错、只是什么都没变 —— 所以那个入口必须是一个独立的、
+   * 名字就叫「解除透支」的按钮。
+   */
+  const undeplete = (): void => {
+    const ids = [...selectedIds];
+    if (ids.length === 0) return;
+    const depletedCount = rows.filter((row) => ids.includes(row.id) && row.depleted).length;
+    modal.confirm({
+      title: `解除 ${ids.length} 个 key 的透支锁？`,
+      content: (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <span>
+            将清除锁存标记并启用这 {ids.length} 个 key（其中 {depletedCount} 个当前处于透支锁存）。
+          </span>
+          <span style={{ color: tokens.color.warning }}>
+            清除后它们会<strong>回到选路池</strong>。如果余额 / 套餐余量仍然是空的，下一次余额刷新会
+            <strong>再次锁上</strong> —— 解除不等于钱到账了。
+          </span>
+        </div>
+      ),
+      okText: '解除并启用',
+      cancelText: '取消',
+      onOk: async () => {
+        const result = await run(
+          'batch:undeplete',
+          () => keysApi.batch({ ids, action: 'undeplete' }),
+          '已解除透支锁并启用',
+        );
+        if (result === null) return;
+        setSelectedIds([]);
+        list.reload();
+      },
+    });
   };
 
   /**
@@ -339,12 +388,24 @@ export default function KeysPage() {
       width: 170,
       render: (_: unknown, row) => (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <HealthTag
-            health={row.health}
-            cooldownUntil={row.cooldownUntil}
-            lastFailureReason={row.lastFailureReason}
-            consecutiveFailures={row.consecutiveFailures}
-          />
+          {/*
+            §20.1 硬约束：`depleted=true` 时**不得只画三灯**。所以这里是**并排两个**标签，
+            不是一个标签的两个取值 —— 一把 `health="healthy"` + `depleted=true` 的 key
+            两个标签同时出现，那正是它真实的样子（没坏，但没钱）。
+          */}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: tokens.space.xs }}>
+            <HealthTag
+              health={row.health}
+              cooldownUntil={row.cooldownUntil}
+              lastFailureReason={row.lastFailureReason}
+              consecutiveFailures={row.consecutiveFailures}
+            />
+            <DepletedTag
+              depleted={row.depleted}
+              depletedAt={row.depletedAt}
+              depletedReason={row.depletedReason}
+            />
+          </div>
           {row.consecutiveFailures > 0 ? (
             <Text type="secondary" style={{ fontSize: 11 }}>
               连续失败 {row.consecutiveFailures} 次 · {failureReasonLabel(row.lastFailureReason)}
@@ -377,7 +438,15 @@ export default function KeysPage() {
       dataIndex: 'enabled',
       width: 80,
       render: (_: unknown, row) => (
-        <Tooltip title={row.deletedAt ? '该 key 已删除，不再参与路由' : '管理端只写启用状态；健康态由网关决定'}>
+        <Tooltip
+          title={
+            row.deletedAt
+              ? '该 key 已删除，不再参与路由'
+              : row.depleted
+                ? '管理端只写启用状态；健康态由网关决定。透支锁不受这里影响 —— 打开它不会让这把 key 回池，要用「解除透支」'
+                : '管理端只写启用状态；健康态由网关决定'
+          }
+        >
           <Switch
             size="small"
             checked={row.enabled}
@@ -567,6 +636,25 @@ export default function KeysPage() {
             setPage(1);
           }}
         />
+        {/* 契约依据写在注释里（§20.1 的第四轴），tooltip 里只留人话：用户可见文案不带开发术语。 */}
+        <Tooltip title="透支锁存是一根与健康态正交的轴 —— 一把「健康」的 key 也可以同时是透支的">
+          <Segmented
+            size="small"
+            value={filters.depleted === undefined ? 'all' : filters.depleted ? 'yes' : 'no'}
+            options={[
+              { label: '全部资金', value: 'all' },
+              { label: '仅透支', value: 'yes' },
+              { label: '非透支', value: 'no' },
+            ]}
+            onChange={(value) => {
+              setFilters((prev) => ({
+                ...prev,
+                depleted: value === 'all' ? undefined : value === 'yes',
+              }));
+              setPage(1);
+            }}
+          />
+        </Tooltip>
         <Tooltip title="默认不显示已软删的 key；打开后可查历史（软删行仍保留，日志外键不断）">
           <Segmented
             size="small"
@@ -608,6 +696,22 @@ export default function KeysPage() {
             >
               批量禁用
             </Button>
+            {/*
+              独立的「解除透支」按钮（§20.5）。**不**并入「批量启用」：后端定死了
+              `enable` 不清锁（一次批量启用就能把整池透支 key 放回去，"不会再回到
+              正常的池"当场作废）—— 界面上如果只有一个按钮，用户拿着「启用」去解
+              透支 key，得到的会是"点了没报错、什么都没变"。
+            */}
+            {rows.some((row) => selectedIds.includes(row.id) && row.depleted) ? (
+              <Button
+                size="small"
+                style={{ color: tokens.color.orange, borderColor: tokens.color.orange }}
+                loading={isPending('batch:undeplete')}
+                onClick={undeplete}
+              >
+                解除透支
+              </Button>
+            ) : null}
             <Button size="small" danger icon={<DeleteOutlined />} onClick={batchRemove}>
               批量删除
             </Button>

@@ -14,6 +14,9 @@ import type { FailureReasonCode, KeyCategory, KeyDto, KeyHealth, Page } from '..
 import { nowIso, utcDay } from '../../util/time.js';
 import { decryptSecret, encryptSecret, maskKey } from '../crypto.js';
 import type { Db } from '../database.js';
+import { isBalanceDepleted, isTokenPlanDepleted } from '../depletion.js';
+import { latchKeyDepleted } from './depletion-latch.js';
+import type { DepletedReason } from '../depletion.js';
 import { newId } from '../ids.js';
 import { parseModelLimits, serializeModelLimits } from '../model-limits.js';
 import { appendChange } from './change-log.js';
@@ -36,6 +39,8 @@ interface KeyRow {
   balance_source: 'manual' | 'template' | null;
   token_plan_remaining: number | null;
   token_plan_expires_at: string | null;
+  depleted_at: string | null;
+  depleted_reason: DepletedReason | null;
   today_tokens: number;
   today_day: string | null;
   revision: number;
@@ -91,6 +96,11 @@ function toDto(row: KeyRow, nowMs: number, nowDay: string): KeyDto {
     tokenPlan: isBalance
       ? null
       : { remainingTokens: row.token_plan_remaining ?? 0, expiresAt: row.token_plan_expires_at },
+    // 透支锁存（§20.8）：非空即锁存。`depletedAt` / `depletedReason` 原样透出 ——
+    // 前者是审计（"最早发现它付不起账的时刻"），后者告诉人"是它自己没钱还是账号欠费级联"。
+    depleted: row.depleted_at !== null,
+    depletedAt: row.depleted_at,
+    depletedReason: row.depleted_reason,
     health: deriveHealth(row, nowMs),
     cooldownUntil: row.rt_cooldown,
     consecutiveFailures: row.rt_fails ?? 0,
@@ -126,6 +136,8 @@ export interface ListKeysQuery {
   category?: KeyCategory | undefined;
   enabled?: boolean | undefined;
   health?: KeyHealth | undefined;
+  /** §20.8：透支锁存筛选，与 `enabled` / `health` 同形（正交轴，可与它们并用） */
+  depleted?: boolean | undefined;
   q?: string | undefined;
   includeDeleted: boolean;
   page: number;
@@ -163,6 +175,10 @@ export function listKeys(db: Db, query: ListKeysQuery): Page<KeyDto> {
       where.push('k.enabled = 1 AND (r.cooldown_until IS NULL OR r.cooldown_until <= ?)');
       params.push(nowIsoStr);
     }
+  }
+  if (query.depleted !== undefined) {
+    // §20.8：判据只有一处（`depleted_at IS NULL`），与 toDto 的 `depleted` 同源。
+    where.push(query.depleted ? 'k.depleted_at IS NOT NULL' : 'k.depleted_at IS NULL');
   }
   if (query.q !== undefined && query.q !== '') {
     where.push('(k.label LIKE ? OR k.masked_key LIKE ?)');
@@ -227,6 +243,7 @@ export function listKeyHealthDetail(db: Db): {
   health: KeyHealth;
   cooldownUntil: string | null;
   consecutiveFailures: number;
+  depleted: boolean;
 }[] {
   const rows = db
     .prepare(`${SELECT_BASE} WHERE k.deleted_at IS NULL ORDER BY k.created_at, k.id`)
@@ -239,6 +256,8 @@ export function listKeyHealthDetail(db: Db): {
     health: deriveHealth(r, ctx.nowMs),
     cooldownUntil: r.rt_cooldown,
     consecutiveFailures: r.rt_fails ?? 0,
+    // §20.8：与 `health` 正交的一格。`deriveHealth` 一行不动 —— 透支不是第四个 health 值。
+    depleted: r.depleted_at !== null,
   }));
 }
 
@@ -351,6 +370,12 @@ export function createKey(db: Db, input: CreateKeyInput, masterKey: Buffer): Key
   }
 
   appendChange(db, 'key', id, 'insert', 1);
+  // 建 key 也判（§20.4 判定腿）：生而为 0 的 key 生而该锁，不等下一轮余额刷新。
+  // `unlimited` 在 INSERT 处已把 `balance_cents` 强制为 NULL，结构上够不着这条判据；
+  // 这里显式走同一个合并调用点，而不是靠那条不变量兜底（同 `depletion.ts` 头注的理由）。
+  const written = getKeyRow(db, id);
+  if (!written) throw new ApiError('INTERNAL', '创建后读取失败');
+  latchIfBalanceDepleted(db, written);
   const created = getKey(db, id, false);
   if (!created) throw new ApiError('INTERNAL', '创建后读取失败');
   return created;
@@ -423,8 +448,24 @@ export function updateKey(db: Db, id: string, patch: UpdateKeyInput): KeyDto {
   const updated = getKeyRow(db, id);
   if (!updated) throw ApiError.notFound('Key', id);
   appendChange(db, 'key', id, 'update', updated.revision);
+
+  // 手动改套餐余量也判（§20.4 判定腿的 `tokenPlan` 写分支）：编辑弹窗把一个套餐 key 的
+  // 余量改成 0，与手动把一个余额 key 录成 0 是同一个动作的两张脸 —— 缺这一句，
+  // "所有落库处都判"（ADR-0041 决策 4）就是一句没兑现的话。
+  // **只在这条分支写过的列上判**：改 label/weight/enabled 不重开资金判据，否则
+  // 一次改名就能把一把「解除后余额仍是 0」的 key 重新锁上，而那不是这次 PATCH 做的事。
+  let after = updated;
+  if (patch.tokenPlan !== undefined) {
+    latchIfBalanceDepleted(db, updated);
+    // 判完再读：锁存自己会 `revision + 1`，拿打标前的行建 DTO 会让这次响应少报一格
+    // revision（调用方下一次 PATCH 当场 REVISION_MISMATCH）、并对着刚被锁的 key
+    // 说"未透支"（同 `setKeyBalance` 的那条纪律）。
+    const reread = getKeyRow(db, id);
+    if (!reread) throw ApiError.notFound('Key', id);
+    after = reread;
+  }
   const ctx = nowContext();
-  return toDto(updated, ctx.nowMs, ctx.nowDay);
+  return toDto(after, ctx.nowMs, ctx.nowDay);
 }
 
 /**
@@ -466,11 +507,39 @@ export function setKeyBalance(
     ).run(input.balance, currency, at, at, id);
   }
 
-  const updated = getKeyRow(db, id);
-  if (!updated) throw ApiError.notFound('Key', id);
-  appendChange(db, 'balance', id, 'update', updated.revision);
+  const written = getKeyRow(db, id);
+  if (!written) throw ApiError.notFound('Key', id);
+  appendChange(db, 'balance', id, 'update', written.revision);
+  // 手动录入也判（§20.4）：人工录一个 0 同样该锁 —— "人工核实"是把值**写得更准**，
+  // 不是把判据关掉。方向反过来就荒谬了：认真核查后填入真实余额，反而逃过锁存。
+  latchIfBalanceDepleted(db, written);
+  // **判完再读一次**：锁存是这一步的结果，而 `written` 是判**之前**那一行的快照。
+  // 拿它建 DTO 会让这次响应说"余额 0、未透支"—— 恰好是**唯一**一次能看见打标的响应
+  // （调用方就是刚把钱录成 0 的那个人），却报了打标前的状态，`revision` 也少一格。
   const ctx = nowContext();
-  return toDto(updated, ctx.nowMs, ctx.nowDay);
+  const after = getKeyRow(db, id);
+  if (!after) throw ApiError.notFound('Key', id);
+  return toDto(after, ctx.nowMs, ctx.nowDay);
+}
+
+/**
+ * 判据 + 落库的合并调用点（判定腿**通用**的那一句）。只对**写进来的非 NULL 值**判：
+ * `balance_cents IS NULL` 是"未知"（ADR-0003），不是"没钱"。
+ *
+ * 两个判据各看各的列 —— 余额类看 `balance_cents`，套餐类看 `token_plan_remaining`。
+ * 这里按 `category` 分派而不是两列都判：一把 balance 类 key 的
+ * `token_plan_remaining` 是历史残留（改类别时没清干净），拿它去判会锁一把有钱的 key。
+ */
+function latchIfBalanceDepleted(db: Db, row: KeyRow): void {
+  const depleted =
+    row.category === 'balance'
+      ? isBalanceDepleted({ unlimited: row.unlimited === 1, balanceCents: row.balance_cents })
+      : isTokenPlanDepleted({ remainingTokens: row.token_plan_remaining });
+  if (!depleted) return;
+  // `DepletedReason` 只有两个值（§20.2 钉死）：套餐余量耗尽与余额不足**同一句话的事实**
+  // （"这把 key 付不起账"），分两个值只会让前端多一个处理方式完全相同的分支。
+  // 要区分看 `category`。ADR-0041 决策 8 的三值清单是笔误，契约 §20.2 为准。
+  latchKeyDepleted(db, row.id, 'balance');
 }
 
 /**
@@ -497,6 +566,11 @@ export function applyTemplateBalance(
      WHERE id = ?`,
   ).run(value.balanceCents, value.currency, at, value.remainingTokens ?? null, value.expiresAt ?? null, at, id);
   appendChange(db, 'balance', id, 'update', null);
+  // 判定腿（§20.4）：按**刚写进去的值**判。重读一次而不是用 `value` —— COALESCE 之后
+  // 库里的值可能与 `value` 不同（`remainingTokens` 为 null 时保留旧值），
+  // 而锁存判的必须是**落库后的那一列**。
+  const row = getKeyRow(db, id);
+  if (row !== null) latchIfBalanceDepleted(db, row);
 }
 
 /**
@@ -525,6 +599,11 @@ export function applyTemplateTokenPlan(
      WHERE id = ?`,
   ).run(value.remainingTokens, value.expiresAt, at, at, id);
   appendChange(db, 'balance', id, 'update', null);
+  // 判定腿（§20.4）：同 applyTemplateBalance —— 重读落库后的那一列。
+  // `remainingTokens === null` 时 COALESCE 保留旧值，而"上游没说用了多少"（NULL）
+  // **不锁**：库里那时要么是旧值（照旧值判，正确），要么仍是 NULL（判据当场返回 false）。
+  const row = getKeyRow(db, id);
+  if (row !== null) latchIfBalanceDepleted(db, row);
 }
 
 /** 软删。保留行是为了让 usage_logs.key_id 外键仍有落点（契约 §0.4 / C4）。 */

@@ -7,6 +7,7 @@
 // JSON 里不出现 undefined 键，前端拿到的字段集合是稳定的。
 
 import type { BalanceQueryTemplate, BalanceUnit } from '../db/balance-query.js';
+import type { DepletedReason } from '../db/depletion.js';
 
 /**
  * 契约 §2 余额查询失败引导码（ADR-0012 §4）。
@@ -167,6 +168,20 @@ export interface KeyDto {
   balanceUpdatedAt: string | null;
   balanceSource: 'manual' | 'template' | null;
   tokenPlan: TokenPlanDto | null;
+  /**
+   * 透支锁存（契约 §20 / ADR-0041）。**第四根轴，不是第四个 `health` 值** ——
+   * `enabled` 是管理员的配置意图、`health` 是网关运行态（重启归零），
+   * `depleted` 是**落库的资金事实**，只有人工「重新启用」能清（§20.5）。
+   *
+   * 三者正交：`true` 的 key 完全可能同时 `enabled=true` + `health='healthy'`，
+   * 它没被停用、没在冷却，只是网关不选它。**前端硬约束（§20.1）**：
+   * `depleted=true` 时**不得只画三灯** —— 那等于把"没钱"渲染成"可用"。
+   */
+  depleted: boolean;
+  /** 首次发现它付不起账的时刻（ISO8601 UTC）；null = 未锁存。**反复刷新不推新**（§20.3）。 */
+  depletedAt: string | null;
+  /** 锁存原因；null = 未锁存。`'balance'` = 自己余额/套餐余量耗尽，`'account'` = 所属账号欠费级联。 */
+  depletedReason: DepletedReason | null;
   health: KeyHealth;
   cooldownUntil: string | null;
   consecutiveFailures: number;
@@ -509,6 +524,15 @@ export interface HealthKeysDto {
   healthy: number;
   cooling: number;
   disabled: number;
+  /**
+   * 已锁存的 key 数（§12.2 / §20.8 / ADR-0041）。
+   *
+   * **不参与 `healthy + cooling + disabled = total` 那套划分、不得相加**：那三个数是
+   * 运行态的**三分**（互斥且穷尽），而透支是**另一根正交轴** —— 一把 key 会同时出现在
+   * `healthy` 与 `depleted` 里。加它是必须的：不加的话健康页会把一批"永不接流量的 key"
+   * 报成 `healthy`，那恰好是 ADR-0041 要消灭的"每个可见信号都说好"的故障形状。
+   */
+  depleted: number;
   items: {
     keyId: string;
     maskedKey: string;
@@ -516,6 +540,8 @@ export interface HealthKeysDto {
     health: KeyHealth;
     cooldownUntil: string | null;
     consecutiveFailures: number;
+    /** 该 key 是否已锁存。与 `health` **正交**（见 `HealthKeysDto.depleted`） */
+    depleted: boolean;
   }[];
 }
 
@@ -781,6 +807,20 @@ export interface SupplierSubscriptionRowDto extends SupplierSubscriptionDto {
    * 仍然只有 §7 帧一条读面，不进本 DTO —— 这里只答"这个账号自己绑了谁"。
    */
   egressId: string | null;
+  /**
+   * **账号透支锁存**（§20.6 / ADR-0041）。`balance_cents < 10` 分（含 0 与负数）时置位，
+   * 并**级联**其名下池内 key（那些 key 的 `depletedReason = 'account'`）。只有人工
+   * `POST /api/supplier-accounts/:id/undeplete` 能清（§20.5）。`balanceCents = null`（未知）与
+   * `unlimited` 账号**永不锁存**。
+   *
+   * 与 `status` **正交**：`status` 说的是会话/登录健康，透支是资金事实 ——
+   * 一个 `status='active'` 且余额为 `0` 的账号是**正常态**，不是故障。
+   */
+  depleted: boolean;
+  /** ISO8601 UTC；null = 未锁存。首次发现的那一刻，反复刷新不推新（§20.3） */
+  depletedAt: string | null;
+  /** 账号只可能是 `'balance'`（它自己就是源头，没有"所属账号欠费"这种级联）；null = 未锁存 */
+  depletedReason: DepletedReason | null;
   revision: number;
   createdAt: string;
   updatedAt: string;

@@ -57,6 +57,14 @@ export interface KeyConfig {
   tokenPlanRemainingTokens: number | null;
   /** token-plan 类 key：到期时间 ISO8601 UTC；null = 不过期 */
   tokenPlanExpiresAt: string | null;
+  /**
+   * **透支锁存**（契约 §20 / ADR-0041）：余额 < 0.1 元或套餐余量 = 0 时由判定腿落库置位，
+   * 只有人工能清。为 `true` 的 key **不进候选**（`isUsable()` 里紧接着 status 早退）。
+   *
+   * **必填而非可选**：可选字段漏赋值的默认值是 `false`（= 放行），那是**错误方向**上的默认 ——
+   * 一个忘了接线的构造点应该让编译失败，而不是让一池透支 key 悄悄回到选路里。
+   */
+  depleted: boolean;
   /** 每 key 并发上限，默认取 PoolOptions.defaultMaxConcurrency */
   maxConcurrency?: number;
 }

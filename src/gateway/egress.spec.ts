@@ -29,7 +29,7 @@ import { describe, it } from 'vitest';
 import { egressIdOfUrl, retryAfterSecOf } from '../egress/port.js';
 import type { EgressGate, EgressShadowRecord } from '../egress/port.js';
 import { EGRESS_LOCAL_HEADER } from '../egress/port.js';
-import { EGRESS_BUDGET_PLACEHOLDER, createEgressGate } from './egress.js';
+import { EGRESS_BUDGET_DEFAULT, createEgressGate } from './egress.js';
 import { createGatewayEngine } from './engine.js';
 import type { AttemptEvent, FetchLike, ForwardResult } from './engine.js';
 import { createKeyPool } from './key-pool.js';
@@ -61,6 +61,7 @@ function keyConfig(keyId: string, upstreamId = 'up1', over: Partial<KeyConfig> =
     balanceCents: 10_000,
     tokenPlanRemainingTokens: null,
     tokenPlanExpiresAt: null,
+    depleted: false,
     ...over,
   };
 }
@@ -257,7 +258,7 @@ describe('egressIdOfUrl（原 egressHostOf fixture 表整张迁来）', () => {
     // 两个对象字面量都是扁的，`[^}]` 够用（跨到下一个 `}` 之前必须出现 `egress`）
     assert.match(source, /createGatewayRuntime\(\{[^}]*\begress\b[^}]*\}\)/, '数据面（网关装配）拿到它');
     assert.match(source, /buildApp\(\{[^}]*\begress\b[^}]*\}\)/, '管理面（`ApiContext.egress`）拿到的是同一个变量');
-    assert.match(source, /EGRESS_BUDGET_PLACEHOLDER/, '预算值引用端口那一份，不在这里抄数字（标定只改一处）');
+    assert.match(source, /EGRESS_BUDGET_DEFAULT/, '预算值引用端口那一份，不在这里抄数字（标定只改一处）');
     assert.match(source, /mode:\s*'active'/, '⑧ 转正：判据真正启用，接线层显式注入 active（PM 裁定 1）');
   });
 });
@@ -326,12 +327,53 @@ describe('reserve：逐出口令牌桶 + 数据面保留额', () => {
     assert.throws(() => createEgressGate({ now, budget: { capacity: 0, windowMs: 60_000, reserveForData: 0 } }));
     assert.throws(() => createEgressGate({ now, budget: { capacity: 5, windowMs: 0, reserveForData: 0 } }));
     assert.throws(() => createEgressGate({ now, budget: { capacity: 2, windowMs: 60_000, reserveForData: 3 } }));
+    // 非整数半吊子值同样当场拒（Infinity / 小数）—— 半吊子按 0 跑会让整条出口恒拒
+    assert.throws(() => createEgressGate({ now, budget: { capacity: Number.POSITIVE_INFINITY, windowMs: 60_000, reserveForData: 0 } }));
+    assert.throws(() => createEgressGate({ now, budget: { capacity: 2.5, windowMs: 60_000, reserveForData: 0 } }));
     // N=1 = 「裸 429 即判出口」（决策 10 已否掉的形态）
     assert.throws(() => createEgressGate({ now, distinctAccounts: 1 }));
   });
 
-  it('占位数值锁（决策 8）：PM 已裁定写死，标定回来只改数、不改结构', () => {
-    assert.deepEqual(EGRESS_BUDGET_PLACEHOLDER, { capacity: 5, windowMs: 60_000, reserveForData: 1 });
+  it('缺省预算 = 不限（v11，业主 2026-10-19 裁定）：连取远超旧占位值的枚数一路放行', () => {
+    // 旧占位 `capacity: 5` 在这里第 6 枚就拒 —— 那条实测证伪的形状（连发 20 次，
+    // 第 6 枚起整窗 429）正是本用例要钉死不许回来的。120 枚 > 任何可能的标定残余。
+    const gate = createEgressGate({ now });
+    for (let i = 0; i < 120; i += 1) {
+      assert.deepEqual(gate.reserve('a.example.com', 'data'), { allowed: true });
+      assert.deepEqual(gate.reserve('a.example.com', 'management'), { allowed: true }, '不限时保留额同样不设防');
+    }
+  });
+
+  it('缺省（不限）下冷却闸照常工作：归因冷却仍会拒（v11：出口保护不变弱）', () => {
+    const gate = createEgressGate({ now, mode: 'active' });
+    for (const accountId of ['acc-1', 'acc-2', 'acc-3']) gate.observeLimited(limited('a.example.com', accountId));
+    const denied = gate.reserve('a.example.com', 'data');
+    assert.equal(denied.allowed, false);
+    assert.equal(denied.allowed === false ? denied.reason : null, 'cooldown');
+  });
+
+  it('缺省（不限）下桶不记账：不往 buckets 里塞任何条目（v11：摆设不占内存、不伪装成限额）', () => {
+    // 判别方式：先在不限闸上打几百枚，再**换一个显式封顶的闸**去查同一出口 ——
+    // 如果不限闸记了桶，那也是它自己实例内的 Map，跨实例本就不可见；
+    // 这条断言的真正意义在结构：`reserve` 的 `capacity === null` 分支必须**提前返回**，
+    // 走到 push 的任何路径都会让下面的运行期断言（同实例回读）失去意义。
+    // 所以直接钉行为：不限闸上无论打多少枚，`snapshot()`（§7 帧的源）永远没有桶的影子。
+    const gate = createEgressGate({ now });
+    for (let i = 0; i < 200; i += 1) gate.reserve('a.example.com', 'data');
+    assert.deepEqual(gate.snapshot(), [], '桶从不进 §7 帧（文件头第 3 条，不限时更没有理由出现）');
+    assert.equal(gate.cooldownUntil('a.example.com'), null);
+  });
+
+  it('显式封顶时保留额语义原样（决策 8 结构不变的回归锁）', () => {
+    const gate = createEgressGate({ now, budget: { capacity: 3, windowMs: 60_000, reserveForData: 1 } });
+    for (let i = 0; i < 2; i += 1) assert.equal(gate.reserve('a.example.com', 'management').allowed, true);
+    assert.equal(gate.reserve('a.example.com', 'management').allowed, false, '管理面只吃 capacity − reserveForData');
+    assert.equal(gate.reserve('a.example.com', 'data').allowed, true, '数据面仍取得到保留额');
+    assert.equal(gate.reserve('a.example.com', 'data').allowed, false, '取完恰好到 capacity');
+  });
+
+  it('缺省数值锁（v11）：capacity 不限、窗口 60s、保留额 1（结构三字段不动）', () => {
+    assert.deepEqual(EGRESS_BUDGET_DEFAULT, { capacity: null, windowMs: 60_000, reserveForData: 1 });
   });
 });
 

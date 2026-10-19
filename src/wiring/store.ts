@@ -53,6 +53,7 @@ interface KeyRow extends SecretRow {
   balance_cents: number | null;
   token_plan_remaining: number | null;
   token_plan_expires_at: string | null;
+  depleted_at: string | null;
   model_limits: string | null;
   masked_key: string;
 }
@@ -86,7 +87,8 @@ const UPSTREAMS_SQL = 'SELECT id, base_url, enabled FROM upstreams ORDER BY name
  */
 const KEYS_SQL = `
 SELECT k.id, k.upstream_id, k.category, k.enabled, k.weight, k.balance_cents,
-       k.token_plan_remaining, k.token_plan_expires_at, k.model_limits, k.masked_key, k.revision, k.secret,
+       k.token_plan_remaining, k.token_plan_expires_at, k.depleted_at,
+       k.model_limits, k.masked_key, k.revision, k.secret,
        sak.account_id AS account_id,
        sa.egress_id   AS account_egress_id
 FROM upstream_keys k
@@ -202,6 +204,10 @@ export function createGatewayStore(options: GatewayStoreOptions): GatewayStore {
       balanceCents: k.balance_cents,
       tokenPlanRemainingTokens: k.token_plan_remaining,
       tokenPlanExpiresAt: k.token_plan_expires_at,
+      // 透支锁存（契约 §20.7）：`depleted_at` 非空即锁存。这里只做"非空 → true"的翻译，
+      // 判据本身在 `src/db/depletion.ts`（写侧），网关侧不重算阈值 —— 两处各判一次
+      // 就会出现"库里有标记但网关不认"或反之的静默分歧。
+      depleted: k.depleted_at !== null,
     }));
 
     snapshot = { revision: lastSeq, upstreams: upstreamConfigs, keys: keyConfigs };

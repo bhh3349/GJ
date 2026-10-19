@@ -41,6 +41,7 @@ import {
   type SupplierSubscription,
 } from '@/api/types';
 import { BalanceText } from '@/components/BalanceText';
+import { DepletedTag } from '@/components/DepletedTag';
 import { RemainingBar } from '@/components/RemainingBar';
 import { confirmManualRefresh } from '@/components/ManualRefreshConfirm';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
@@ -174,6 +175,33 @@ export function SupplierAccountDetailDrawer({
         );
         if (accepted === null) return;
         onRotateTask(accepted.taskId);
+      },
+    });
+  };
+
+  /**
+   * 解除透支（§20.5 / §20.6）。同步端点、**不要求 `revision`** —— 它解除的是系统自动置位的
+   * 标记，不是替换一个编辑值（对照「绑出口」那条要 `revision`）。一个动作做三件事：
+   * 清账号锁 + 清名下 `reason="account"` 的 key 锁（同样 `enabled=1`）+ 广播快照重建。
+   * 确认文案必须预告「下次刷新仍透支会再次锁上」—— 不预告的话它会被读成故障。
+   */
+  const undeplete = (): void => {
+    if (!account) return;
+    modal.confirm({
+      title: '解除这个账号的透支锁？',
+      content: (
+        <span>
+          解除后该账号与其名下被级联锁住（原因「账号欠费」）的 key 会<strong>回到选路池</strong>。
+          如果下一次余额刷新显示它仍然透支，会<strong>再次自动锁上</strong> —— 那是预期行为，不是故障。
+        </span>
+      ),
+      okText: '解除并启用',
+      cancelText: '取消',
+      onOk: async () => {
+        const result = await run('undeplete', () => supplierAccountsApi.undeplete(accountId), '透支锁已解除');
+        if (result === null) return;
+        detail.reload();
+        onChanged();
       },
     });
   };
@@ -334,10 +362,33 @@ export function SupplierAccountDetailDrawer({
               {SUPPLIER_STATUS_TEXT[account.status]}
             </Tag>
           ) : null}
+          {/* 状态标的是连接事实，透支标的是资金事实，两者正交（§20.1）—— 并排画，不合并。 */}
+          {account ? (
+            <DepletedTag
+              depleted={account.depleted}
+              depletedAt={account.depletedAt}
+              depletedReason={account.depletedReason}
+            />
+          ) : null}
         </Space>
       }
       footer={
         <Space size={tokens.space.sm} wrap style={{ width: '100%', justifyContent: 'flex-end' }}>
+          {/* §20.5：只在真锁着的时候画 —— 一个恒在的「解除透支」会让人以为它是常规维护动作。 */}
+          {account?.depleted ? (
+            <Tooltip title="清账号锁 + 清名下被级联锁住的 key（原因「账号欠费」），并把它们重新启用。余额回升不会自动解锁，只有这个动作能解。">
+              <Button
+                size="small"
+                style={{ color: tokens.color.orange, borderColor: tokens.color.orange }}
+                loading={isPending('undeplete')}
+                onClick={() => {
+                  undeplete();
+                }}
+              >
+                解除透支
+              </Button>
+            </Tooltip>
+          ) : null}
           {account?.credentialSource === 'session' ? (
             <Tooltip title="该账号是会话型凭据，没有存档密码，无法自动重登。">
               <span style={{ display: 'inline-block' }}>

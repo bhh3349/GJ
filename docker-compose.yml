@@ -34,6 +34,24 @@ services:
       # 管理面听 0.0.0.0 但**只在容器内**：对外与否由上面 ports 的左半边决定。
       HOST_GATEWAY: 0.0.0.0
       HOST_ADMIN: 0.0.0.0
+      # 容器内监听端口恒 4000/4001 —— 与 ports 的右半边同侧。
+      # **为什么必须在这里覆盖**：`env_file` 会把 .env 的 PORT_GATEWAY/PORT_ADMIN 原样
+      # 注入容器，而进程读这两个变量决定**监听端口**。.env 里把它们当"宿主机端口"
+      # 用（错开 4100/4001），进程就会在容器内听 4100/4101，docker-proxy 往 4000 转发
+      # → ECONNREFUSED。更阴的是健康检查脚本也读 process.env.PORT_ADMIN，恰好探到
+      # 错端口上的真服务 → **误报 healthy**。实测踩过。宿主机端口只由 ports 左半边决定。
+      PORT_GATEWAY: 4000
+      PORT_ADMIN: 4001
+    # **为什么必须显式给 dns**：宿主机的 /etc/docker/daemon.json 配了 `"dns": ["127.0.0.1"]`
+    # （AdGuard Home 在宿主 :53），这个全局值会被 docker 注入每个容器的内置解析器
+    # （ExtServers: [127.0.0.1]）——而容器里的 127.0.0.1 是**容器自己**，于是所有外网
+    # 域名一律 SERVFAIL，网关侧表现为 `last failure NETWORK`、上游"全挂"。
+    # 这里在服务级覆盖，只影响本容器，不动 daemon.json（其他容器栈没动过、别扩大爆炸半径）。
+    # 实测容器内 `getent hosts tierflow.cn` 用 223.5.5.5 解析正常；119.29.29.29 兜底。
+    # 别填宿主的 172.x.0.1 —— 那会绕回 AdGuard，回到同一个坑。
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
     volumes:
       # 管理界面静态产物：Dockerfile 故意不构建前端（见 Dockerfile 头注释），由宿主机
       # `pnpm web:build` 产出后 bind 进来。只读挂载 —— 容器不需要改它，写权限留给构建。

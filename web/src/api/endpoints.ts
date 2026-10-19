@@ -331,6 +331,20 @@ export const supplierAccountsApi = {
     api.post<TaskAccepted>('/supplier-accounts/rotate-key', body),
   /** 单账号重登。**同步**端点，回 200；无存档密码时当场 422（不是"点了没重登成"）。 */
   relogin: (id: string) => api.post<SupplierAccount>(`/supplier-accounts/${id}/login`),
+  /**
+   * §20.5 解除账号透支锁（同步，回更新后的 `SupplierAccount`）。
+   *
+   * 一次动作做两件事：清账号锁 + 清该账号名下 `depletedReason="account"` 的 key 锁
+   * （都顺带 `enabled=1`）。**只清账号级联的那一种** —— 一把自己余额不足的 key
+   * 不会因为账号解了锁就回池（它没钱这件事没变）。
+   *
+   * **不要 `revision`**：这不是"改字段"，是"解除一个自动置位的标记"，没有可覆盖的编辑冲突；
+   * 要 `revision` 只会让"页面开着放一会儿再点"报 409。
+   *
+   * **余额回升不会自动解锁**（§20.3）—— 这是唯一的人工入口，也正因如此
+   * 点之前必须让用户知道"如果还是欠费，下一轮刷新会再次锁上"。
+   */
+  undeplete: (id: string) => api.post<SupplierAccount>(`/supplier-accounts/${id}/undeplete`),
   /** 连接自测。**永不写库**，业务性失败一律 `200 + ok:false`（诊断结论走响应体）。 */
   test: (id: string) => api.post<SupplierTestResult>(`/supplier-accounts/${id}/test`),
   /**

@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.16.4**　｜
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.17.0**　｜
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -710,6 +710,9 @@
   "lastFailureReason": null,
   "lastFailureAt": null,
   "todayTokens": 84213,
+  "depleted": false,
+  "depletedAt": null,
+  "depletedReason": null,
   "revision": 2,
   "createdAt": "2026-10-01T03:00:00.000Z",
   "updatedAt": "2026-10-06T09:12:00.000Z",
@@ -731,8 +734,15 @@
 | `consecutiveFailures` | int | 连续失败次数，决定冷却档位 |
 | `lastFailureReason` | 枚举 \| `null` | `AUTH_INVALID` \| `RATE_LIMITED` \| `INSUFFICIENT_BALANCE` \| `UPSTREAM_ERROR` \| `NETWORK` |
 | `todayTokens` | int | 自然日（UTC）累计 token |
+| `depleted` | `bool` | **v1.17.0 新增**。**透支锁存**（§20）：这把 key 被查到付不起账（余额 < 0.1 元 / 套餐余量 = 0 / 其账号欠费），网关**按此标记排除出选路**。**与 `enabled` / `health` 正交**：`enabled=true` + `health="healthy"` + `depleted=true` 是合法组合（没停用、没冷却，只是没钱）。`false` 是缺省 / 老 key 的值 |
+| `depletedAt` | ISO8601 \| `null` | **v1.17.0 新增**。**首次**发现它付不起账的时刻。**只写一次**（§20.3：反复刷新不推新），可当审计用。`null` = 未锁存 |
+| `depletedReason` | `"balance"` \| `"account"` \| `null` | **v1.17.0 新增**。`"balance"` = 自己的余额 / 套餐余量耗尽（看 `category` 分是哪一种）；`"account"` = 其所属账号欠费级联（§20.6）。`null` = 未锁存 |
 
 > `health` 是**网关进程内**的运行时状态。管理端**不能写** `health`，只能写 `enabled`。`enabled=false` ⇒ 后端返回 `health="disabled"`，即使此前在冷却中。
+>
+> **`depleted` 是另一根轴，不是第四个 `health` 值**（v1.17.0，§20.1）：`health` 滞后 ≤1s、重启归零（ADR-0010），
+> 而透支是**落库的资金事实**、跨重启存活、只有人工能清。前端在 `depleted=true` 时**不得只画三灯**
+> —— 那等于把"没钱"渲染成"可用"。运行态三分（`healthy+cooling+disabled=total`）与 `depleted` 计数**不得相加**（§12.2）。
 >
 > **这四个字段的来源与新鲜度（ADR-0010）**：网关进程是 `key_runtime` 表的**唯一写者**，它按约 **1s** 一次的节奏把内存里的运行态批量镜像进去（攒批、去重、只在值真的变了才写，且**不在 `/v1/*` 请求线程上**执行）。因此：管理端读到的运行态**最多滞后 1s**；`?health=cooling` 筛选与健康灯的口径由此表提供，而不是「永远 health」。
 > **重启后归零**：`key_runtime` **不参与冷启动**——网关启动时不恢复冷却与连续失败计数，第一个镜像周期会把全量状态（含归零的那些）写回，管理端在重启后 1s 内看到的就是归零后的真实值。这是**既定降级**，理由与备选方案见 ADR-0010。
@@ -742,7 +752,7 @@
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/api/keys?upstreamId=&category=&enabled=&health=&q=&page=&pageSize=&includeDeleted=` | 列表（默认 `maskedKey`，默认不含已软删） |
+| `GET` | `/api/keys?upstreamId=&category=&enabled=&health=&depleted=&q=&page=&pageSize=&includeDeleted=` | 列表（默认 `maskedKey`，默认不含已软删）。`depleted` 为 **v1.17.0** 新增可选筛选（`true` / `false`，留空 = 不筛），与既有 `enabled` / `health` 同形 |
 | `POST` | `/api/keys` | 建，body `{upstreamId, key, category, label?, weight?, balance?, tokenPlan?}` → `201` |
 | `GET` | `/api/keys/:id` | 详情；已软删的 key 返回 404 `NOT_FOUND`（`?includeDeleted=true` 显式可查） |
 | `PATCH` | `/api/keys/:id` | 改 `{label?, enabled?, weight?, category?, tokenPlan?, revision}` |
@@ -750,7 +760,7 @@
 | **`PUT`** | **`/api/keys/:id/balance`** | **手动录入余额**（见下） |
 | `POST` | `/api/keys/:id/balance/refresh` | 按模板查单个 key 余额 → `202 {taskId}`（异步，轮询 `GET /api/tasks/:id`；`result` 含可选 `retryAfterSeconds`，v1.8.1） |
 | `POST` | `/api/keys/:id/test-balance` | **自测**：用该 key 的生效查询方式真实打一次 → `200 BalanceTestResult`（同步、不写库，见 §2） |
-| `POST` | `/api/keys/batch` | `{ids: [], action: "enable"\|"disable"}` → `{updated: 5}` |
+| `POST` | `/api/keys/batch` | `{ids: [], action: "enable"\|"disable"\|"undeplete"}` → `{updated: 5}`。`"undeplete"` 为 **v1.17.0 新增**：**清透支锁 + `enabled=1`**（§20.5）。**`"enable"` 不清锁**（否则一次批量启用就能把整池透支 key 放回池） |
 | `POST` | `/api/keys/balance/refresh` | 批量查余额 → `202 {taskId}`（`result` 含可选 `retryAfterSeconds`，v1.8.1） |
 
 ### `PUT /api/keys/:id/balance` — 手动录入
@@ -1831,9 +1841,9 @@ REST 全量 `/api/stats/balance`（`live.ts` 注释里写明：通道只报"变�
     "latencyMs": { "p50": 640, "p99": 5120, "samples": 1018 }
   },
   "keys": {
-    "total": 8, "healthy": 6, "cooling": 1, "disabled": 1,
+    "total": 8, "healthy": 6, "cooling": 1, "disabled": 1, "depleted": 2,
     "items": [
-      { "keyId": "key_9c21", "maskedKey": "****a1b2", "upstreamId": "up_7f3a", "health": "healthy", "cooldownUntil": null, "consecutiveFailures": 0 }
+      { "keyId": "key_9c21", "maskedKey": "****a1b2", "upstreamId": "up_7f3a", "health": "healthy", "cooldownUntil": null, "consecutiveFailures": 0, "depleted": true }
     ]
   },
   "db": { "ok": true, "schemaVersion": 2, "fileSizeBytes": 2883584, "walSizeBytes": 40960, "queryMs": 1 },
@@ -1858,6 +1868,7 @@ REST 全量 `/api/stats/balance`（`live.ts` 注释里写明：通道只报"变�
 | `traffic.*` | 与 §6 `overview` **同一份 SQL、同一口径**；`requests=0` 时 `successRate=1` 是约定而非断言，前端仍必须显示"无流量" |
 | `traffic.latencyMs` | `usage_logs.latency_ms` 的**最近秩**分位（nearest-rank，不做插值）：`p50` 取第 `ceil(0.5n)` 小、`p99` 取第 `ceil(0.99n)` 小的样本。`samples` 是参与计算的样本数；`samples=0` 时两个分位是 `null`（**不是 0**） |
 | `keys.*` | 与 §3 Key 的 `health` / `cooldownUntil` / `consecutiveFailures` 同源（`key_runtime` 表，新鲜度 ≤1s，ADR-0010） |
+| `keys.depleted` / `keys.items[].depleted` | **v1.17.0 新增**（§20）。**与 `healthy+cooling+disabled=total` 那套划分正交**：`depleted` 是**落库**的资金事实（不是运行态），一把 key 同时进 `healthy` 与 `depleted` 是**正常**的（没在冷却、只是没钱）。**不得相加、不得互相顶替**。加这一格是必须的：不加的话健康页会把一批"永不接流量的 key"报成 `healthy` —— 那正是 §20 要消灭的"每个可见信号都说好"的故障形状 |
 | `db.ok` | **真跑一次** `SELECT 1` 的结果，不是"连接对象还在"。`queryMs` 是这次探测的耗时 |
 | `db.fileSizeBytes` / `walSizeBytes` | 取不到为 `null`（如 `:memory:` 库）。**不返回库文件路径** —— 路径是部署细节，不进 API |
 | `events.total` | 窗口内事件条数 |
@@ -2318,6 +2329,9 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
   "hasSession": true,
   "sessionExpiresAt": "2026-11-06T02:15:03.114Z",
   "egressId": null,
+  "depleted": false,
+  "depletedAt": null,
+  "depletedReason": null,
   "revision": 3,
   "createdAt": "2026-10-07T01:00:00.000Z",
   "updatedAt": "2026-10-07T02:15:03.114Z"
@@ -2339,7 +2353,8 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 | `hasSession` | bool | 会话是否在手。**只回答有无**，会话值永不出后端。与 `credentialSource` **正交**：`credentialSource="password"` 且 `hasSession=false` 是合法态（密码在手、当前无有效会话，等下一次重登） |
 | `sessionExpiresAt` | ISO8601 \| `null` | 会话到期时刻，供前端提示"需重登" |
 | `egressId` | string \| `null` | **v1.13.0 新增，非破坏**。该账号绑定的出口（§16.7 Tier 2，`eg_` 前缀**不透明 id**，前端不得解析其内容）。**`null` = 未绑定，走宿主出口** —— 那是**配置事实**，不是"未知"、不是"不可用"（§16.7「`null` 的两种来源必须分开」）。**答的是"这个账号自己绑了谁"，不是"这个出口现在活着吗"** —— 池的在线 / 冷却 / 出口 IP 仍然只有 §7 帧一条读面（§7 三条硬约束不变）。写入口 = `PATCH /api/supplier-accounts/:id` |
-| `revision` | int | 乐观锁，写请求带 `revision`，不符 → `409 REVISION_MISMATCH` |
+| `depleted` / `depletedAt` / `depletedReason` | `bool` / ISO8601\|`null` / `"balance"`\|`null` | **v1.17.0 新增**（§20，与 §3 Key 同名字段同义）。账号**余额 < 0.1 元** ⇒ 锁存（`reason="balance"`）并**级联**其名下池内 key（那些 key 的 `reason="account"`，§20.6）。**账号的 `depletedReason` 只可能是 `"balance"` / `null`** —— `"account"` 描述的是"被账号连累的 key"，账号自己不会被别人连累。`depletedAt` 只写一次（§20.3）。**与 `status` 正交**：`status` 说会话健康，透支说资金 —— 一个 `status="active"` 且 `depleted=true` 的账号是**正常态**，不是矛盾 |
+| `revision` | int | 乐观锁，写请求带 `revision`，不符 → `409 REVISION_MISMATCH`（**例外**：§15.2 `:id/undeplete` 不带 `revision`，理由见 §20.5） |
 
 **金额口径**：TierFlow 内部单位为 `quota`（`1 元 = 500000 quota`，换算基准 = `GET /api/user/self → data.quota_per_unit`）。**v1.8.2 实测订正**：该键在信封 `data` 层、**无 `config` 子层**（原文 `/api/status → config.quota_per_unit` 属手册 §1.4 同源错抄）。
 **换算成"分"是后端的责任**，出口里**不出现 `quota` 原值**（唯一的例外是自测的 `parsed.quotaPerUnit`，
@@ -2368,7 +2383,7 @@ v1.14.0 起写侧同样走上游真值：比值由调用方给，建 key 腿**�
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| `GET` | `/api/supplier-accounts?upstreamId=&status=&q=&page=&pageSize=` | 列表 |
+| `GET` | `/api/supplier-accounts?upstreamId=&status=&depleted=&q=&page=&pageSize=` | 列表。`depleted` 为 **v1.17.0** 新增可选筛选（`true` / `false`） |
 | `GET` | `/api/supplier-accounts/:id` | 详情 |
 | `POST` | `/api/supplier-accounts/import` | 批量导入并逐个登录 → `202 {taskId}` |
 | `POST` | `/api/supplier-accounts/import-sessions` | 粘贴 Cookie 导入（**仅 TokenRhythm**，v1.16.4） → `202 {taskId}` |
@@ -2382,6 +2397,7 @@ v1.14.0 起写侧同样走上游真值：比值由调用方给，建 key 腿**�
 | `GET` | `/api/supplier-accounts/export?upstreamId=` | CSV 导出（**对账表，见下**） → `text/csv` |
 | `PATCH` | `/api/supplier-accounts/:id` | 改账号（**本版只收 `egressId` + `revision`**，见下） → `200 SupplierAccount`（§16.7 Tier 2 / v1.13.0） |
 | `DELETE` | `/api/supplier-accounts/:id?force=false` | 删除账号（见下） |
+| **`POST`** | **`/api/supplier-accounts/:id/undeplete`** | **v1.17.0 新增**（§20.5）：**清账号透支锁 + 清其名下 `reason="account"` 的 key 锁**（同时 `enabled=1`） → `200 SupplierAccount`。**不带 `revision`**（它不是改写一个编辑值，是解除一个自动置位的标记）；未知 / 已删账号 → `404 NOT_FOUND`。审计 `supplier.account.undeplete` |
 
 > **上表是两家共用的端点集**（v1.16.0；v1.16.4 增加 `import-sessions`）。**逐端点对第二家
 > TokenRhythm 的差异**，判据全在 §15.14 能力表：① `keys` 拒收 `unlimited:false` / 非空
@@ -2389,6 +2405,10 @@ v1.14.0 起写侧同样走上游真值：比值由调用方给，建 key 腿**�
 > 恒回空页（订阅腿零请求）；④ `import-sessions` 是 **TR 专属**（TierFlow 入口 `422`），
 > 而 `import` 对 TR 入口 `422`（密码型专属）。其余端点**逐字同形** —— 请求体、响应形状、
 > 任务模型、状态机一家一版是没有的。
+>
+> **v1.17.0 的 `:id/undeplete` 对两家同形**（§20.5）：它只读账号余额与台账归属，不碰供应商接口 ——
+> 没有密码登录 / 没有套餐 / 没有 key 额度这些**能力差异**在这条路上都不构成分支。
+> 一个 `session_expired` 的账号照样可以解封（解封不等于验活：能不能用要等下一次 `refresh` 说）。
 
 #### `POST /api/supplier-accounts/import`
 
@@ -3918,7 +3938,7 @@ spec 三条判据：新库自带、老库真被 ALTER 到、重复跑不抛 dupl
 |---|---|---|
 | ① | 计价单位 | **一次上游 HTTP 请求 = 一枚 token**（不是一把 key）：刷新一个账号 = **2 枚**（`/api/user/self` + `/api/subscription/self`），一轮 27 账号 ≈ **54 枚**（26 把 key 记账 ≈ 52 枚） |
 | ② | 触发路径 | `RATE_LIMITED` 加**第四条路径「出口预算耗尽」**：**0 次真实尝试 / 不计任何 key 健康 / 不写出口冷却 / 一律带 `Retry-After`**；与 §10「0 次真实尝试不是上游故障」同刀。**零新码值**（复用 `RATE_LIMITED`，与 ADR-0011 的池饱和同形） |
-| ③ | 保留额度 | **管理面消费者不得占用数据面保留额度**（否则单次人工刷新可合法饿死客户端流量）；占位值 `reserveForData: 1` 与 `capacity: 5` 同条登记 |
+| ③ | 保留额度 | **管理面消费者不得占用数据面保留额度**（否则单次人工刷新可合法饿死客户端流量）；`reserveForData: 1` 与 `capacity` 同条登记 —— ~~占位值 `capacity: 5`~~ **v1.16.5：缺省 `capacity: null` = 不限**（`reserveForData` 仅在显式封顶时有意义） |
 | ④ | 键一致 | 桶钥匙 = `egressId`，与 Tier 1 冷却键**同源**；Tier 2 落地时两处**一起**换成 `egress_proxies.id`；**禁止"桶按代理、冷却按 host"的分裂脑**；**`egressHostOf` 随迁退休**，归一化唯一入口 = `egressIdOfUrl`（解析失败 → `null` → 放行） |
 | ⑤ | 冷却来源（其一） | **上游确认**：出口冷却**只由上游证据写入** —— 判据 = **同出口 60s 滑动窗口内 ≥3 个不同账号**同型 429（v6 订正版；不再是"第 2 把不同 key"），写入走 Tier 1 阶梯（`max(Retry-After, 60s)` 地板、封顶 30min） |
 | ⑥ | 冷却来源（其二） | **桶拒绝**：走"终止本轮轮换 + `Retry-After`"，**不推进阶梯、不写冷却、不发射 §7 帧** —— §7 `egress_cooldown` 帧的成因**只有"上游确认"一种** |
@@ -3927,6 +3947,60 @@ spec 三条判据：新库自带、老库真被 ALTER 到、重复跑不抛 dupl
 | ⑨ | 容量口径 | 所有容量数字（`capacity` / `reserveForData` / 每轮 token 数 / §15.5 的 ≈14 min 与重开门槛）都是**「单出口」口径**：出口 > 1 时**逐出口各自成立，不得跨出口加总** |
 
 > **§15.5 连带（v1.8.0 已同批落）**：「27 个账号一轮刷新 ≈ 1 分钟」按 ⑥ 重算为 **≈14 min**（`ceil(54/4)×60s`，单出口口径），0.6s 降为账号级内层纪律，重开门槛（ADR-0017 补遗 6）登记为 §15.5 脚注。本表是那三处改动的唯一口径源。
+>
+> **v1.17.0（2026-10-19，透支锁存 —— 余额 key 与套餐 key 耗尽即锁出选路，只有人工解锁才回池）**：**动机是业主原话**
+> 「那现在是不是能优化一下这个余额key和套餐key都透支意味着余额低于0.1的账号和关联key全部标记或者直接停用。
+> 不会再回到正常的池。用户可以自己再次核查，如果余额还有可以重新启用」，以及随后的补一句「不只是余额key哈，套餐key也一样的」。
+> 新增 **§20 透支锁存** 作为正文。要点：
+> ① **这是第四轴，不是第四个 `health` 值**：`enabled`（管理员的配置意图）/ `health`（网关进程内运行态，ADR-0010 的
+> ≤1s 镜像、重启归零）/ **`depleted`（资金事实，落库、跨重启、只有人工能清）** 三轴正交。四个旧方案被否的理由（置 `enabled=0` /
+> 扩 `health` 枚举 / 纯计算不落库 / 复用 `autoDisabled`）逐条写在 **ADR-0041**「被否掉的三个方案」与决策 9。
+> ② **判据**（常量 `DEPLETED_BALANCE_THRESHOLD_CENTS = 10` 只有一份实现，`src/db/depletion.ts`）：
+> 余额类 key `balance_cents` **非 NULL 且 < 10 分**（含 0 与负数）⇒ 锁存；套餐类 key 落库的 `token_plan_remaining`
+> **非 NULL 且 = 0** ⇒ 锁存；账号 `balance_cents` **非 NULL 且 < 10 分** ⇒ 锁账号自身**并级联**其名下池内 key。
+> **`NULL`（未知 ≠ 0，ADR-0003）与 `unlimited`（其 `balance_cents` 恒 NULL，§15.7 / ADR-0018 决策 8）永不锁存**。
+> ③ **粘性**：判定腿**只置位、从不自动清除**（`WHERE depleted_at IS NULL` ⇒ 首次发现时刻只写一次，反复刷新零写）；
+> 解除只有管理面的人工入口；**解除后若下次刷新仍透支会再次置位**（业主接受）。"余额回升自动解锁"被否：
+> 它把业主要的"我自己核查过"这一步删掉了。
+> ④ **新增两个写入口**：`POST /api/keys/batch` 的 `action` 枚举 **+1 个值 `undeplete`**（不新增端点）
+> 与 **新增端点** `POST /api/supplier-accounts/:id/undeplete`。两者都是"解锁 + `enabled=1`"一个动作
+> （业主说的是"重新启用"）；**`enable` 不清锁**（否则一次批量启用就能把整池透支 key 放回去，"不会再回到正常的池"当场作废）。
+> ⑤ **读面**：§3 Key 对象与 §15.1 账号对象各 **纯加三个字段** `depleted` / `depletedAt` / `depletedReason`；
+> `GET /api/keys` 与 `GET /api/supplier-accounts` 各 **+1 可选筛选** `depleted`；§12.2 健康指标加 `keys.depleted`
+> 计数与 `keys.items[].depleted`（**正交轴，不与 `healthy+cooling+disabled=total` 那套划分相加**）。
+> ⑥ **网关侧只有一行**：`KeyConfig` 加**必填** `depleted`（可选字段漏赋值默认 `false` = 放行，是错误方向的默认），
+> `KEYS_SQL` 增取一列，`isUsable()` 在 `status` 判定之后紧接着早退。广播沿用既有信道
+> （`appendChange('key', …)` + `revision+1` ⇒ `SNAPSHOT_ENTITIES` ⇒ ≤1s 重建快照），**零新机制**。
+> ⑦ **不做**（逐条登记，见 ADR-0041「已知边界」）：阈值不做成 env（0.1 元是业务口径不是部署参数）；
+> 在途消耗不即时锁存（那要在热路径写库）；§7 `key_health` 帧不加位；`gateway_health_snapshots` 不加列
+> （补列会让全部历史行的该列为 0，而 0 在这里是一个具体的断言）；§19 消费面零改动；§6 `overview.keyHealth` 零改动。
+> ⑧ **影响面**：`/v1/*` **零端点、零路径、零帧、零错误码**（变的只是"候选集合里少了几把"；锁空的池照旧回既有
+> `503 NO_AVAILABLE_KEY`）；`GATEWAY_ERROR_CODES` / `hintCode` **零新增**（透支是**状态**不是**事件**，不进 §12.1）；
+> **DDL = 四列纯加列**（`upstream_keys` 与 `supplier_accounts` 各两列），`SCHEMA_VERSION` 仍为 **2**、零迁移分支、
+> 老库升级零动作（新列 NULL = 未锁存，与加列前逐字相同）；`ERROR_CODES` **零新增**；审计新增
+> `key.batch_undeplete` / `supplier.account.undeplete`（**不为"锁存"加审计** —— 那是系统动作，它有自己的时间戳）。
+> ★ **升级即生效的后果写在最前**：部署后**下一轮余额刷新**会给所有现存透支 key 打标。那不是回归，是本版的目的；
+> 但它同时意味着"列表里会突然多出一批红标"，运维要知道那是预期形状。判据见 ADR-0041「判据」。
+>
+> **v1.16.5（2026-10-19，缺省出口预算改「不限」—— 业主裁定，占位值被真实流量证伪）**：**动机是业主原话**
+> 「居然写死了请求数，改成无限制」。**实测证据**：对一个 Tier-1 出口连发 20 次无间隔请求 —— 第 1–5 枚 200、
+> 第 6–20 枚 `429 upstream egress rate limited, retry after ~52s`，而**同一时段上游从未拒过我们** ——
+> 被拒的 100% 是网关自己合成的 429，写死的 `capacity: 5` 没有兜住任何东西，它自己成了故障源
+> （v1.8.0 那句"在最坏情况下也是保守的"在数据面前不成立）。落笔依据见 **ADR-0021 v11 / 决策 11**。
+> ① **缺省预算**：`{capacity: null, windowMs: 60s, reserveForData: 1}` —— `null` = 不限；
+> `reserve` 在 `null` 下**整个桶分支不走**（只做冷却检查、不记桶）。**常量改名** `EGRESS_BUDGET_PLACEHOLDER`
+> → **`EGRESS_BUDGET_DEFAULT`**（"占位"在缺省是结论而不是待回填猜测时说反了）。
+> ② **封顶开关** `EGRESS_BUDGET_CAPACITY`（env，空/未设 = 不限）：正整数 = 每出口每窗口枚数；
+> `0` / 小数 / 非十进制 → **拒绝启动**（0 = 每个出口恒拒 ⇒ 整台网关静默不可用）。标定出真实地板后
+> 设这个 env 即回填，**只改数、不改结构**（决策 8 纪律原样）。
+> ③ **出口保护不变弱**：`observeLimited` 归因冷却（同出口 60s 滑窗 ≥3 账号 → 阶梯）与 `reserve` 的
+> 冷却检查**逐字节未动** —— 上游真限我们时的处置路径完整保留。⑤⑥⑦ 三条的判据没有变，变的只是触发频率。
+> ④ **排期账失效**：§15.5 的 ≈13/14 min、§14.6 的重开门槛、ADR-0017 补遗 6 在缺省（不限）下**没有意义**
+> （全是有限 capacity 的函数）；`BALANCE_SYNC_MINUTES=0` 的现行裁决不受影响。
+> ⑤ **影响面**：`/v1/*` **零端点、零 DTO 变更**（变的只是"第 6 枚起不再回 429"这一行为）；`ERROR_CODES` /
+> `GATEWAY_ERROR_CODES` / `hintCode` **零新增**（`RATE_LIMITED` 的桶拒绝路径仍在，只是缺省不触发）；
+> `SCHEMA_VERSION` 仍为 2、**零 DDL**。**判据**：`src/gateway/egress.spec.ts` 缺省不限用例 + 不限时
+> 桶不记账用例 + `EGRESS_BUDGET_CAPACITY` 解析用例（`src/config.spec.ts`）。
 
 ---
 
@@ -4461,6 +4535,187 @@ CREATE TABLE IF NOT EXISTS group_models (
 | 强制点 | **v1.15.9 唯一的新硬判据 `KEY_SELF_ISSUE_LIMIT = 10`**（`src/api/routes/console.ts`，按组的把数上限） |
 | `web/`（前端） | **v1.15.3 交付**：`/console` 工作区三页 + `ConsoleLayout` + `consoleNav` + `SessionInfo.role` + `consoleApi` + 登录与根路径按 `role` 分流。**零新依赖、零后端改动**（这一版只是让界面追上 v1.15.0–v1.15.2 已做完的边界）；无自动化测试，判据是 `tsc --noEmit` + `vite build` 全绿 + 三个 console chunk 独立分包。**v1.15.4 追加**：`/users` 管理页 + `usersApi` + `UserDto`/`UserCreateRequest` + 两个弹窗（建号表单、口令一次性展示）—— **同样零后端改动**（§19.7 的端点 v1.15.0 就在，本版只是补上前端入口），同样无自动化测试。**v1.15.5 零改动**（本版是服务端闸门放行两条既有路径，前端早已在打它们；前端唯一的"改动"是它现在能登进来了）。**v1.15.9 追加四处**：API Keys 页（签发 / 改名 / 吊销 / 一次性明文 / 上限提示）、用量页额度卡、模型广场升级（接入地址 + 三端点清单 + 分类搜索）、两个外壳账号菜单各挂 `ChangePasswordModal`（放在 `src/components/` —— 放进 `pages/console/` 会让**管理面 chunk 依赖消费面 chunk**，方向反了）。**v1.15.11 追加**：账号入口从两个外壳的顶栏搬到**侧栏左下角**（1panel 观感）—— 菜单体收成共享的 `src/components/AccountMenu.tsx`（`ChangePasswordModal` 随之只挂载一份，顶栏不再有第二份入口；管理面顶栏只剩 `ConnectionBadge`），Sider 变一列三格（菜单自身可滚、账号格钉在底）。**v1.15.12 追加**：**收起侧栏的把手**从底部那条通栏色块换成**品牌行右侧的 28px 图标按钮**（`src/components/SidebarCollapseButton.tsx`，`Sider` 传 `trigger={null}` 关掉 antd 自带的）—— 两个外壳同一套，折叠态按钮不被裁、账号格随把手消失而**贴底**。**两版都是纯前端零后端改动**，无自动化测试，判据是 `tsc --noEmit` + `vite build` + 分包核查 + 双角色三视口真实浏览器走查（版本日志有全表） |
 | `src/api/app.ts` 闸门 | **v1.15.5 放行两行**（`GET /api/auth/session` / `POST /api/auth/logout`，见 §19.1 表）；**v1.15.9 再放行一行**（`POST /api/auth/password`，字面路径 + 方法门）；v1.15.0–v1.15.4 的既有判定（`/api/console/**` + `GET /api/access-info`）**一字未改** |
+
+---
+
+## 20. 透支锁存（v1.17.0；`depleted` 是与 `enabled` / `health` 正交的第四轴）
+
+### 20.0 一句话
+
+**一把 key 或一个账号被查到"付不起账"（余额 < 0.1 元 / 套餐余量 = 0）时，它被**锁存**：
+库里有标记、网关按标记排除出选路、列表上有红标；这条标记**粘住**，只有人工「重新启用」才解除。
+解除之后如果下一次刷新仍然透支，会**再次锁存**。**
+
+落笔依据见 **ADR-0041**。全文的口径来源只有两处：业主的两句话（见该 ADR 的「状态」行）与本节的判据表。
+
+### 20.1 三轴正交（这一节存在的理由：防止把 `depleted` 读成第四个 `health`）
+
+| 轴 | 字段 | 谁写 | 存哪 / 新鲜度 | 答的是什么 |
+|---|---|---|---|---|
+| 配置意图 | `enabled` | 管理员（`PATCH` / `POST /api/keys/batch`） | `upstream_keys.enabled`，即时 | 我想不想让这把 key 参与 |
+| 运行态 | `health` / `cooldownUntil` / `consecutiveFailures` | 网关进程（1s 批量镜像，ADR-0010） | `key_runtime`，**滞后 ≤1s、重启归零** | 网关此刻有没有把它按住（冷却 / 自动禁用） |
+| **资金事实** | **`depleted` / `depletedAt` / `depletedReason`** | **判定腿**（余额 / 余量落库时）；人工解除 | `upstream_keys.depleted_at` / `_reason`，**落库、跨重启、跨部署** | 它有没有钱付账 |
+
+**硬约束（前端）**：`depleted=true` 时**不得只画三灯**。三灯答的是运行态，一把 `enabled=true` +
+`health=healthy` + `depleted=true` 的 key 是**完全合法的组合** —— 它没被停用、没在冷却，
+只是没钱了、网关不会选它。只画三灯等于把"没钱"渲染成"可用"。
+
+`depleted` **不参与** §12.2 的 `healthy + cooling + disabled = total` 那套划分（那一套是运行态的三分），
+计数单独一格，**不得相加**。
+
+### 20.2 判据
+
+| 对象 | 锁存条件（全部要求"值非 NULL"） | 永不锁存 |
+|---|---|---|
+| 余额类 key（`category='balance'`） | `balance_cents < 10`（分）—— **含 `0` 与负数** | `balance_cents IS NULL`（未知 ≠ 0，ADR-0003）· `unlimited = 1` |
+| 套餐类 key（`category='token-plan'`） | 落库的 `token_plan_remaining = 0` | `token_plan_remaining IS NULL`（"上游没说"≠ 0）· 仅"已到期"（到期归 `isUsable` 既有时效判据，**不进** `depleted`） |
+| 账号 | `balance_cents < 10`（分） | `balance_cents IS NULL` · 上游 `unlimited`（此时 `balanceCents` 按设计落 `NULL`） |
+
+- **阈值 `DEPLETED_BALANCE_THRESHOLD_CENTS = 10`（= 0.1 元）只有一份实现**：
+  `src/db/depletion.ts` 的 `isBalanceDepleted` / `isTokenPlanDepleted`。判定腿、写库腿、前端文案都指它。
+- **不做成 env**：这把锁判的是"钱够不够打一次请求"，0.1 元是业务口径不是部署参数。可配的话，
+  `depletedReason` 就得读成"按本部署的阈值"，契约只能写"以部署配置为准"，而运维看到一把 key 被锁
+  无法从契约回答"为什么是这把"。**判定腿的常量数与本节数逐字相同。**
+- **`unlimited` 结构上够不着这把锁**：无限额度 key 的 `balance_cents` 恒为 `NULL`（§15.7；上游占位值
+  `-331119` 落库会把"无限"变成"欠费"，ADR-0018 决策 8），而判据只对**非 NULL 值**判。代码里仍**显式**
+  再判一次 `unlimited`：这条不变量由驱动器与落库纪律两处共同维持，任何一处松了，
+  沉默的后果是"一整批无限额度 key 集体锁存"。
+- **`depletedReason` 枚举**：`"balance"`（余额 / 套餐余量耗尽）｜ `"account"`（其账号欠费级联）｜ `null`（未锁存）。
+  **`"token_plan"` 不进枚举**：套餐余量耗尽与余额不足是同一句话的事实（"这把 key 付不起账"），
+  分两个值只会让前端多一个必须处理、但处理方式完全相同的分支。要区分看 `category` 那一列。
+  （**ADR-0041 决策 8 的读面清单写的是三个取值——那是笔误**，以本节为准；接口形状未变，只是枚举少一个无用值。）
+
+### 20.3 粘性：只置位、从不自动清除
+
+```
+判据成立 且 depleted_at IS NULL  → 置位（写入首次发现的时刻与原因）
+判据不成立                        → 什么都不做（保持锁存）
+```
+
+- **只写一次**（`WHERE depleted_at IS NULL`）：反复刷新不推新时间戳、不写库。
+  `depletedAt` 因此是"最早发现它付不起账的时刻"，可当审计用。
+- **清锁只有一个入口**：管理面人工动作（§20.5）。**"余额回升自动解锁"被否**：它把业主要的
+  "用户可以自己再次核查"这一步删掉了 —— 余额回升 ≠ 这把 key 可以再用。
+- **清锁后若下次刷新仍透支 ⇒ 再次置位**（业主接受）。这也是"锁存不是一次性误判"的证明。
+
+### 20.4 判定腿（在哪些落库点打标）
+
+| 落库点 | 位置 |
+|---|---|
+| 模板查询回写（余额类） | `src/db/repo/keys.ts` `applyTemplateBalance` |
+| 模板查询回写（套餐类） | `src/db/repo/keys.ts` `applyTemplateTokenPlan` |
+| 手动录入余额 | `src/db/repo/keys.ts` `setKeyBalance`（人工录一个 `0` 也该锁） |
+| 手动改套餐余量 | `src/db/repo/keys.ts` `updateKey`（`tokenPlan` 写分支与上一行同一条判据：手填 `0` 也是"人工录一个 0"） |
+| 建 key 时带上金额 / 余量 | `src/db/repo/keys.ts` `createKey`（生而为 `0` 的 key 生而该锁；§15 批量建 key 的驱动器同走此函数） |
+| 套餐余量回填 | `src/db/repo/supplier-accounts.ts` `backfillSubscriptionTokenPlan` |
+| 账号刷新 | `src/api/services/supplier-accounts.ts` `refreshAccount`（判账号 + 级联） |
+
+- **热路径零新增**：以上全部发生在余额刷新任务 / 管理面写请求里。`/v1/*` 转发线程上仍然**一行 SQL 都没有**
+  （AGENTS.md §5）。
+- **"在途消耗"不触发锁存（登记边界）**：套餐 key 的余量在内存里随请求递减
+  （`remainingQuotaOf = token_plan_remaining - rt.spentTokens`），库里的数只在下一次余量回填时变。
+  所以一把套餐 key 可能在内存里已经烧干（被 `isUsable` 排除、不接流量）却还没被打标，
+  它会在下一次 `keys/sync` / 余额刷新落库时补上。要"烧干当场锁存"就得在热路径写库，代价大于收益。
+- **锁存不阻断余额刷新**：`decryptedKeyRefs` 只过滤软删，锁存 / 停用的 key **照常被刷新** ——
+  这正是"用户可以自己再次核查"的载体。
+
+### 20.5 解除（两个入口）
+
+| 入口 | 形状 | 语义 |
+|---|---|---|
+| key 批量（**扩枚举，不新增端点**） | `POST /api/keys/batch` `{ids, action:"undeplete"}` → `{updated}` | **清锁 + `enabled=1`**（幂等）。不存在的 id 静默不计入 `updated`（与既有 `enable` / `disable` 同语义） |
+| 账号（**新增端点**） | `POST /api/supplier-accounts/:id/undeplete` → `200 SupplierAccount` | 清账号锁 + 清该账号名下 `reason="account"` 的 key 锁（同样 `enabled=1`） |
+
+- **为什么是一个动作而不是两个**：业主的诉求是"重新启用"。做成"清标记"+"启用"两步，
+  用户点一次会以为完成了、实际还要再点一次；而只点"启用"（`action:"enable"`）**不清锁**（下条）。
+- **`enable` 不清锁（有意）**：批量启用是"把停用的都打开"。如果它顺手清锁，一次批量启用就能把整池
+  透支 key 放回去 —— "不会再回到正常的池"当场作废。**两条路分得很清**。
+- **`depleted` 从不为 `enabled` 所动**：锁存**只**写 `depleted_at` / `_reason`（+ `revision`），
+  绝不碰 `enabled`。所以上面两个入口写的 `enabled=1` 只可能覆盖一次**人工停用**，
+  不会覆盖"锁存造成的停用"这种东西（它不存在）。
+- **账号解除不要求 `revision`**：它不是"改字段"，是"解除一个自动置位的标记"，没有可覆盖的编辑冲突；
+  要求 `revision` 只会让"页面开着放一会儿再点"报 `409 REVISION_MISMATCH`。
+  （对照：`PATCH /api/supplier-accounts/:id` 改 `egressId` **要** `revision` —— 那是替换一个编辑值。）
+  两者都 `revision + 1`。
+- **审计**：`key.batch_undeplete` / `supplier.account.undeplete`，`detail` 只放计数或 id 串，**不含凭据**。
+  **不为"锁存"加审计动作**：那是系统动作不是人的动作，它有自己的时间戳。
+
+### 20.6 账号级：标记账号 + 级联其名下池内 key
+
+- 账号 `balance_cents < 10` ⇒ 账号置位（`reason="balance"`）+ 该账号**名下所有已入池、未软删**的 key 置位
+  （`reason="account"`）。级联走**一次 SQL**（按 `account_id` 选出 `pooled_key_id`），不逐把循环。
+- **级联包含套餐 key**（业主原话"关联key全部"），且这是**登记的可推翻推断**：
+  ≥ TierFlow 的套餐是单独购买的，账号钱包与套餐额度是两笔钱；账号欠费时套餐 key 是否真还能用，
+  **我们没有实测证据**。本版按业主的话全量级联（宁可少一把候选，也不要"看起来能跑、打出去就 402"）。
+  若实测证明账号欠费不影响套餐 key，收窄只需一处：级联 SQL 加 `AND uk.category = 'balance'`。
+- 账号的**无限额度**（上游 `unlimited` ⇒ `balanceCents = null`）同样**永不锁存**。
+- 账号 DTO 的 `status` **不动**：`status` 说的是会话 / 登录健康（`active` / `login_failed` /
+  `session_expired` / `unknown`），透支是资金事实 —— 一个 `active` 且余额为 `0` 的账号是**正常态**。
+
+### 20.7 网关侧
+
+- `KeyConfig` 新增**必填** `depleted: boolean`（`src/gateway/types.ts`）⇒ 编译器点出**每一个**构造点。
+  **必填而非可选**：可选字段漏赋值的默认值是 `false`（= 放行），那是**错误方向**上的默认。
+- `KEYS_SQL`（`src/wiring/store.ts`）增取 `k.depleted_at`；`isUsable()` 在 `key.status !== 'enabled'`
+  之后**紧接着**早退 `if (key.depleted) return false;` —— 放在冷却 / 并发判据之前：锁存不可自愈，先判它省掉后面全部计算。
+- **广播沿用既有信道**：置位 / 清除都 `appendChange('key', …)` + `revision + 1`。`'key'` 在
+  `SNAPSHOT_ENTITIES` 里 ⇒ 网关 ≤1s 重建快照，**不需要任何新机制**。
+- **`/v1/*` 零端点、零路径、零帧、零错误码变更**：变的只是"候选集合里少了几把"。
+  被锁空的上游照旧回 `503 NO_AVAILABLE_KEY`（既有码）。`GATEWAY_ERROR_CODES` / `hintCode` 零新增 ——
+  **透支是状态不是事件**，不进 §12.1 错误事件面。
+
+### 20.8 读面
+
+| 面 | 变更 |
+|---|---|
+| §3 Key 对象 | 纯加 `depleted: boolean` / `depletedAt: ISO8601\|null` / `depletedReason: "balance"\|"account"\|null` |
+| `GET /api/keys` | 新增可选筛选 `depleted=true\|false`（与既有 `enabled` / `health` 同形） |
+| §15.1 `SupplierAccount` | 纯加同三个字段（账号的 `depletedReason` 只可能是 `"balance"` / `null`） |
+| `GET /api/supplier-accounts` | 新增可选筛选 `depleted=true\|false` |
+| §12.2 `GET /api/observability/health` | `keys.depleted: int` + `keys.items[].depleted: boolean`（**不与运行态三分相加**） |
+
+**不动**：§6 `overview.keyHealth`（5 字段已冻结）· §7 `key_health` 帧（1s 帧不为一个低频配置事实改形状）·
+`gateway_health_snapshots`（**登记**：快照是"当时算出来的历史"，补一列会让全部历史行的该列为 `0`，
+而 `0` 在这里是**一个具体的断言**"那一刻没有透支 key"；透支是当前状态，读实时面即可）·
+§19 消费面（普通用户没有"key 池"这个概念，池被锁空时他拿到的仍是 503 `NO_AVAILABLE_KEY` —— 那本来就是他的形状）。
+
+### 20.9 与 `autoDisabled` 的边界（两者最像，故写在这里）
+
+| | `autoDisabled` | `depleted` |
+|---|---|---|
+| 触发 | 连续 `AUTH_INVALID` ≥ N 次（网关自己数） | 余额 / 余量落库时按判据算 |
+| 载体 | **内存**（不进 `key_runtime` 镜像，ADR-0010） | **落库**（`depleted_at`） |
+| 清除 | **任何一次成功请求立即清** | **只有人工** |
+| 存活 | 重启归零 | 跨重启、跨部署 |
+| 表达 | 三灯之一（`health=disabled`） | 第四轴（三灯不动） |
+
+一句话：`autoDisabled` 是"网关觉得这把 key 现在有问题"，`depleted` 是"这把 key 没钱了，
+而且这条事实在人核查之前不会变"。
+
+### 20.10 影响面
+
+| 面 | 变更 |
+|---|---|
+| `upstream_keys` | **+2 列**（`depleted_at TEXT` / `depleted_reason TEXT`），`hasColumn()` 守卫，`SCHEMA_VERSION` 仍为 **2** |
+| `supplier_accounts` | **+2 列**（同上） |
+| 老库升级 | **零动作**（新列 NULL = 未锁存，与加列前逐字相同） |
+| `/v1/*` | **零端点、零路径、零帧、零码**；`src/gateway/` 只动 `key-pool.ts` 一行 + `types.ts` 一个字段 |
+| `/api/*` | `POST /api/keys/batch` action 枚举 **+1**；`POST /api/supplier-accounts/:id/undeplete` **新增 1 个**；两个列表各 **+1 可选筛选**；三处 DTO **纯加字段** |
+| `ERROR_CODES` | **零新增** |
+| `GATEWAY_ERROR_CODES` / `hintCode` | **零新增** |
+| 审计动作 | 新增 `key.batch_undeplete` / `supplier.account.undeplete`（**不为"锁存"加审计**） |
+| DDL | 四列纯加列，**零迁移分支** |
+| `web/` | KeysPage / SupplierAccountsPage 透支标 + 筛选 + 「重新启用」；**零新依赖** |
+
+**升级即生效（写在最前）**：部署后**下一轮余额刷新**会给所有现存透支 key 打标。那不是回归、是本版的目的；
+但它同时意味着"列表里会突然多出一批红标"，运维要知道那是预期形状、不是故障。
+
+**已知边界**（逐条登记，与 ADR-0041 同表）：① 在途消耗不即时锁存；② 级联含套餐 key 是推断；
+③ 「重新启用」是复合动作，**不提供**"只清锁、保持停用"的入口（要那个组合：先「重新启用」再 `PATCH enabled=false`）；
+④ 阈值不做成 env；⑤ 透支不进错误事件面；⑥ 老库的 `ALTER TABLE ADD COLUMN` 加不上 `CHECK`
+（新库 `CREATE TABLE` 文本里 `depleted_reason` 带 `CHECK`，老库只加 `TEXT`；判据在写路径不在 DDL，这条漂移登记在此）。
+
+---
 
 **v1.16.0 的空调子们**：`/v1/*` **零端点、零路径变更**、`src/gateway/` **零改动**、
 DDL 零（`SCHEMA_VERSION` 仍为 2）、`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` 零新增、

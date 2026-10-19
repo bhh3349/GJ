@@ -375,6 +375,14 @@ export type KeyCategory = 'balance' | 'token-plan';
 /** 网关运行态健康度，管理端只读。`disabled` 优先于 `cooling`。 */
 export type KeyHealth = 'healthy' | 'cooling' | 'disabled';
 
+/**
+ * 透支锁存的解除原因（契约 §20.2）。
+ *
+ * `'balance'` = 自己的余额 / 套餐余量耗尽；`'account'` = 其所属账号欠费级联（§20.6）。
+ * **没有 `'token_plan'`**：套餐余量耗尽与余额不足是同一句话的事实，要区分看 `category`。
+ */
+export type DepletedReason = 'balance' | 'account';
+
 /** §10：只有这五类计入 key 失败。 */
 export type FailureReason =
   | 'AUTH_INVALID'
@@ -411,6 +419,17 @@ export interface UpstreamKey {
    * 两者必须分开呈现：无限额度渲染成徽标，绝不渲染成 `—` / 「未知」 / 任何金额或负数。
    */
   unlimited: boolean;
+  /**
+   * **与 `enabled` / `health` 正交的第四轴**（契约 §20.1）：它答的是「有没有钱付账」。
+   *
+   * `enabled=true` + `health="healthy"` + `depleted=true` 是**完全合法的组合** ——
+   * 没被停用、没在冷却，只是没钱了、网关不会选它。所以**透支时必须不能只画三灯**，
+   * 那等于把「没钱」渲染成「可用」。
+   */
+  depleted: boolean;
+  /** 「最早发现它付不起账的时刻」（只置位一次，粘性）。未锁存为 `null`。 */
+  depletedAt: Iso8601 | null;
+  depletedReason: DepletedReason | null;
   health: KeyHealth;
   cooldownUntil: Iso8601 | null;
   consecutiveFailures: number;
@@ -433,6 +452,8 @@ export interface KeyListQuery extends PageQuery {
   category?: KeyCategory;
   enabled?: boolean;
   health?: KeyHealth;
+  /** §20.8：透支锁存筛选（第四轴，可与 `enabled` / `health` 并用）。 */
+  depleted?: boolean;
   q?: string;
   /** 默认不含已软删；`true` 才显式查询。 */
   includeDeleted?: boolean;
@@ -467,7 +488,13 @@ export interface KeyBalanceUpsertRequest {
 
 export interface KeyBatchRequest {
   ids: string[];
-  action: 'enable' | 'disable';
+  /**
+   * `'undeplete'`（§20.5）= 清锁 + `enabled = 1`，**一个动作**。
+   *
+   * 与 `'enable'` 的区别是界面上的关键点：`'enable'` **不清锁**（下一条注释），
+   * 用「启用」去解一把透支的 key 是最自然的误操作，而它不会报错、只是什么都没变。
+   */
+  action: 'enable' | 'disable' | 'undeplete';
 }
 
 export interface KeyBatchResult {
@@ -1193,6 +1220,8 @@ export interface ObservabilityKeyItem {
   health: KeyHealth;
   cooldownUntil: Iso8601 | null;
   consecutiveFailures: number;
+  /** 第四轴，**与 `health` 正交**：没钱的 key 完全可以是 `health="healthy"`（§20.1）。 */
+  depleted: boolean;
 }
 
 /** §12.2 `keys.*`：`total` 与三个分档计数同源（`key_runtime`，新鲜度 ≤1s）。 */
@@ -1201,6 +1230,12 @@ export interface ObservabilityKeys {
   healthy: number;
   cooling: number;
   disabled: number;
+  /**
+   * 透支计数（§12.2 / §20.1）。**不与上面三分相加**（`healthy + cooling + disabled = total`），
+   * 它是一根**正交轴**：一把 `healthy` 的 key 可以同时进这一格。
+   * 相加会把 `total` 读大一倍，而多出来的那些"key"根本不存在。
+   */
+  depleted: number;
   /** 全量 key 明细（无分页）。 */
   items: ObservabilityKeyItem[];
 }
@@ -1468,6 +1503,11 @@ export interface SupplierAccount {
    * 写入口 = `PATCH /api/supplier-accounts/:id`（`egressId` + `revision`，乐观锁）。
    */
   egressId: string | null;
+  /** 见 `UpstreamKey.depleted`：与 `status` **正交**的资金事实（§20.1 / §20.6）。 */
+  depleted: boolean;
+  depletedAt: Iso8601 | null;
+  /** 账号只可能是 `'balance'` / `null` —— 没有「所属账号欠费」这种东西（§20.6）。 */
+  depletedReason: DepletedReason | null;
   revision: number;
   createdAt: Iso8601;
   updatedAt: Iso8601;
@@ -1519,6 +1559,8 @@ export interface SupplierSubscriptionRow extends SupplierSubscription {
 export interface SupplierAccountListQuery extends PageQuery {
   upstreamId?: string;
   status?: SupplierAccountStatus;
+  /** §20.8：透支锁存筛选（与 `status` 正交，可并用）。 */
+  depleted?: boolean;
   q?: string;
 }
 

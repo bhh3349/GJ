@@ -100,6 +100,7 @@ function makeConfig(dbPath: string, over: Partial<AppConfig> = {}): AppConfig {
     modelProbeEnabled: true,
     modelProbeMaxModels: 10,
     adminWebDist: null,
+    egressBudgetCapacity: null,
     publicHost: null,
     ...over,
   };

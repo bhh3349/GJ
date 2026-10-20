@@ -12,6 +12,7 @@ description: sub-gateway 项目（OpenAI 兼容多上游 key 池网关）的仓�
 | 需求 | 文件 |
 |---|---|
 | 起停实例、管理面 curl、错误事件/日志、直接查 SQLite | `references/ops-manual.md` |
+| 部署到容器 / 云服务器、备份、镜像搬运、裸 IP 安全项 | `references/deploy-ops.md` |
 | `docs/api-contract.md`（4,789 行 / 120 个标题，当前 v1.17.2）章节 → 行号 | `references/contract-index.md` |
 | `src/` `web/` 目录职责、关键文件、热路径红线 | `references/module-map.md` |
 | ADR-0001…0042 一行表（含"什么时候必须去读它"） | `references/adr-index.md` |

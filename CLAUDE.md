@@ -11,6 +11,7 @@
 | 要干的事 | 读哪个 |
 |---|---|
 | 起实例 / 发管理面请求 / 查错误日志 / 直接翻库 | `references/ops-manual.md` |
+| 部署到容器或云服务器 / 备份 / 镜像搬运 / 裸 IP 安全 | `references/deploy-ops.md`（权威全文 `deploy/docker-deploy.md`） |
 | 查契约（约 4.7k 行的 `docs/api-contract.md`） | `references/contract-index.md` 拿行号，再定点读 |
 | 不知道某个功能在哪个目录 / 热路径约束 | `references/module-map.md` |
 | 想知道"当初为什么这么定" | `references/adr-index.md`（42 份 ADR 的一行表，点名了才读全文） |

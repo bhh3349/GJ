@@ -120,10 +120,21 @@ AdGuard，回到同一个坑。
 ## 4. 数据与备份
 
 - SQLite 在**命名卷** `sub-gateway-data`（不是 bind —— NFS/CIFS 上 fcntl 锁不可靠）。
-- 备份：
+  compose 挂的实际卷名带项目名前缀（本目录 = `sub_sub-gateway-data`），见坑 1。
+- 备份用 `deploy/backup.sh`（**装箱脚本，别手敲 `cp`**）：
+
   ```bash
-  docker run --rm -v sub-gateway-data:/data -v $PWD:/out alpine cp /data/gateway.db /out/
+  scp deploy/backup.sh deploy/snapshot.cjs root@<host>:/opt/sub/
+  chmod 700 /opt/sub/backup.sh
+  /opt/sub/backup.sh                      # 先手动跑一遍确认
+  crontab -e                              # 再挂上：
+  # 30 3 * * * /opt/sub/backup.sh >> /var/log/sub-backup.log 2>&1
   ```
+
+  为什么不是 `cp`：源库有未 checkpoint 的 WAL（实测 -wal 有 4MB），`cp` 拿到的是
+  **撕裂的库**。脚本用只读连接 + `VACUUM INTO` 出完整快照，保留最近 14 天。
+  为什么要有 `snapshot.cjs` 而不是 `node -e`：引号在 sh → docker → node 三层之间
+  必炸（实测 `SyntaxError: Invalid regular expression flags`），文件化后只剩一层。
 - 从裸跑实例迁移数据：先停裸实例（保证 WAL 落盘），把 `data/*.db` 灌进卷：
   ```bash
   docker run --rm -v sub-gateway-data:/data -v $PWD:/src alpine sh -c \
@@ -149,6 +160,48 @@ docker compose build && docker compose up -d   # 数据在命名卷，重建不�
 - 重建前做 DB 快照（VACUUM INTO 只读连接跑，`docker cp` 拷出来），数据虽在命名卷
   理论上不动，但快照在手，任何翻车都能回到重建前一刻。
 - 建议同时打日期标签（`-t sub-gateway:2026-10-20`），回滚就是 `docker tag` 换回去 + recreate。
+
+## 5b. 全新部署到云服务器（国内网 + 裸 IP）
+
+适用于**服务器拉不动作**的场景（国内机器打不通 Docker Hub / GitHub）。方案：
+本地构建 → 三个 tar 包搬运 → 服务器只 `docker load`。**服务器全程不碰任何 registry**。
+
+```bash
+# —— 本地：打三个包 ——
+docker build -t sub-gateway:local .          # 镜像
+docker save sub-gateway:local | gzip > sub-gateway-image.tar.gz
+git archive HEAD | gzip > sub-src.tar.gz      # 源码：无 .git、无 .env（.gitignore 挡着）
+tar czf web-dist.tar.gz -C web dist           # 前端产物：宿主机 pnpm web:build 产出
+
+# —— 传输 + 校验（镜像约 235MB，国内跨机实测 30s）——
+scp sub-*.tar.gz web-dist.tar.gz root@<host>:/root/
+ssh root@<host> 'cd /root && sha256sum *.tar.gz'   # 与本地逐条比对，不等就是传坏了
+
+# —— 服务器：落盘 ——
+docker load < /root/sub-gateway-image.tar.gz
+mkdir -p /opt/sub/web
+tar xzf /root/sub-src.tar.gz -C /opt/sub
+tar xzf /root/web-dist.tar.gz -C /opt/sub/web   # 产出 /opt/sub/web/dist
+```
+
+然后按第 2 节配 `.env`（全新库 = 全新 `MASTER_KEY`，见下），按第 3 节启动。
+
+**全新部署的三个必改项**：
+
+1. `MASTER_KEY` 现生成、**立刻存进密码管理器**：换 key = 库内全部密文作废，
+   账号池凭据全在里面。生成用容器里的 node，不用在服务器上另装：
+   `docker run --rm sub-gateway:local node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
+2. `ADMIN_PASSWORD` 必填且 ≥8 字符（否则**故意启动失败**，不降级）。
+3. **裸 IP 下管理面必须绑回环**：compose 缺省是 `"${PORT_ADMIN:-4101}:4001"`，
+   即 `0.0.0.0` —— 那是带会话 cookie 的完整控制面，等于把后台交给全网扫描器。
+   改成 `"127.0.0.1:${PORT_ADMIN:-4101}:4001"`，远程访问走 SSH 隧道：
+   `ssh -N -L 4101:127.0.0.1:4101 root@<host>`，浏览器开 `http://127.0.0.1:4101`。
+   裸 IP + http 时 `COOKIE_SECURE` 保持 `false`（设 true 会话 cookie 发不出去）。
+
+第 6 节那条"管理面对整个网段开放"就是这个缺省值；对外部署前**先改这里再启动**，
+别等上线后补——中间那段时间后台是敞的。
+
+`ADMIN_WEB_DIST` 在 `.env` 里要写 `/app/web/dist`（容器内路径，不是宿主机的 `/opt/sub/web/dist`）。
 
 ## 6. 已知不粉饰
 

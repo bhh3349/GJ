@@ -1334,6 +1334,14 @@ export interface ObservabilityErrorEvent {
   keyId: string | null;
   /** `****后4位`；没有"哪一把 key"可言时产出侧写 `****`（退化形态），不是 `null`。 */
   keyMasked: string | null;
+  /** v1.17.2 新增：客户端腿——网关 key 掩码，仅已过鉴权的拒绝（组级 429/403）；401 恒 null。 */
+  clientKeyMasked: string | null;
+  /** v1.17.2 新增：来源腿——调用方 socket 层 IP（永不读 XFF）。 */
+  sourceIp: string | null;
+  /** v1.17.2 新增：401 且带 Bearer 时入站废 key 的 sha256 前 8 hex；其余恒 null。 */
+  invalidKeyFingerprint: string | null;
+  /** v1.17.2 新增：尝试明细 JSON 串（掩码+因由+状态码），仅 attempts>0 的终态；上限 16 项。 */
+  attemptTrail: string | null;
   stream: boolean;
   upstreamStatus: number | null;
   /** **真实**上游尝试次数（`0` = 一次都没发出去）。 */

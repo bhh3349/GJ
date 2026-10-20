@@ -587,3 +587,79 @@ describe('v1.15.0 加列（admin_users role / group_id / display_name，契约 �
     expect(columnsOf(db, 'admin_users').filter((c) => c === 'display_name')).toHaveLength(1);
   });
 });
+
+/* ------------- v1.17.2 / ADR-0042：gateway_error_events 三腿四列 ------------- */
+
+/** v1.17.2 之前形态的 gateway_error_events：四列都还没有，且已有一行历史事件。 */
+function seedPreV1172ErrorEventsDatabase(path: string): void {
+  const legacy = new Database(path);
+  legacy.exec(`
+    CREATE TABLE gateway_error_events (
+      id TEXT PRIMARY KEY, ts TEXT NOT NULL, request_id TEXT,
+      severity TEXT NOT NULL CHECK (severity IN ('warn','error')),
+      category TEXT NOT NULL, status INTEGER NOT NULL, gateway_code TEXT,
+      failure_reason TEXT, endpoint TEXT NOT NULL, model TEXT,
+      upstream_id TEXT, key_id TEXT, key_masked TEXT,
+      stream INTEGER NOT NULL DEFAULT 0, upstream_status INTEGER,
+      attempts INTEGER NOT NULL DEFAULT 0, candidates INTEGER, latency_ms INTEGER,
+      message TEXT
+    );
+  `);
+  legacy
+    .prepare(
+      `INSERT INTO gateway_error_events (id, ts, severity, category, status, endpoint, stream, attempts)
+       VALUES ('err_old', '2026-10-19T01:39:00.000Z', 'error', 'NO_AVAILABLE_KEY', 429, '/v1/chat/completions', 0, 0)`,
+    )
+    .run();
+  legacy.close();
+}
+
+describe('v1.17.2 加列（gateway_error_events 三腿四列，ADR-0042）', () => {
+  it('新库直接带四列，SCHEMA_VERSION 不递增', () => {
+    const db = open(tempDbPath());
+    expect(columnsOf(db, 'gateway_error_events')).toEqual(
+      expect.arrayContaining(['client_key_masked', 'source_ip', 'invalid_key_fingerprint', 'attempt_trail']),
+    );
+    // 纯加列 ⇒ 版本号不动（判据是"列在不在"，同 v1.4.x / v1.7.1 / v1.11.0 / v1.15.0 那几批）
+    expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+  });
+
+  it('老库必须真发 ALTER，老行四列 NULL = "该事件没带这腿"（不是空串、不是被回填）', () => {
+    const path = tempDbPath();
+    seedPreV1172ErrorEventsDatabase(path);
+
+    // 前置断言：种子库确实没有这四列。少了它，"migrate 什么都没做"也可能看起来通过。
+    const legacy = new Database(path);
+    expect(columnsOf(legacy, 'gateway_error_events')).not.toContain('client_key_masked');
+    expect(columnsOf(legacy, 'gateway_error_events')).not.toContain('source_ip');
+    expect(columnsOf(legacy, 'gateway_error_events')).not.toContain('invalid_key_fingerprint');
+    expect(columnsOf(legacy, 'gateway_error_events')).not.toContain('attempt_trail');
+    legacy.close();
+
+    const db = open(path);
+    expect(columnsOf(db, 'gateway_error_events')).toEqual(
+      expect.arrayContaining(['client_key_masked', 'source_ip', 'invalid_key_fingerprint', 'attempt_trail']),
+    );
+    const row = db
+      .prepare('SELECT client_key_masked, source_ip, invalid_key_fingerprint, attempt_trail FROM gateway_error_events WHERE id = ?')
+      .get('err_old') as Record<'client_key_masked' | 'source_ip' | 'invalid_key_fingerprint' | 'attempt_trail', string | null>;
+    // 部署后不存在存量行被回填的中间态：新腿只随**新事件**逐条产生
+    expect(row.client_key_masked).toBeNull();
+    expect(row.source_ip).toBeNull();
+    expect(row.invalid_key_fingerprint).toBeNull();
+    expect(row.attempt_trail).toBeNull();
+  });
+
+  it('加列幂等：重复 migrate 不抛 duplicate column name', () => {
+    const path = tempDbPath();
+    seedPreV1172ErrorEventsDatabase(path);
+    const db = open(path);
+    expect(() => {
+      migrate(db);
+      migrate(db);
+    }).not.toThrow();
+    for (const column of ['client_key_masked', 'source_ip', 'invalid_key_fingerprint', 'attempt_trail']) {
+      expect(columnsOf(db, 'gateway_error_events').filter((c) => c === column)).toHaveLength(1);
+    }
+  });
+});

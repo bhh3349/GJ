@@ -336,3 +336,143 @@ describe('仓储层兜底', () => {
     expect(e?.message ?? '').not.toContain(cred);
   });
 });
+
+describe('attemptTrail 序列化（v1.17.2 / ADR-0042）', () => {
+  /** trail 项：网关侧传 keyId（掩码映射归 sink），与 ErrorEventEntry.attemptTrail 同形 */
+  const trailItem = (keyId: string, reason = 'AUTH_INVALID', status = 401) => ({ keyId, reason, status });
+
+  it('keyId → 掩码映射走 maskOf（唯一映射处）；空 keyId 兜底 ****；无 trail 落 null', () => {
+    const db = setup();
+    const sink = createErrorEventSink({ db, maskOf });
+    try {
+      sink.record(entry({ keyId: 'k2', attemptTrail: [trailItem('k1'), trailItem('k2', 'NETWORK', 0)] }));
+      sink.flush();
+      const e = listGatewayErrorEvents(db, { page: 1, pageSize: 10 }).items[0];
+      const trail = JSON.parse(e?.attemptTrail ?? '[]') as { keyMasked: string; reason: string; status: number }[];
+      expect(trail).toEqual([
+        { keyMasked: '****k1', reason: 'AUTH_INVALID', status: 401 },
+        { keyMasked: '****k2', reason: 'NETWORK', status: 0 },
+      ]);
+      // 顶层 keyMasked 与 trail 各自映射，不串
+      expect(e?.keyMasked).toBe('****k2');
+
+      // 空 trail 落 NULL（不是空串）：空串是第二种"空"，会让 `IS NULL` 的历史语义失真
+      sink.record(entry({ attemptTrail: [] }));
+      sink.flush();
+      const rows = listGatewayErrorEvents(db, { page: 1, pageSize: 10 }).items;
+      expect(rows.some((x) => x.attemptTrail === null)).toBe(true);
+      expect(rows.every((x) => x.attemptTrail !== '')).toBe(true);
+    } finally {
+      sink.close();
+    }
+  });
+
+  it('项数上限 16：超出保留**前** 16（失败按轮换次序发生，前几把才是起点）', () => {
+    const db = setup();
+    const sink = createErrorEventSink({ db, maskOf });
+    const trail = Array.from({ length: 20 }, (_, i) => trailItem(`key_${String(i).padStart(2, '0')}`));
+    try {
+      sink.record(entry({ attemptTrail: trail }));
+      sink.flush();
+      const e = listGatewayErrorEvents(db, { page: 1, pageSize: 10 }).items[0];
+      const parsed = JSON.parse(e?.attemptTrail ?? '[]') as { keyMasked: string }[];
+      expect(parsed).toHaveLength(16);
+      // 保留前 16：第一把（轮换起点）必须在
+      expect(parsed[0]?.keyMasked).toBe(maskOf(trail[0]!.keyId));
+      expect(parsed.at(-1)?.keyMasked).toBe(maskOf(trail[15]!.keyId));
+      expect(parsed.some((x) => x.keyMasked === maskOf(trail[19]!.keyId))).toBe(false);
+    } finally {
+      sink.close();
+    }
+  });
+
+  it('字符上限只兜畸形输入：规范 16 项原样放得下（项数上限才是硬口径）', () => {
+    const db = setup();
+    const sink = createErrorEventSink({ db, maskOf });
+    // 最长合法 reason（`INSUFFICIENT_BALANCE`，20 字符）+ 随机 keyId：合法输入的最坏形状
+    const trail = Array.from({ length: 16 }, (_, i) =>
+      trailItem(`key_${Math.random().toString(36).slice(2, 10)}_${String(i)}`, 'INSUFFICIENT_BALANCE', 402),
+    );
+    try {
+      sink.record(entry({ attemptTrail: trail }));
+      sink.flush();
+      const e = listGatewayErrorEvents(db, { page: 1, pageSize: 10 }).items[0];
+      const parsed = JSON.parse(e?.attemptTrail ?? '[]') as unknown[];
+      // 契约承诺的硬口径：**最多 16 条**必须真的落满 16 条 ——
+      // 若字符上限设得比合法输入还小，这里会掉到 8 条，「16」就成了空头承诺。
+      expect(parsed).toHaveLength(16);
+    } finally {
+      sink.close();
+    }
+  });
+
+  it('畸形输入（超长 reason）触发按项丢弃：**永不落撕裂的 JSON**，最少保 1 项', () => {
+    const db = setup();
+    const sink = createErrorEventSink({ db, maskOf });
+    // 每项约 120 字符 × 16 ≈ 2KB > 2048 的兜底线 ⇒ 必然按项丢尾部
+    const fat = (keyId: string) => trailItem(keyId, 'A'.repeat(80), 401);
+    const trail = Array.from({ length: 16 }, (_, i) => fat(`key_pad_${String(i).padStart(2, '0')}`));
+    try {
+      sink.record(entry({ attemptTrail: trail }));
+      sink.flush();
+      const e = listGatewayErrorEvents(db, { page: 1, pageSize: 10 }).items[0];
+      const raw = e?.attemptTrail ?? '';
+      // 撕裂判据：必须能原样 parse 回合法 JSON 数组（按字符截断的串在这里当场炸）
+      const parsed = JSON.parse(raw) as { keyMasked: string }[];
+      expect(Array.isArray(parsed)).toBe(true);
+      // 最少保 1 项 —— 保不住就整列 null，不留残串
+      expect(parsed.length).toBeGreaterThanOrEqual(1);
+      expect(parsed.length).toBeLessThan(16);
+      // 丢的是尾部，第一项（轮换起点）永远在
+      expect(parsed[0]?.keyMasked).toBe('****d_00');
+    } finally {
+      sink.close();
+    }
+  });
+
+  it('trail 整串过凭据 scrub：reason/mask 夹带的凭据形状不会原样落库', () => {
+    const db = setup();
+    const sink = createErrorEventSink({ db, maskOf });
+    const cred = 'sk-ant-' + 'C'.repeat(20);
+    try {
+      // 形状上不该发生的输入（reason 是枚举、keyId 是 id），但 sink 是"最后一站"：
+      // 上游回显被拼进任何字段都拦在这里（幂等，与 message 的双重抹同一理由）
+      sink.record(entry({ attemptTrail: [trailItem('k1', `echoed ${cred}`)] }));
+      sink.flush();
+      const e = listGatewayErrorEvents(db, { page: 1, pageSize: 10 }).items[0];
+      expect(e?.attemptTrail ?? '').not.toContain(cred);
+      expect(e?.attemptTrail).toContain('****');
+    } finally {
+      sink.close();
+    }
+  });
+
+  it('三腿落库形状：clientKeyMasked / sourceIp / invalidKeyFingerprint 透传，空串归 null', () => {
+    const db = setup();
+    const sink = createErrorEventSink({ db, maskOf });
+    try {
+      sink.record(
+        entry({
+          keyId: '',
+          clientKeyMasked: '****abcd',
+          sourceIp: '127.0.0.1',
+          invalidKeyFingerprint: 'deadbeef',
+        }),
+      );
+      sink.record(entry({ keyId: '', clientKeyMasked: '', sourceIp: '', invalidKeyFingerprint: '' }));
+      sink.flush();
+      const items = listGatewayErrorEvents(db, { page: 1, pageSize: 10 }).items;
+      const full = items.find((e) => e.clientKeyMasked !== null);
+      expect(full?.clientKeyMasked).toBe('****abcd');
+      expect(full?.sourceIp).toBe('127.0.0.1');
+      expect(full?.invalidKeyFingerprint).toBe('deadbeef');
+      // 空串按"没这腿"落 null：不留第二种"空"的形态（与 message 空串同一条纪律）
+      const empty = items.find((e) => e.clientKeyMasked === null);
+      expect(empty?.clientKeyMasked).toBeNull();
+      expect(empty?.sourceIp).toBeNull();
+      expect(empty?.invalidKeyFingerprint).toBeNull();
+    } finally {
+      sink.close();
+    }
+  });
+});

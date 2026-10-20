@@ -185,6 +185,37 @@ function renderHealth(health: HealthMetricsDto): string {
   });
 }
 
+/**
+ * `attemptTrail` 的紧凑渲染（v1.17.2 / ADR-0042）。
+ *
+ * 落库形态是 JSON 数组串，直接塞进 prompt 会把单行事件撑成十几行，且括号引号对模型没有信息量；
+ * 压成 `****ab12=AUTH_INVALID/401,****cd34=NETWORK/0` —— 每项三件事（哪把 / 怎么死的 / 什么状态码）
+ * 一件不少，正是"批量挂时各把候选怎么死的"这个问题的答案。
+ *
+ * **解析不出就原样回退**（与 `web` 侧 `parseTrail` 同一处置）：注入块的纪律是"观测数据宁可难看
+ * 也不许因渲染问题消失"。形状由服务端自己写（`error-event-sink.ts` 序列化），畸形只可能来自
+ * 老库或人工改库。
+ *
+ * **不设第二道上限**：项数上限 16 是 §12.1 唯一的硬口径（`attempt_trail` 列本身已被截到 16），
+ * 这里再加一个"渲染时只留 N 项"就会变成第二个上限 —— 那正是本批消灭的"两个上限里有一个是空头承诺"。
+ */
+function renderTrail(raw: string): string {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) return raw;
+    const items: string[] = [];
+    for (const entry of parsed) {
+      if (typeof entry !== 'object' || entry === null) return raw;
+      const e = entry as Record<string, unknown>;
+      if (typeof e.keyMasked !== 'string' || typeof e.reason !== 'string' || typeof e.status !== 'number') return raw;
+      items.push(`${e.keyMasked}=${e.reason}/${e.status}`);
+    }
+    return items.join(',');
+  } catch {
+    return raw;
+  }
+}
+
 /** 一条事件的单行渲染。字段全部来自 §12.1 DTO（已脱敏），不做二次加工。 */
 function renderEvent(event: GatewayErrorEventDto): string {
   const parts = [`#${event.id}`, event.ts, event.category, event.severity, `status=${event.status}`];
@@ -193,6 +224,14 @@ function renderEvent(event: GatewayErrorEventDto): string {
   if (event.upstreamId !== null) parts.push(`upstream=${event.upstreamId}`);
   // 只给掩码。这是"注入内容只含抹名引用"（§13 头注纪律 3）在 prompt 这一侧的落点。
   if (event.keyMasked !== null) parts.push(`key=${event.keyMasked}`);
+  // v1.17.2 / ADR-0042 三腿的另两条 + 尝试明细。同一条纪律（只含抹名引用）：掩码、IP、
+  // 指纹、逐把失败因由都不是凭据 —— §12 头注点名本端点是 §12.1 的**两个消费者之一**
+  // （"排障的人"与"内嵌 AI 助手"），观测面补齐了而注入侧不补，助手就答不了
+  // "401 是哪来的 / 哪把网关 key 被限了 / 502 全灭时各把怎么死的"—— 正是业主本次要查的问题。
+  if (event.clientKeyMasked !== null) parts.push(`clientKey=${event.clientKeyMasked}`);
+  if (event.invalidKeyFingerprint !== null) parts.push(`keyFp=${event.invalidKeyFingerprint}`);
+  if (event.sourceIp !== null) parts.push(`src=${event.sourceIp}`);
+  if (event.attemptTrail !== null) parts.push(`trail=${renderTrail(event.attemptTrail)}`);
   parts.push(`attempts=${event.attempts}`);
   if (event.candidates !== null) parts.push(`candidates=${event.candidates}`);
   if (event.upstreamStatus !== null) parts.push(`upstreamStatus=${event.upstreamStatus}`);

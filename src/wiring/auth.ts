@@ -42,6 +42,9 @@ export function createDbGatewayAuth(db: Db): GatewayAuth {
         tpm: row.tpm,
         dailyQuota: row.daily_quota,
         authorizedModels,
+        // v1.17.2 / ADR-0042 客户端腿：这把网关 key 的掩码（鉴权同一次查行顺带），组级
+        // 429 / 403 的拒绝事件靠它回答"谁的调用被拒了"。401 路径到不了这里（无组上下文）。
+        gatewayKeyMasked: row.maskedKey,
       };
     },
   };

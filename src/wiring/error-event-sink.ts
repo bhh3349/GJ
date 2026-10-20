@@ -15,10 +15,26 @@ import type { GatewayErrorCategory, GatewayErrorSeverity } from '../api/dto.js';
 import type { Db } from '../db/database.js';
 import type { ErrorEventEntry, ErrorEventSink } from '../gateway/ports.js';
 import { CLIENT_ABORTED_STATUS } from '../db/repo/gateway-events.js';
-import { fallbackMask, scrubMessage } from '../util/redact.js';
+import { fallbackMask, scrubCredentials, scrubMessage } from '../util/redact.js';
 
 const DEFAULT_FLUSH_INTERVAL_MS = 500;
 const DEFAULT_MAX_QUEUE = 2000;
+
+/** attemptTrail 的项数上限（契约 §12.1）：定位"批量挂"的形状够了，115 把全 trail 只会是噪声 */
+const MAX_TRAIL_ITEMS = 16;
+/**
+ * 序列化后 trail 的字符上限：**畸形输入的兜底，不是常规口径**（契约 §12.1）。
+ *
+ * 定这个数的依据是"合法输入碰不到它"：合法项 = 掩码 8 字符 + `reason`（`FailureReason` 枚举，
+ * 最长为 `INSUFFICIENT_BALANCE` 20）+ `status` ≤ 4 + 字段名与标点约 34 ⇒ 单项 ≤ 66 字符，
+ * 16 项封顶约 1,060 字符。取 2048（≈ 该项数的两倍）⇒ **项数上限 16 永远是先触发的那个**。
+ *
+ * 为什么不是 512：那个值会让字符上限**先**触发（规范项约 60 字符 × 16 ≈ 1,000），
+ * 于是契约里"最多 16 项"变成永远兑现不了的承诺 —— 实测只能留 8 项，而调用方从文档里
+ * 推不出这一点（本批要消灭的正是这类"两个上限里有一个是空头承诺"）。
+ * 真正需要 512 的是 `message`；trail 是结构化的，按**项**丢尾部才是它的正确粒度。
+ */
+const MAX_TRAIL_CHARS = 2048;
 
 /** 契约 §10 里网关会用到的码值。与 `src/gateway/errors.ts` 的 GATEWAY_ERROR_CODES **值**一致。 */
 const CODE = {
@@ -136,6 +152,38 @@ export function createErrorEventSink(options: ErrorEventSinkOptions): BufferedEr
   let droppedCount = 0;
 
   /**
+   * attemptTrail 序列化（契约 §12.1 `attemptTrail` / ADR-0042）。**唯一实现处**：
+   * 网关侧传 keyId（内核无掩码访问权），掩码在这里按 `maskOf` 统一映射 —— 与 `keyMasked`
+   * 同一条纪律，掩码口径只有一个来源。
+   *
+   * 三道上限，全部在**序列化前/中**处理，落库串**永不撕裂**：
+   *   1. 项数截到 16（超出保留**前** 16 —— 失败按轮换次序发生，前几把才是起点）；
+   *   2. 序列化后超 `MAX_TRAIL_CHARS` 则按序丢尾部项重试，最少保 1 项（仍超则整列落 null）——
+   *      **合法输入碰不到这一档**（见该常量的推导），它只对畸形 `reason` 这类输入兜底，
+   *      所以"最多 16 项"才是调用方实际能看到的口径；
+   *   3. 整串过 `scrubCredentials`（只抹不截 —— `scrubMessage` 的截断会撕裂 JSON）。
+   *      项内只有掩码/因由/状态码，scrub 是"最后一站"式的兜底（幂等）。
+   *
+   * `keyId === ''` 落 `****` 而不是 null：与顶层 `keyMasked` 同一条纪律 ——
+   * 这一项确实对应一次尝试，只是认不出是哪把（null 的语义是"没有这一项"）。
+   */
+  function serializeTrail(trail: ErrorEventEntry['attemptTrail']): string | null {
+    if (trail === undefined || trail.length === 0) return null;
+    const items = trail.slice(0, MAX_TRAIL_ITEMS).map((t) => ({
+      keyMasked: t.keyId === '' ? fallbackMask() : maskOf(t.keyId),
+      reason: t.reason,
+      status: t.status,
+    }));
+    let json = JSON.stringify(items);
+    while (items.length > 1 && json.length > MAX_TRAIL_CHARS) {
+      items.pop();
+      json = JSON.stringify(items);
+    }
+    if (json.length > MAX_TRAIL_CHARS) return null;
+    return scrubCredentials(json);
+  }
+
+  /**
    * 队列满：丢**最旧**的。与 usage-sink 相反的选择理由：
    * 用量日志丢旧的是因为它量大且可重建；错误事件是稀疏的，丢旧的同样是"保住刚发生的",
    * 但**必须计数** —— 一个会静默丢数据的观测系统比没有观测系统更误导（契约 §12.2 `dropped`）。
@@ -174,6 +222,12 @@ export function createErrorEventSink(options: ErrorEventSinkOptions): BufferedEr
       // 没有 keyId 就谈不上"哪把 key"：写 `****` 而不是 null，
       // 因为 null 的语义是"这次失败与某把具体 key 无关"（契约 §12.1），两者不能混同。
       keyMasked: keyId === null ? fallbackMask() : maskOf(keyId),
+      // v1.17.2 / ADR-0042 三腿：掩码/指纹/IP 网关侧给什么用什么（净化规则在网关侧
+      // 已按字段语义收窄），trail 的 keyId → 掩码映射在 `serializeTrail`（唯一映射处）。
+      clientKeyMasked: entry.clientKeyMasked ?? null,
+      sourceIp: entry.sourceIp ?? null,
+      invalidKeyFingerprint: entry.invalidKeyFingerprint ?? null,
+      attemptTrail: serializeTrail(entry.attemptTrail),
       stream: entry.stream,
       upstreamStatus: entry.upstreamStatus,
       attempts: entry.attempts,

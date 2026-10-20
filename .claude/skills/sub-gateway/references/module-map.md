@@ -34,6 +34,7 @@
 
 ### src/wiring/（装配层，~5.9k）
 - `runtime.ts` 启动装配总成；`assistant-invoker.ts`（`ASSISTANT_MODEL` 未配 → 503 `NO_AVAILABLE_KEY`）；`usage-sink.ts` / `error-event-sink.ts` / `key-runtime-flusher.ts` —— **热路径异步批量落库的三件套**；`shutdown.ts` 优雅停机。
+- **错误事件三腿的落点（v1.17.2 / ADR-0042）**：产出侧 `src/gateway/engine.ts`（上游 key 腿 + `attemptTrail`）与 `src/gateway/routes.ts`（客户端网关 key 腿、401 的 socket IP + 8 hex 指纹）；透传 `src/wiring/error-event-sink.ts`（`serializeTrail`，16 项硬口径 + 2,048 字符兜底）；落列 `src/db/schema.ts` 纯加四列 + `repo/gateway-events.ts`；消费侧 `web/` 错误面板与 `services/assistant-chat.ts` 的 `renderEvent`/`renderTrail`。**掩码来源**：`store.maskOf(keyId)` 取的是 `gateway_keys.masked_key`，即 `maskKey(明文)` —— 可见的 4 位是**明文 key 的末 4 位**，不是 key id 的末 4 位（写测试时常踩）。
 
 ### 其余
 - **`src/supplier/`**（~5.2k）`tierflow.ts`（~980）/ `tokenrhythm.ts`（第二家，ADR-0040）、session 导入、pacing 礼貌节奏（契约 §15.5）。
@@ -61,7 +62,7 @@ npm run probe:tierflow            # TierFlow 数据通路探针
 ## 文档地图
 
 - `docs/api-contract.md` —— 唯一接口事实源（行号索引见 `contract-index.md`）。
-- `docs/adr/` 41 份（一行表见 `adr-index.md`）；`docs/dev-constraints.md`、`docs/proposals/`。
+- `docs/adr/` 42 份（一行表见 `adr-index.md`）；`docs/dev-constraints.md`、`docs/proposals/`。
 - `deploy/docker-deploy.md` + `docker-compose.yml` + `Dockerfile` —— 4100 的部署三件套。
 - `HANDOVER.md` 交接记录（**可能过期**，以代码 + 契约为准，引用前先核对）。
 - 根目录 `需求文档-v1.0.md` / `技术选型.md` —— 原始需求与选型。

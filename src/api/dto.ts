@@ -491,6 +491,23 @@ export interface GatewayErrorEventDto {
   keyId: string | null;
   /** 永远只有 ****后4位；`null` = 这次失败与某把具体 key 无关 */
   keyMasked: string | null;
+  /**
+   * **v1.17.2 新增**（ADR-0042）。客户端腿：网关 key 掩码（`****后4位`），仅已过鉴权的拒绝
+   * （组级 429 / GROUP_DISABLED / MODEL_NOT_AUTHORIZED）出现；401 恒 `null`。
+   * 与 `keyMasked` 是两条腿（网关 key vs 上游 key），不得互相顶替、不得相加。
+   * 本列上线前的历史行为 `null`。
+   */
+  clientKeyMasked: string | null;
+  /** **v1.17.2 新增**（ADR-0042）。来源腿：调用方 socket 层 IP（trustProxy:false，永不读 XFF）。本列上线前的历史行为 `null` */
+  sourceIp: string | null;
+  /** **v1.17.2 新增**（ADR-0042）。401 且带 Bearer 时入站废 key 的 sha256 前 8 hex（归并撞库，不可反推）；其余恒 `null` */
+  invalidKeyFingerprint: string | null;
+  /**
+   * **v1.17.2 新增**（ADR-0042）。尝试明细：JSON 数组字符串
+   * `[{"keyMasked":"****ab12","reason":"AUTH_INVALID","status":401},…]`，
+   * 仅 `attempts > 0` 的终态产出，上限 16 项。本列上线前的历史行为 `null`。
+   */
+  attemptTrail: string | null;
   stream: boolean;
   upstreamStatus: number | null;
   /** 真实上游尝试次数；`0` = 一次都没发出去（配置/密文侧问题的判据） */

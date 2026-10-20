@@ -14,7 +14,7 @@ import type {
   Page,
 } from '../../api/dto.js';
 import { nowIso } from '../../util/time.js';
-import { fallbackMask, scrubMessage } from '../../util/redact.js';
+import { fallbackMask, scrubCredentials, scrubMessage } from '../../util/redact.js';
 import type { Db } from '../database.js';
 import { newId } from '../ids.js';
 
@@ -41,6 +41,11 @@ interface EventRow {
   candidates: number | null;
   latency_ms: number | null;
   message: string | null;
+  // v1.17.2 / ADR-0042 三腿四列（老库可能还没有 —— ALTER 批补上后才有值）
+  client_key_masked: string | null;
+  source_ip: string | null;
+  invalid_key_fingerprint: string | null;
+  attempt_trail: string | null;
 }
 
 function toDto(r: EventRow): GatewayErrorEventDto {
@@ -58,6 +63,10 @@ function toDto(r: EventRow): GatewayErrorEventDto {
     upstreamId: r.upstream_id,
     keyId: r.key_id,
     keyMasked: r.key_masked,
+    clientKeyMasked: r.client_key_masked,
+    sourceIp: r.source_ip,
+    invalidKeyFingerprint: r.invalid_key_fingerprint,
+    attemptTrail: r.attempt_trail,
     stream: r.stream === 1,
     upstreamStatus: r.upstream_status,
     attempts: r.attempts,
@@ -96,12 +105,23 @@ export interface GatewayErrorEventInput {
   candidates: number | null;
   latencyMs: number | null;
   message: string | null;
+  // ── v1.17.2 / ADR-0042：三腿四列，全可空。掩码/指纹/trail 由**调用方**（sink）净化好再传，
+  //    这里只兜底 message 同款的 scrub（attemptTrail 整串过 scrub —— 幂等，见文件头注）。
+  /** 客户端腿：网关 key 掩码（仅已过鉴权的拒绝）；缺省/空串落 null */
+  clientKeyMasked?: string | null;
+  /** 来源腿：socket 层 IP；缺省落 null */
+  sourceIp?: string | null;
+  /** 来源腿：废 key 指纹（sha256 前 8 hex）；缺省/空串落 null */
+  invalidKeyFingerprint?: string | null;
+  /** 尝试明细：已序列化的 JSON 数组串；缺省/空串落 null。整串再过一遍 scrub（幂等） */
+  attemptTrail?: string | null;
 }
 
 const INSERT_SQL = `INSERT INTO gateway_error_events (
   id, ts, request_id, severity, category, status, gateway_code, failure_reason, endpoint, model,
-  upstream_id, key_id, key_masked, stream, upstream_status, attempts, candidates, latency_ms, message
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+  upstream_id, key_id, key_masked, stream, upstream_status, attempts, candidates, latency_ms, message,
+  client_key_masked, source_ip, invalid_key_fingerprint, attempt_trail
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
 /** 入参 → 落库参数（含脱敏与掩码兜底）。批量写入与单条写入共用，防止两条路径口径分叉。 */
 function toParams(input: GatewayErrorEventInput): unknown[] {
@@ -128,6 +148,22 @@ function toParams(input: GatewayErrorEventInput): unknown[] {
     input.candidates,
     input.latencyMs,
     scrubMessage(input.message),
+    // 三腿四列（v1.17.2）：掩码列与 keyMasked 同一条空串纪律 —— 掩码列不该出现空串，
+    // "有但不知道"不是这四列的语义（那是 keyMasked/**** 的专责），缺就老老实实 null。
+    input.clientKeyMasked === '' ? null : (input.clientKeyMasked ?? null),
+    input.sourceIp === '' ? null : (input.sourceIp ?? null),
+    input.invalidKeyFingerprint === '' ? null : (input.invalidKeyFingerprint ?? null),
+    // trail 整串再过一遍 scrub：**只抹不截**（`scrubCredentials`，不是 `scrubMessage`）——
+    // trail 是 JSON，截断会撕裂结构。长度上限由 sink 侧在序列化时按"丢尾部项"处理。
+    // 这里再抹一遍是文件头注说的"最后一站"（幂等）。
+    //
+    // `null` / `undefined` / 空串三种"没有"都落 `NULL`：`scrubCredentials` 对空串返回**空串**
+    // 而不是 null（它不做截断、也不管空值），少了前半段判断就会把 `null` 洗成 `""` 写进库 ——
+    // 于是这一列出现"空串"这第二种"空"，`IS NULL` 的历史语义当场被打破（本表单写入口的
+    // 唯一职责就是不让它发生）。`scrubMessage` 那条路不踩这个坑只因为它自己把空串归成了 null。
+    input.attemptTrail === null || input.attemptTrail === undefined || input.attemptTrail === ''
+      ? null
+      : scrubCredentials(input.attemptTrail),
   ];
 }
 

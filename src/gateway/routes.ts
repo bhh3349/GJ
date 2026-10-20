@@ -18,6 +18,7 @@ import { Readable } from 'node:stream';
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 
 import { REQUEST_ID_HEADER, resolveRequestId } from '../util/request-id.js';
+import { keyFingerprint } from '../util/redact.js';
 import type { GatewayEngine } from './engine.js';
 import { GATEWAY_ERROR_CODES, GatewayError, openAIError } from './errors.js';
 import type { RateLimiter } from './limiter.js';
@@ -112,13 +113,32 @@ export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOpt
    *   2. **`clientModel` / `stream` 只在鉴权通过之后取**（由调用方显式传）。未通过鉴权的请求
    *      不该有往事件表里写字的能力，哪怕只是一个模型名 —— 那是一条匿名可控的写入路径。
    *
+   * v1.17.2 / ADR-0042 三腿在这里落位：
+   *   - **来源腿**：`sourceIp` 取 `request.ip`（socket 层）。网关面 `trustProxy:false`
+   *     （`runtime.ts` 的既有决定，`/internal/snapshot` 回环判据依赖它），**永不读
+   *     X-Forwarded-For** —— 伪造该头就能把 401 栽给无辜机器。
+   *   - **`invalidKeyFingerprint`**：仅 401 且带了 Bearer 时算 sha256 前 8 hex；missing
+   *     bearer 无值可指纹，恒 null。指纹 = 归并「同一把废 key 反复敲门」，不可反推
+   *     （`keyFingerprint` 头注）。**由拒绝点算好经 `facts` 传入** —— 入站 key 明文只在
+   *     `requireGroup` 的栈上活着，本函数拿不到。
+   *   - **客户端腿 `clientKeyMasked`**：由调用方经 `facts.clientKeyMasked` 传入 ——
+   *     只有**已过鉴权**的拒绝点（组级 429 / 403）才有 `group.gatewayKeyMasked` 可传；
+   *     401 恒 null（没有组上下文，且不给匿名请求"这把 key 存不存在"的反馈）。
+   *
    * 全程 `try/catch`：端口契约要求 `record()` 不抛，但这里连"实现不守约"也不许连累转发。
    */
   function reportRejection(
     request: FastifyRequest,
     reply: FastifyReply,
     outcome: { status: number; gatewayCode: string | null; message: string | null },
-    facts: { clientModel?: string | null; stream?: boolean } = {},
+    facts: {
+      clientModel?: string | null;
+      stream?: boolean;
+      /** 客户端腿：网关 key 掩码（仅已过鉴权的拒绝点传得出来；401 恒不传） */
+      clientKeyMasked?: string | null;
+      /** 来源腿：废 key 指纹（仅 401 且带了 Bearer 时由拒绝点算好传入） */
+      invalidKeyFingerprint?: string | null;
+    } = {},
   ): void {
     if (errors === undefined) return;
     const endpoint = pathOf(request);
@@ -142,6 +162,10 @@ export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOpt
         attempts: 0,
         candidates: null,
         latencyMs: Math.max(0, Math.round(reply.elapsedTime)),
+        // v1.17.2：来源腿全事件都记（socket IP）；客户端腿只有过鉴权的拒绝点传得出来
+        sourceIp: request.ip,
+        clientKeyMasked: facts.clientKeyMasked ?? null,
+        invalidKeyFingerprint: facts.invalidKeyFingerprint ?? null,
         message: outcome.message,
       });
     } catch {
@@ -217,7 +241,15 @@ export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOpt
     if (group === null) {
       // 只回笼统信息：不区分「不存在」与「已禁用」，避免成为 key 探测窗口
       const message = 'invalid gateway key';
-      reportRejection(request, reply, { status: 401, gatewayCode: GATEWAY_ERROR_CODES.INVALID_API_KEY, message });
+      // v1.17.2 / ADR-0042：这把 key 验完即弃，但它的 sha256 **前 8 hex** 留作指纹 ——
+      // 用途只有归并「同一把废 key 反复敲门」（撞库），不可反推（`keyFingerprint` 头注）。
+      // **不带 clientKeyMasked**：鉴权没过 = 没有组上下文，不给匿名请求"这把 key 存不存在"的反馈。
+      reportRejection(
+        request,
+        reply,
+        { status: 401, gatewayCode: GATEWAY_ERROR_CODES.INVALID_API_KEY, message },
+        { invalidKeyFingerprint: keyFingerprint(key) },
+      );
       void reply.code(401).send(openAIError(GATEWAY_ERROR_CODES.INVALID_API_KEY, message, 'authentication_error'));
       return null;
     }
@@ -226,12 +258,14 @@ export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOpt
       // 故这里**产事件**（此前因「码值未登记、只能被实现侧归成 INTERNAL」而刻意不产）。
       // 403 是**已过鉴权**的拒绝：key 有效、只是组被禁用 —— 照 §12.1 产出边界②的推论，
       // 应读 body 填 `model` / `stream`（那条收窄针对的是"未过鉴权不读 body"的匿名写入路径）。
+      // v1.17.2 / ADR-0042：客户端腿在这类拒绝上补齐 —— `group.gatewayKeyMasked` 是鉴权
+      // 查行时顺带拿到的掩码，"谁的调用被拒了"从此在事件里可见（401 恒无此腿）。
       const message = 'user group is disabled';
       reportRejection(
         request,
         reply,
         { status: 403, gatewayCode: GATEWAY_ERROR_CODES.GROUP_DISABLED, message },
-        authedFacts(request),
+        { ...authedFacts(request), clientKeyMasked: group.gatewayKeyMasked ?? null },
       );
       void reply.code(403).send(openAIError(GATEWAY_ERROR_CODES.GROUP_DISABLED, message, 'authentication_error'));
       return null;
@@ -250,7 +284,14 @@ export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOpt
     if (verdict.retryAfterSec !== undefined) void reply.header('retry-after', String(verdict.retryAfterSec));
     // 两类 429 在这里才分得开：码值不同 → §12.1 分出的 `RATE_LIMITED` 与 `QUOTA_EXCEEDED`
     // 是两个 category（一个是"退避重试"、一个是"今天别来了"），绝不能由状态码现推。
-    reportRejection(request, reply, { status: 429, gatewayCode: code, message }, authedFacts(request));
+    // v1.17.2 / ADR-0042：组级 429 也是已过鉴权的拒绝 —— 事件带客户端腿掩码
+    // （"谁的调用被限了"），没有上游 key 参与（0 次真实尝试）。
+    reportRejection(
+      request,
+      reply,
+      { status: 429, gatewayCode: code, message },
+      { ...authedFacts(request), clientKeyMasked: group.gatewayKeyMasked ?? null },
+    );
     void reply.code(429).send(openAIError(code, message, type));
     return false;
   }
@@ -283,11 +324,12 @@ export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOpt
   ): boolean {
     if (group.authorizedModels === null || group.authorizedModels.includes(model)) return true;
     const message = `model not authorized for this group: ${model}`;
+    // v1.17.2 / ADR-0042：与 GROUP_DISABLED 同族 —— 已过鉴权的拒绝，事件带客户端腿掩码
     reportRejection(
       request,
       reply,
       { status: 403, gatewayCode: GATEWAY_ERROR_CODES.MODEL_NOT_AUTHORIZED, message },
-      authedFacts(request),
+      { ...authedFacts(request), clientKeyMasked: group.gatewayKeyMasked ?? null },
     );
     void reply
       .code(403)
@@ -424,6 +466,8 @@ export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOpt
         stream: body.stream === true,
         // 关联键从这里下传：引擎把它透传上游、写进两条出口（契约 §6）
         requestId: requestIdOf(request),
+        // 来源腿下传（v1.17.2 / ADR-0042）：引擎产的事件（502/499/egress-429）也要带 socket IP。
+        sourceIp: request.ip,
         signal: link.signal,
       });
       return writeForwardResult(reply, result);
@@ -457,7 +501,14 @@ export async function gatewayRoutes(app: FastifyInstance, opts: GatewayRoutesOpt
 
     const link = clientAbortSignal(request, reply);
     try {
-      const result = await engine.embeddings({ group, model, body, requestId: requestIdOf(request), signal: link.signal });
+      const result = await engine.embeddings({
+        group,
+        model,
+        body,
+        requestId: requestIdOf(request),
+        sourceIp: request.ip,
+        signal: link.signal,
+      });
       return writeForwardResult(reply, result);
     } finally {
       link.dispose();

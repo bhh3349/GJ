@@ -21,7 +21,10 @@ import type { FastifyInstance } from 'fastify';
 import { describe, it } from 'vitest';
 
 import { egressIdOfUrl } from '../egress/port.js';
+import type { EgressGate } from '../egress/port.js';
+import { keyFingerprint } from '../util/redact.js';
 import { REQUEST_ID_HEADER, isValidRequestId } from '../util/request-id.js';
+import { createEgressGate } from './egress.js';
 import type { FetchLike } from './engine.js';
 import type { ErrorEventEntry, ErrorEventSink, GroupContext, ModelCatalog, SecretResolver, UpstreamTarget } from './ports.js';
 import { gatewayRoutes } from './routes.js';
@@ -89,6 +92,10 @@ interface Options {
   errors?: ErrorEventSink & { entries: ErrorEventEntry[] };
   maxAttempts?: number;
   upstreamTimeoutMs?: number;
+  /** 出口闸（v1.17.2：测 egress-429 与出口冷却跳过终态的两条 key 腿） */
+  egress?: EgressGate;
+  /** keyId → accountId；缺省 `null`（无主 key）。出口归因判据按账号去重，凑 N 个账号要用它 */
+  accounts?: Record<string, string>;
 }
 
 interface Harness {
@@ -110,7 +117,13 @@ async function setup(options: Options = {}): Promise<Harness> {
         if (found === undefined) return null;
         // 出口口径同 `secrets.ts`：桩里没有台账 ⇒ Tier 1 按 base URL 推导（见 engine.spec.ts 的 upstreamTarget）
         const baseUrl = `https://${found.upstreamId}.example.com/v1`;
-        return { upstreamId: found.upstreamId, baseUrl, apiKey: `sk-${keyId}`, egressId: egressIdOfUrl(baseUrl), accountId: null };
+        return {
+          upstreamId: found.upstreamId,
+          baseUrl,
+          apiKey: `sk-${keyId}`,
+          egressId: egressIdOfUrl(baseUrl),
+          accountId: options.accounts?.[keyId] ?? null,
+        };
       }),
   };
 
@@ -143,6 +156,7 @@ async function setup(options: Options = {}): Promise<Harness> {
     fetchImpl,
     ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),
     ...(options.upstreamTimeoutMs === undefined ? {} : { upstreamTimeoutMs: options.upstreamTimeoutMs }),
+    ...(options.egress === undefined ? {} : { egress: options.egress }),
   });
   stack.pool.applySnapshot(snapshot(keys, options.upstreams));
 
@@ -236,8 +250,28 @@ describe('转发侧失败终态（引擎产）', () => {
     assert.equal(entry.upstreamStatus, 401, '与 failureReason 同一层的原始状态，两者不可互相反推');
     assert.equal(entry.attempts, 2);
     assert.equal(entry.candidates, 2);
-    assert.equal(entry.keyId, '', '全试完了：没有"那把 key"可言（与 usage_logs 的 key_id=NULL 同约定）');
-    assert.equal(entry.upstreamId, '');
+    // v1.17.2 / ADR-0042 语义修订：keyId = 「最后摸过的那把」，不再是空串。
+    // 它**不代表 k2 坏了**（是轮换停在它身上），判罪要看 attemptTrail —— 这正是本用例同时钉的：
+    // 顺序 = 尝试次序，两把各自的死法都在。
+    assert.equal(entry.keyId, 'k2', '最后摸过的那把（§12.1 语义修订：不等于"它坏了"）');
+    assert.ok(entry.attemptTrail, '502 全灭必须带尝试明细');
+    const trail = entry.attemptTrail!;
+    assert.ok(trail.length >= 2 && trail[0]!.keyId === 'k1' && trail[1]!.keyId === 'k2', `trail 按尝试次序：${JSON.stringify(trail)}`);
+    assert.equal(trail[0]!.reason, 'AUTH_INVALID');
+    assert.equal(trail[0]!.status, 401);
+  });
+
+  it('v1.17.2 变异锚点：删掉 502 终态的 keyId/trail 填数 → 本用例红', async () => {
+    // 上一用例已把两腿都钉住；这里单独把"trail 与 keyId 同源（最后一把一致）"钉死，
+    // 防止有人只补 keyId 不补 trail（或反之）—— 502 行"要配 attemptTrail 一起读"的承诺成立。
+    const h = await setup({
+      steps: [() => jsonResponse({ error: { message: 'boom' } }, 500), () => jsonResponse({ error: { message: 'boom' } }, 500)],
+    });
+    const res = await post(h, '/v1/chat/completions', chatPayload());
+    assert.equal(res.statusCode, 502);
+    const entry = only(h);
+    const trail = entry.attemptTrail!;
+    assert.equal(trail[trail.length - 1]!.keyId, entry.keyId, 'trail 最后一把必须就是 keyId 那把（同源，不得各挑各的）');
   });
 
   it('上游首字节超时 → 504 UPSTREAM_TIMEOUT', async () => {
@@ -545,5 +579,153 @@ describe('关联键 x-request-id（ADR-0014）', () => {
     const [call] = h.calls;
     assert.ok(call);
     assert.equal((call.init.headers as Record<string, string>)[REQUEST_ID_HEADER], inbound);
+  });
+});
+
+/* ---------------- v1.17.2 / ADR-0042：key 标识三腿逐腿钉 ---------------- */
+
+// 业主裁定「B：全带」之后的验收面。此前 115 条 `skippedEgress` 终态全落裸 `****`，
+// 组级拒绝与 401 各缺一条腿 —— 本组用例按 ADR-0042 验证清单逐腿钉死，且按业主纪律
+// 各留变异锚点（删掉实现侧填数 → 对应用例红）。
+describe('key 标识三腿（v1.17.2 / ADR-0042）', () => {
+  it('上游腿：egress-429 终态带 keyId（案发位置，≠ 记过）+ trail', async () => {
+    // 出口归因判据按**账号**去重（N=3）：两把不同账号的 key 各撞一次 429 判 key 级，
+    // 第三把再撞才判出口级 —— 恰好把「前两把走轮换、第三把收口」的形状摆出来。
+    const gate = createEgressGate({ mode: 'active' });
+    const h = await setup({
+      keys: [keyConfig('k1', 'up1', { models: null }), keyConfig('k2', 'up1', { models: null }), keyConfig('k3', 'up1', { models: null })],
+      accounts: { k1: 'acc-1', k2: 'acc-2', k3: 'acc-3' },
+      egress: gate,
+      steps: [
+        () => jsonResponse({ error: { message: 'rate limited' } }, 429),
+        () => jsonResponse({ error: { message: 'rate limited' } }, 429),
+        () => jsonResponse({ error: { message: 'rate limited' } }, 429),
+      ],
+    });
+
+    const res = await post(h, '/v1/chat/completions', chatPayload());
+    assert.equal(res.statusCode, 429, '第三把 429 被判出口级：不换 key、合成 429 收口');
+    const entry = only(h);
+    assert.equal(entry.status, 429);
+    assert.equal(entry.gatewayCode, 'RATE_LIMITED');
+    // 三个账号 + 同一出口 ⇒ 出口级：出口进冷却、**不**记 key 失败（ADR-0021 原样）
+    assert.ok(h.entries.every((e) => e.attemptTrail !== undefined));
+    assert.equal(entry.keyId, 'k3', '「当时正在用哪把」—— 此前这里落的是空串（裸 **** 的根因）');
+    assert.equal(entry.upstreamId, 'up1');
+    assert.equal(entry.attempts, 3);
+    const trail = entry.attemptTrail!;
+    assert.equal(trail.length, 3, '三次真实尝试逐把在案');
+    assert.equal(trail[2]!.keyId, 'k3', 'trail 最后一把 = 终态 keyId（同源）');
+    assert.equal(trail[2]!.reason, 'RATE_LIMITED');
+    assert.equal(trail[2]!.status, 429);
+    // ADR-0021 边界：出口级 429 **不** reportFailure —— keyId 是位置不是过错，
+    // 这条判据由 engine.spec 的冷却断言持有，这里只钉「事件侧照实带位置」。
+  });
+
+  it('上游腿：出口冷却跳过终态带「第一把被跳过的候选」（没被敲过、也没被记过）', async () => {
+    // 让出口先冷下来（active 判据 3 个账号），再用同一个闸发起第二轮 ——
+    // 两把候选全在冷却的出口后面：attempts=0、skippedEgress=2，终态 429。
+    const gate = createEgressGate({ mode: 'active' });
+    const warm = await setup({
+      keys: [keyConfig('k1', 'up1', { models: null }), keyConfig('k2', 'up1', { models: null }), keyConfig('k3', 'up1', { models: null })],
+      accounts: { k1: 'acc-1', k2: 'acc-2', k3: 'acc-3' },
+      egress: gate,
+      steps: [
+        () => jsonResponse({ error: { message: 'rate limited' } }, 429),
+        () => jsonResponse({ error: { message: 'rate limited' } }, 429),
+        () => jsonResponse({ error: { message: 'rate limited' } }, 429),
+      ],
+    });
+    await post(warm, '/v1/chat/completions', chatPayload());
+
+    const h = await setup({
+      keys: [keyConfig('k9', 'up1', { models: null }), keyConfig('k8', 'up1', { models: null })],
+      accounts: { k9: 'acc-9', k8: 'acc-8' },
+      egress: gate, // 同一个闸：up1.example.com 仍在冷却
+    });
+
+    const res = await post(h, '/v1/chat/completions', chatPayload());
+    assert.equal(res.statusCode, 429, '两把候选都在冷却出口后面 ⇒ 429 + Retry-After，不是 502');
+    assert.equal(h.calls.length, 0, '一次都没真敲上游');
+    const entry = only(h);
+    assert.equal(entry.gatewayCode, 'RATE_LIMITED');
+    assert.equal(entry.attempts, 0);
+    // v1.17.2 修订：此前这条终态 keyId 恒空串 —— 那正是 115 条裸 **** 事件的主力。
+    // 现在带「第一把被跳过的候选」：诚实边界 = 它没被敲过也没被记过，掩码只回答
+    // 「谁被困在这个出口后面」（案发位置的投影，非过错归因）。
+    assert.equal(entry.keyId, 'k9', '第一把被跳过的候选（轮换起点）');
+    assert.equal(entry.upstreamId, 'up1');
+    assert.equal(entry.attemptTrail, undefined, '0 次真实尝试 ⇒ 无 trail（没有"怎么死的"可记）');
+  });
+
+  it('客户端腿：组级 429 带 clientKeyMasked，且上游腿保持空（0 次真实尝试）', async () => {
+    const h = await setup({ group: { rpm: 1, gatewayKeyMasked: '****abcd' }, steps: [() => jsonResponse(COMPLETION)] });
+    assert.equal((await post(h, '/v1/chat/completions', chatPayload())).statusCode, 200);
+    const res = await post(h, '/v1/chat/completions', chatPayload());
+    assert.equal(res.statusCode, 429);
+
+    const entry = only(h);
+    assert.equal(entry.gatewayCode, 'RATE_LIMITED');
+    assert.equal(entry.clientKeyMasked, '****abcd', '「谁的调用被限了」——此前这条腿恒 null');
+    assert.equal(entry.keyId, '', '组级拒绝不指向任何上游 key（两条腿不得互相顶替）');
+    assert.equal(entry.attempts, 0);
+    assert.equal(entry.attemptTrail, undefined);
+    assert.equal(entry.clientModel, 'gpt-4o');
+  });
+
+  it('客户端腿：403 已过鉴权同样带掩码（GROUP_DISABLED / MODEL_NOT_AUTHORIZED）', async () => {
+    const disabled = await setup({ group: { enabled: false, gatewayKeyMasked: '****disa' } });
+    await post(disabled, '/v1/chat/completions', chatPayload());
+    assert.equal(only(disabled).clientKeyMasked, '****disa');
+
+    const unauthorized = await setup({ group: { authorizedModels: ['gpt-4o'], gatewayKeyMasked: '****unau' } });
+    await post(unauthorized, '/v1/chat/completions', chatPayload({ model: 'deepseek-chat' }));
+    const entry = only(unauthorized);
+    assert.equal(entry.clientKeyMasked, '****unau');
+    assert.equal(entry.invalidKeyFingerprint, null, '403 不是废 key：无指纹可言');
+  });
+
+  it('来源腿：401 废 key 带 sourceIp + 指纹；missing bearer 只有 sourceIp；指纹不可反推', async () => {
+    // 401 invalid key（带了 Bearer）：指纹 = sha256 前 8 hex，与 keyFingerprint 同源
+    const h = await setup();
+    const bogus = 'gw-bogus-key-that-does-not-exist';
+    const res = await post(h, '/v1/chat/completions', chatPayload(), { authorization: `Bearer ${bogus}` });
+    assert.equal(res.statusCode, 401);
+    const entry = only(h);
+    assert.equal(entry.sourceIp, '127.0.0.1', 'socket 层 IP（inject 的本机回环），全事件都记');
+    assert.equal(entry.invalidKeyFingerprint, keyFingerprint(bogus), '同一把废 key 的指纹恒同值（可归并）');
+    assert.ok(/^[0-9a-f]{8}$/.test(entry.invalidKeyFingerprint!), '前 8 hex：保归并、砍掉与 key_hash 等值比对的能力');
+    assert.equal(entry.clientKeyMasked, null, '401 恒无客户端腿：不给匿名请求"这把 key 存不存在"的反馈');
+    assert.notEqual(entry.invalidKeyFingerprint, bogus, '指纹不是掩码也不是明文');
+
+    // missing bearer：无值可指纹 —— sourceIp 照记（撞库探测照样可归并来源）
+    const bare = await setup();
+    const bareRes = await bare.app.inject({ method: 'POST', url: '/v1/chat/completions', payload: chatPayload() });
+    assert.equal(bareRes.statusCode, 401);
+    const bareEntry = only(bare);
+    assert.equal(bareEntry.sourceIp, '127.0.0.1');
+    assert.equal(bareEntry.invalidKeyFingerprint, null, '没带 key 就没有指纹（null ≠ 空指纹串）');
+    assert.equal(bareEntry.clientKeyMasked, null);
+  });
+
+  it('变异锚点：engine.ts egress-429 keyId 填数被删 → 本组第一条红（红即有效）', async () => {
+    // 上一条已把 egress-429 的 keyId/trail 钉住；本条把「组级 429 与 egress-429 可区分」
+    // 钉死 —— 两者 gatewayCode 同为 RATE_LIMITED，区分点只在腿上：
+    // 组级 = clientKeyMasked 有 / keyId 空；egress 级 = keyId 有 / clientKeyMasked 空。
+    // 若实现侧把 egress-429 的 keyId 填数删了，两者将不可区分（keyId 都为空）。
+    const gate = createEgressGate({ mode: 'active' });
+    const h = await setup({
+      keys: [keyConfig('k1', 'up1', { models: null }), keyConfig('k2', 'up1', { models: null }), keyConfig('k3', 'up1', { models: null })],
+      accounts: { k1: 'acc-1', k2: 'acc-2', k3: 'acc-3' },
+      egress: gate,
+      steps: [
+        () => jsonResponse({ error: { message: 'rate limited' } }, 429),
+        () => jsonResponse({ error: { message: 'rate limited' } }, 429),
+        () => jsonResponse({ error: { message: 'rate limited' } }, 429),
+      ],
+    });
+    await post(h, '/v1/chat/completions', chatPayload());
+    const entry = only(h);
+    assert.ok(entry.keyId !== '' && entry.clientKeyMasked == null, 'egress-429：上游腿有、客户端腿无（与组级 429 恰互补）');
   });
 });

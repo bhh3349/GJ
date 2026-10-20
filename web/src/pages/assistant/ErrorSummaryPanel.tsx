@@ -73,6 +73,7 @@ const COLUMN_WIDTHS = {
   code: 132,
   model: 112,
   key: 76,
+  source: 150,
   message: 260,
   copy: 48,
 } as const;
@@ -103,6 +104,11 @@ function rowToText(event: ObservabilityErrorEvent, range: { from: string; to: st
     `model=${event.model ?? ''}`,
     `upstreamId=${event.upstreamId ?? ''}`,
     `keyMasked=${event.keyMasked ?? ''}`,
+    // v1.17.2 / ADR-0042 三腿四字段：复制正是"拿去别处继续查"的用途，新腿必须跟着走
+    `clientKeyMasked=${event.clientKeyMasked ?? ''}`,
+    `sourceIp=${event.sourceIp ?? ''}`,
+    `invalidKeyFingerprint=${event.invalidKeyFingerprint ?? ''}`,
+    `attemptTrail=${event.attemptTrail ?? ''}`,
     `endpoint=${event.endpoint}`,
     `stream=${event.stream}`,
     `upstreamStatus=${event.upstreamStatus ?? ''}`,
@@ -112,6 +118,36 @@ function rowToText(event: ObservabilityErrorEvent, range: { from: string; to: st
     `window=${range.from}~${range.to}`,
     `message=${event.message ?? ''}`,
   ].join('\n');
+}
+
+/** attemptTrail 的一项（契约 §12.1，已脱敏的掩码/因由/状态码）。 */
+interface TrailItem {
+  keyMasked: string;
+  reason: string;
+  status: number;
+}
+
+/**
+ * 解析 `attemptTrail` JSON 串（v1.17.2 / ADR-0042）。**解析失败返回 `null` 让调用方回退到
+ * 原文展示** —— 观测数据宁可难看也不许因渲染问题消失。形状校验从严：不是数组、项缺字段
+ * 都当解析不出（后端保证形状，前端不猜）。
+ */
+function parseTrail(raw: string | null): TrailItem[] | null {
+  if (raw === null) return null;
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
+    const items: TrailItem[] = [];
+    for (const entry of parsed) {
+      if (typeof entry !== 'object' || entry === null) return null;
+      const e = entry as Record<string, unknown>;
+      if (typeof e.keyMasked !== 'string' || typeof e.reason !== 'string' || typeof e.status !== 'number') return null;
+      items.push({ keyMasked: e.keyMasked, reason: e.reason, status: e.status });
+    }
+    return items;
+  } catch {
+    return null;
+  }
 }
 
 export interface ErrorSummaryPanelProps {
@@ -325,17 +361,71 @@ export function ErrorSummaryPanel({
         ),
       },
       {
+        // v1.17.2 / ADR-0042：来源三腿合一个紧凑格 —— 上游 key 掩码之外，这行还有
+        // "谁打来的（IP）/ 哪把网关 key（客户端腿）/ 哪把废 key 在撞库（指纹）"三个事实。
+        // 空值全收进 tooltip，表格只摆有值的，不为 401 行常摆一列空。
+        title: '来源',
+        dataIndex: 'sourceIp',
+        width: COLUMN_WIDTHS.source,
+        render: (_: unknown, row) => {
+          const bits: string[] = [];
+          if (row.clientKeyMasked !== null) bits.push(row.clientKeyMasked);
+          if (row.invalidKeyFingerprint !== null) bits.push(`fp:${row.invalidKeyFingerprint}`);
+          if (row.sourceIp !== null) bits.push(row.sourceIp);
+          if (bits.length === 0) {
+            return (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                —
+              </Text>
+            );
+          }
+          return (
+            <Tooltip
+              title={
+                `客户端 key：${row.clientKeyMasked ?? '—'}（401 恒无）\n` +
+                `废 key 指纹：${row.invalidKeyFingerprint ?? '—'}（仅 401 带 Bearer）\n` +
+                `来源 IP：${row.sourceIp ?? '—'}`
+              }
+            >
+              <Text style={{ fontFamily: tokens.font.mono, fontSize: 12, wordBreak: 'break-all' }}>
+                {bits.join(' · ')}
+              </Text>
+            </Tooltip>
+          );
+        },
+      },
+      {
         title: '归因（原文，不截断）',
         dataIndex: 'message',
         width: COLUMN_WIDTHS.message,
-        render: (value: string | null) =>
-          value === null ? (
-            <Text type="secondary" style={wrapCell}>
-              —
-            </Text>
-          ) : (
-            <span style={{ ...wrapCell, userSelect: 'text' }}>{value}</span>
-          ),
+        render: (value: string | null, row) => {
+          // v1.17.2 / ADR-0042：attemptTrail（JSON 串）在人这一侧翻译成一行"谁怎么死的"；
+          // 解析失败就原文展示 —— 观测数据不允许因为渲染问题消失。
+          const trail = parseTrail(row.attemptTrail);
+          return (
+            <>
+              {trail !== null ? (
+                <div style={{ ...wrapCell, marginBottom: 4, userSelect: 'text' }}>
+                  {trail.map((item, i) => (
+                    <div key={i}>
+                      {item.keyMasked} ← {item.reason}
+                      {item.status > 0 ? ` (HTTP ${item.status})` : ''}
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+              {value === null ? (
+                trail !== null ? undefined : (
+                  <Text type="secondary" style={wrapCell}>
+                    —
+                  </Text>
+                )
+              ) : (
+                <span style={{ ...wrapCell, userSelect: 'text' }}>{value}</span>
+              )}
+            </>
+          );
+        },
       },
       {
         title: '',

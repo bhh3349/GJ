@@ -263,7 +263,12 @@ CREATE TABLE IF NOT EXISTS gateway_error_events (
   attempts        INTEGER NOT NULL DEFAULT 0,  -- 真实上游尝试次数；0 = 一次都没发出去
   candidates      INTEGER,
   latency_ms      INTEGER,
-  message         TEXT                         -- 落盘前已 scrub + 截断 512 字符
+  message         TEXT,                        -- 落盘前已 scrub + 截断 512 字符
+  -- v1.17.2 / ADR-0042 三腿四列（纯加列，判据 hasColumn）：
+  client_key_masked        TEXT,               -- 客户端腿：网关 key 掩码，仅已过鉴权的拒绝；401 恒 NULL
+  source_ip                TEXT,               -- 来源腿：socket 层 IP（trustProxy:false，永不读 XFF）
+  invalid_key_fingerprint  TEXT,               -- 来源腿：401 且带 Bearer 时入站废 key 的 sha256 前 8 hex
+  attempt_trail            TEXT                -- 尝试明细：JSON 数组串（掩码+因由+状态码），attempts>0 终态，上限 16 项
 );
 CREATE INDEX IF NOT EXISTS idx_err_ts ON gateway_error_events(ts);
 CREATE INDEX IF NOT EXISTS idx_err_category_ts ON gateway_error_events(category, ts);
@@ -707,6 +712,25 @@ export function migrate(db: SqliteDatabase): void {
         if (!hasColumn(db, table, column)) {
           db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
         }
+      }
+    }
+  })();
+
+  // v1.17.2 / ADR-0042：gateway_error_events 三腿四列。**纯加列**，SCHEMA_VERSION 不递增。
+  //
+  // 同 ADR-0041 那批的理由：这张表在跑着的库里早已存在，只改 DDL 文本是空操作，必须真发
+  // ALTER；判据 `hasColumn()`（ADD COLUMN 不幂等，而这段跑在每次 openDatabase() 里）。
+  // 全部可空、无默认：老行四列 NULL = "该事件没带这腿"，与加列前逐字相同 —— 部署后不存在
+  // 存量行被回填的中间态，新腿只随**新事件**逐条产生。
+  db.transaction(() => {
+    for (const [column, decl] of [
+      ['client_key_masked', 'TEXT'],
+      ['source_ip', 'TEXT'],
+      ['invalid_key_fingerprint', 'TEXT'],
+      ['attempt_trail', 'TEXT'],
+    ] as const) {
+      if (!hasColumn(db, 'gateway_error_events', column)) {
+        db.exec(`ALTER TABLE gateway_error_events ADD COLUMN ${column} ${decl}`);
       }
     }
   })();

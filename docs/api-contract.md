@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.17.1**　｜
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.17.2**　｜
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -1780,8 +1780,12 @@ REST 全量 `/api/stats/balance`（`live.ts` 注释里写明：通道只报"变�
 | `endpoint` | string | ❌ | 如 `/v1/chat/completions` |
 | `model` | string \| null | ✅ | **客户端请求的模型名**（非凭据），与 §6 日志同口径 |
 | `upstreamId` | string \| null | ✅ | 抹名引用：只记 id，不记 baseUrl / 上游名 |
-| `keyId` | string \| null | ✅ | 抹名引用：只记 id |
-| `keyMasked` | string \| null | ✅ | `****后4位`；**永不出现明文**。没有"哪一把 key"可言时（`keyId` 为 `null`）产出侧写 **`****`**（4 位掩码的退化形态），**不是 `null`** —— 与 `usage_logs.key_masked` 同约定；类型保留 `string \| null` 但产出侧永不写 `null`，消费方按"总是有值"渲染即可 |
+| `keyId` | string \| null | ✅ | 抹名引用：只记 id。**语义（v1.17.2 修订）＝「当时正在用哪把**上游** key」**，不再是「哪把 key 失败了」——`egress-429` / `502`·`504` 全灭 / 流中断都带，其中 **502 全灭带的是「最后摸过的那把」，不代表它坏了**（可能前面哪把先挂才轮换到它）。要判「它到底坏没坏」看 §12.1 三层口径表 + `key_runtime`，不看这一列 |
+| `keyMasked` | string \| null | ✅ | `****后4位`；**永不出现明文**。没有"哪一把 key"可言时（`keyId` 为 `null`）产出侧写 **`****`**（4 位掩码的退化形态），**不是 `null`** —— 与 `usage_logs.key_masked` 同约定；类型保留 `string \| null` 但产出侧永不写 `null`，消费方按"总是有值"渲染即可。**v1.17.2**：与 `keyId` 同源同语义（上游 key 腿） |
+| `clientKeyMasked` | string \| null | ✅ | **v1.17.2 新增**。**客户端网关 key** 的掩码（`****后4位`，取自 `gateway_keys.masked_key`）。**只在「已过鉴权」的拒绝上出现**（组级 429 / `GROUP_DISABLED` / `MODEL_NOT_AUTHORIZED`）——那时才知道是哪把网关 key。**401 恒为 `null`**（鉴权没过 = 没有组上下文；不给匿名请求任何"这把 key 存不存在"的反馈）。与 `keyMasked` 是**两条腿**：一个是上游 key、一个是网关 key，**不得互相顶替、不得相加** |
+| `sourceIp` | string \| null | ✅ | **v1.17.2 新增**。调用方 **socket 层 IP**（`request.ip`）。网关面 `trustProxy:false`，**永不读 `X-Forwarded-For`** —— 伪造该头就能把 401 栽给无辜机器（同 `runtime.ts` 对 `/internal/snapshot` 回环判据的理由）。审计面有存 IP 先例（`audit_log.ip`）。取不到为 `null` |
+| `invalidKeyFingerprint` | string \| null | ✅ | **v1.17.2 新增**。**401 且带了 Bearer** 时：入站网关 key 的 `sha256` **前 8 hex**。用途是归并「同一把废 key 反复敲门」（同一指纹 = 同一次撞库尝试），**不可反推 key**（网关 key 为 `gw-` + 24 字节 base64url = 192 bit 熵）。`missing bearer`（没带 key）与其余分型恒为 `null` |
+| `attemptTrail` | string \| null | ✅ | **v1.17.2 新增**。本次**各把候选怎么死的**：JSON 数组字符串 `[{"keyMasked":"****ab12","reason":"AUTH_INVALID","status":401},…]`。只在 `attempts > 0`（真敲过上游）的终态产出，上限 **16** 条（超出保留前 16，够定位"批量挂"的形状即可）。每项只记掩码与失败因由，**不记明文**；整串落库前过凭据 scrub（只抹不截 —— `attempt_trail` 不是 `message`，不适用 `message` 的 512 截断，那会撕裂 JSON）。**丢尾部只在畸形输入下发生**：合法项（掩码 8 + `failureReason` 枚举 ≤20 + 状态码 ≤4 + 标点字段名）单项 ≤66 字符，16 项 ≈1,060 < 2,048 的字符兜底线 —— 因此调用方实际看到的硬口径就是**最多 16 项**；超出 2,048 才按序丢尾部项，最少保 1 项，仍超则整列为 `null`，**永不落撕裂的 JSON**。一次都没打到上游（`attempts=0`）为 `null` |
 | `stream` | bool | ❌ | |
 | `upstreamStatus` | int \| null | ✅ | 上游返回的原始状态码；一次都没打到上游为 `null` |
 | `attempts` | int | ❌ | **真实**上游尝试次数（`0` = 一次都没发出去） |
@@ -1819,7 +1823,7 @@ REST 全量 `/api/stats/balance`（`live.ts` 注释里写明：通道只报"变�
 
 - 网关侧只做**入队**（O(1) 内存操作），落库由定时批量完成 —— **热路径零同步 DB 写**（§9）。
 - 队列有上限；溢出时丢**最旧**的一批并计数，累计丢弃数由 `/api/observability/health` 的 `events.dropped` 暴露。**丢事件不许静默**。
-- **落盘前脱敏**：`keyMasked` 只有 4 位；`message` 过 scrub（`Bearer <token>` / `sk-…` / `gw-…` 形状一律替换成 `****`）并截断 512 字符。明文 key 不进事件、不进日志、不进错误体。
+- **落盘前脱敏**：`keyMasked` 只有 4 位；`message` 过 scrub（`Bearer <token>` / `sk-…` / `gw-…` 形状一律替换成 `****`）并截断 512 字符。明文 key 不进事件、不进日志、不进错误体。**v1.17.2**：`clientKeyMasked` / `attemptTrail[].keyMasked` 同 4 位纪律；`invalidKeyFingerprint` 只存 sha256 前 8 hex（不是掩码、不是明文，两者都不合格）；`attemptTrail` 整串过 scrub 后再落库。
 - 保留期与 `usage_logs` 同口径（`LOG_RETENTION_DAYS`，默认 30 天）。**这条从 v1.1.0 起就是契约行，但实现侧直到 v1.14.1 才真正接上** —— `pruneGatewayErrorEvents` 一直存在且有 spec，生产环境里零调用方。补接时**没有**顺手改这条：真要给错误事件单独的保留期，走契约修订，不夹带在"补齐实现"里。
 
 ### 12.2 健康指标 `GET /api/observability/health`
@@ -1895,7 +1899,7 @@ REST 全量 `/api/stats/balance`（`live.ts` 注释里写明：通道只报"变�
 - `from` / `to`：带时区 ISO8601（§0.2）。省略 `to` = 现在；`from`/`to` 全省略 = 该端点的默认窗口；跨度上限 **30 天**，超限 `400 INVALID_PARAM`（`details.field="from"`）。
 - `category` 支持**逗号分隔多值**（最多 9 个），任一不在 §12.1 枚举内 → `400 INVALID_PARAM`（`details.field="category"`）。
 - `severity`：单值，`warn` \| `error`。
-- `upstreamId` / `keyId` / `model` / `requestId`：单值精确匹配（`requestId` 见 §6「关联键」）。
+- `upstreamId` / `keyId` / `model` / `requestId`：单值精确匹配（`requestId` 见 §6「关联键」）。**`keyId` 的语义（v1.17.2 修订）＝「事件直接归因到的那把上游 key」**：502 全灭事件带的 `keyId` 是"最后摸过的那把"（见 §12.1 字段表），按它筛选会混入"不是它坏、只是轮换停在它身上"的行 —— 要按"谁被记了失败"筛，配 `category=UPSTREAM_ERROR` 与 `attemptTrail` 一起读。
 - 响应在 §0.3 分页信封之上**追加** `range: { from, to }`，回显**实际**生效的窗口（同 §6 回显降档后 `bucket` 的惯例：前端按回显渲染，不自算）。
 - 全部端点**只读**，无副作用、不写审计。
 
@@ -2018,6 +2022,7 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 
 - `summary` 与 `model` 是**脱敏后的既有字段**，不是新数据源：`summary` 直接来自事件行、已过 §12.1 的钥匙抹名与 `scrub`；**不含 key 明文**（含 4 位掩码以外的任何原文）。助手回答里外都不得出现 key 明文（§13 头注纪律 3）。
 - 引用顺序 = 事件在注入块里的出现顺序（`ts DESC`，与 §12.3 查询同序），前端按原序展示即可。
+- **`[观测数据]` 块的每条事件行携带 §12.1 的全部标识列**（v1.17.2）：上游 key 掩码、`clientKeyMasked`、`sourceIp`、`invalidKeyFingerprint`、`attemptTrail` 逐项（压成 `****ab12=AUTH_INVALID/401,…`）。§12 头注点名本端点是 §12.1 的**两个消费者之一**（"排障的人"与"内嵌 AI 助手"），观测面补齐而注入侧不补，助手就答不出"这个 401 是哪来的 / 组级限流限的是哪把网关 key / 502 全灭时各把怎么死的"。**纪律 3 零放宽**：这五项全部是掩码 / socket IP / 8 hex 指纹 / 逐把失败因由，没有一项是凭据；`attemptTrail` **解析不出时原样回退**（渲染问题不得让观测数据消失）；`citations` 的字段集合**不变**（仍是上表那几列，新腿不进引用帧）。
 
 ### 13.3 三重上限（超限回 `done.truncated:true`，不静默截）
 
@@ -3947,6 +3952,34 @@ spec 三条判据：新库自带、老库真被 ALTER 到、重复跑不抛 dupl
 | ⑨ | 容量口径 | 所有容量数字（`capacity` / `reserveForData` / 每轮 token 数 / §15.5 的 ≈14 min 与重开门槛）都是**「单出口」口径**：出口 > 1 时**逐出口各自成立，不得跨出口加总** |
 
 > **§15.5 连带（v1.8.0 已同批落）**：「27 个账号一轮刷新 ≈ 1 分钟」按 ⑥ 重算为 **≈14 min**（`ceil(54/4)×60s`，单出口口径），0.6s 降为账号级内层纪律，重开门槛（ADR-0017 补遗 6）登记为 §15.5 脚注。本表是那三处改动的唯一口径源。
+>
+> **v1.17.2（2026-10-20，错误事件的 key 标识三腿补全 —— 「裸 `****` 看不出是谁」的观测缺口）**：
+> **动机是业主原话**「为什么有的错误 key 会带掩码和字母，有的错误只有 `****` 都没办法查是哪个 key 的问题」。
+> 实测（2026-10-20 快照 201 条事件）把「裸 `****`」分成三类，**三类各自的"手里有没有 key"不同**，
+> 所以三腿分开填，不造一个假统一的字段：
+> ① **上游 key 腿**（egress-429 115 条 / 502·504 全灭 4 条 / 流中断）：网关手里**有**上游 key，
+> 但「不带 Retry-After 记 key 失败」的既有纪律让事件丢了掩码。语义修订：`keyId`/`keyMasked` 从
+> 「只有 key **失败**才带」扩成「**当时正在用哪把**」（位置标识）。**不进冷却的纪律不变**
+> （egress-429 仍不 `reportFailure`——ADR-0021 决策 4a 原样；502 全灭仍只给**最后一摸**的 key 记脸，
+> 前面各把的死因在新增的 `attemptTrail`）。502 全灭的 `keyId` 语义特例：**它是"最后摸过的那把"，
+> 不等于"它坏了"**（可能是前面哪把先挂才轮换到它），事件表这行 `keyId` 因此**不参与** `?keyId=`
+> 归因筛选的语义承诺（§12.3 的 `keyId` 筛选含义改为"事件直接归因到的那把 key"）。
+> ② **客户端 key 腿**（组级 429 / `GROUP_DISABLED` / `MODEL_NOT_AUTHORIZED`）：网关 key 自己
+> **已过鉴权**、掩码可从鉴权同一次读库顺带（`gateway_keys.masked_key`），新增列 `clientKeyMasked`。
+> 401 不带（没有组上下文，不给匿名请求任何"这把 key 存不存在"的反馈）。
+> ③ **来源腿**（401 全部 + 全事件）：新增列 `sourceIp`（socket 层 IP，`trustProxy:false` 网关面
+> **永不读 XFF**——伪造该头就能把 401 栽给无辜机器；audit_log 有存 IP 先例）与
+> `invalidKeyFingerprint`（401 且带了 Bearer 时：入站 key 的 sha256 **前 8 hex**；网关 key 192 bit
+> 熵不可反推，指纹能归并「同一把废 key 反复敲门」而不可用于撞库验证）。
+> **DDL**：`gateway_error_events` 纯加四列（`client_key_masked` / `source_ip` /
+> `invalid_key_fingerprint` / `attempt_trail`），`SCHEMA_VERSION` 仍为 2、零迁移判据 `hasColumn()`。
+> `attemptTrail` 是 JSON 数组字符串（`[{"keyMasked":"****ab12","reason":"AUTH_INVALID","status":401},…]`，
+> 上限 16 条、每把只记掩码不记 id 以外的凭据形状、过 scrub）。
+> **§12.1 字段表加四行**；§12.3 的 `keyId` 筛选语义一句话修订；**§13.2 补一句**：`[观测数据]` 块
+> 每条事件行携带全部标识列（含三腿四字段与 `attemptTrail` 逐项）——§12 头注的两个消费者
+> （排障的人 / 内嵌助手）必须看到同一份事实，**纪律 3 零放宽**（五项全是掩码 / IP / 指纹 / 因由，
+> 无一是凭据；`citations` 字段集合不变）。
+> §10 / 分型枚举 / severity / 两套错误体 / `/v1/*` 响应形状零变更。落地用例与变异验证见 ADR-0042。
 >
 > **v1.17.1（2026-10-19，流式「终局后断开」误判 499 修复 —— openai-node SDK 收尾行为成文）**：
 > **动机**：DSH（openai-node SDK）全部 SSE 流量被记 `499 + prompt/completion 全 0`，而客户端实际收到了

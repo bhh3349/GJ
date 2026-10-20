@@ -1,6 +1,6 @@
-# ADR 索引 —— 41 份一行表
+# ADR 索引 —— 42 份一行表
 
-**读法**：先用本表定位，再 `Read docs/adr/NNNN-*.md` 那一份。不要按目录顺序整读（41 份约 7,200 行）。
+**读法**：先用本表定位，再 `Read docs/adr/NNNN-*.md` 那一份。不要按目录顺序整读（42 份约 7,340 行）。
 A Decision Records 是 MADR 格式，文件名 `NNNN-标题.md`。新决策必须落 `docs/adr/`，不许只留在聊天记录（AGENTS.md §7）。
 
 | ADR | 一行结论 | 什么时候必须去读 |
@@ -46,6 +46,7 @@ A Decision Records 是 MADR 格式，文件名 `NNNN-标题.md`。新决策必�
 | [0039](../../../docs/adr/0039-endpoint-model-category-admission.md) | 端点类别准入 | 动模型类别/准入时 |
 | [0040](../../../docs/adr/0040-tokenrhythm-second-supplier.md) | 第二家供应商 TokenRhythm：驱动器复用 + 能力位分发 | 动多供应商接入时 |
 | [0041](../../../docs/adr/0041-overdraft-latch.md) | 透支锁存：余额 <10 分 / 套餐余量 =0 ⇒ 锁出选路（第四轴，`enabled` 不动），只有人工解除回池；判定腿挂**七个**落库点 | 动 `depleted` / `isUsable` / 任何余额余量落库点时 |
+| [0042](../../../docs/adr/0042-error-event-key-attribution.md) | 错误事件的 key 标识**三腿分列**（上游 key / 客户端网关 key / 来源 IP+指纹）+ `attemptTrail`；`keyId` 语义改为「当时正在用哪把」；401 只到 socket IP 与 8 hex 指纹 | 动错误事件字段 / 排查「裸 `****` 是哪把 key」/ 动 §12.1 或助手注入块时 |
 
 ## 维护纪律
 

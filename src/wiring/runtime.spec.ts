@@ -718,13 +718,19 @@ describe('错误事件：热路径 → 队列 → 落库（契约 §12.1 / ADR-0
     attempts: number;
     candidates: number | null;
     message: string | null;
+    // v1.17.2 / ADR-0042 三腿四列
+    attempt_trail: string | null;
+    client_key_masked: string | null;
+    source_ip: string | null;
+    invalid_key_fingerprint: string | null;
   }
 
   function eventRows(db: Db): EventRow[] {
     return db
       .prepare(
         `SELECT request_id, severity, category, status, gateway_code, failure_reason, endpoint, model,
-                upstream_id, key_id, key_masked, stream, upstream_status, attempts, candidates, message
+                upstream_id, key_id, key_masked, stream, upstream_status, attempts, candidates, message,
+                attempt_trail, client_key_masked, source_ip, invalid_key_fingerprint
            FROM gateway_error_events ORDER BY ts, id`,
       )
       .all() as EventRow[];
@@ -813,8 +819,18 @@ describe('错误事件：热路径 → 队列 → 落库（契约 §12.1 / ADR-0
     assert.equal(row.failure_reason, 'AUTH_INVALID');
     assert.equal(row.attempts, 2);
     assert.equal(row.candidates, 2);
-    assert.equal(row.key_id, null, '两把都试完了：没有"那把 key"可言');
-    assert.equal(row.upstream_id, null);
+    // v1.17.2 / ADR-0042 语义修订（原判据「两把都试完了：没有"那把 key"可言」作废）：
+    // 502 全灭现在带「最后摸过的那把」—— 它**不等于**"它坏了"（可能前面哪把先挂才轮换到它），
+    // 配 trail 一起读（§12.1 字段表 / §12.3 `?keyId=` 筛选语义就是为这条修订改的口）。
+    assert.equal(row.key_id, h.keyId2, '502 全灭带「最后摸过的那把」上游 key（k1 → k2 轮换停在 k2）');
+    assert.equal(row.upstream_id, h.upstreamId);
+    // 尝试明细：逐把的掩码 + 死因，次序即轮换次序（§12.1 / ADR-0042）。
+    // 掩码走 store.maskOf → gateway_keys.masked_key = maskKey(明文)（掩码跟明文后 4 位，不跟 id）
+    const trail = JSON.parse(row.attempt_trail ?? '[]') as { keyMasked: string; reason: string; status: number }[];
+    assert.deepEqual(trail, [
+      { keyMasked: `****${h.keyPlain1.slice(-4)}`, reason: 'AUTH_INVALID', status: 401 },
+      { keyMasked: `****${h.keyPlain2.slice(-4)}`, reason: 'AUTH_INVALID', status: 401 },
+    ]);
     assert.ok(row.key_masked !== null && row.key_masked.startsWith('****'), `掩码列只能是 ****+后4位，实际 ${String(row.key_masked)}`);
     assert.equal(row.model, 'gpt-4o');
 

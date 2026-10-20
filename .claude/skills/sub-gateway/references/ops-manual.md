@@ -75,6 +75,11 @@ curl -s -b "$J" "$B/api/observability/health"
   `from`/`to` 是**带时区** ISO8601，跨度上限 30 天。只读、无副作用。
 - 关联键 `x-request-id` 是跨表关联的唯一抓手（契约 §6，ADR-0014）：拿到一条错误事件，用它的 requestId
   反查调用记录 / 日志行。
+- **「事件里的 key 是哪一把」看三列（v1.17.2 / ADR-0042）**，`key_masked` 是裸 `****` 时别急着说"查不到"：
+  `client_key_masked` = 被限的**网关 key**（组级 429/403 才有）；`key_id`+`key_masked` = 当时在用的
+  **上游 key**（egress-429 / 502·504 全灭 / 流中断）；`source_ip` + `invalid_key_fingerprint`
+  （sha256 前 8 hex，仅 401 且带 Bearer）= **哪来的**；`attempt_trail` = 各把候选怎么死的
+  （JSON 数组串，≤16 项，`attempts=0` 时为 NULL）。
 - 日志文件只做兜底（4000 是 `/tmp/subtest/gw3.log`）。**别整文件读**：先 `grep` 出关键行再看。
 
 ## 4. 直接查库（只读）

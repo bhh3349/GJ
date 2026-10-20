@@ -135,6 +135,14 @@ export interface GroupContext {
    *      本字段只管"这一组的人许不许用"，管不到"哪把 key 能跑"（那是 `KeyConfig.models`）。
    */
   authorizedModels: readonly string[] | null;
+  /**
+   * **这把网关 key 的掩码**（`gateway_keys.masked_key`，`****后4位`；契约 §12.1 `clientKeyMasked` / ADR-0042）。
+   *
+   * 客户端腿的取值来源：鉴权已经查到 `gateway_keys` 行，掩码就在手边（不新增一次查询）。
+   * **可选**是有意的：内部助手（`wiring/assistant-invoker.ts`）的合成组没有网关 key，
+   * 消费侧按 `?? null` 处理即可，不必为它编一个假掩码。明文纪律不变 —— 这里只可能是掩码。
+   */
+  gatewayKeyMasked?: string | null;
 }
 
 /** 网关 key 明文 → 用户组上下文；未命中返回 null（实现侧用 sha256 摘要比对） */
@@ -231,4 +239,19 @@ export interface ErrorEventEntry {
    * 网关侧不要先自己抹 —— 两处都抹并不更安全，但两处规则不一致就会漏。
    */
   message: string | null;
+  // ── v1.17.2 / ADR-0042：key 标识三腿四字段。全部可选 = 「没这腿就不填」，
+  //    实现侧（sink）按缺省转 null —— 与 ErrorFacts 的「缺省即不知道」同一纪律。
+
+  /** 客户端腿：网关 key 掩码，仅已过鉴权的拒绝（组级 429 / 403）填；401 恒不填（无组上下文） */
+  clientKeyMasked?: string | null;
+  /** 来源腿：调用方 socket 层 IP（`request.ip`，trustProxy:false 永不读 XFF）；取不到不填 */
+  sourceIp?: string | null;
+  /** 来源腿：401 且带了 Bearer 时，入站废 key 的 sha256 前 8 hex（归并撞库，不可反推） */
+  invalidKeyFingerprint?: string | null;
+  /**
+   * 尝试明细：各把候选怎么死的（契约 §12.1 `attemptTrail`）。网关侧传 **keyId**（不是掩码 ——
+   * 掩码归实现侧按 `maskOf` 统一映射，与 `keyMasked` 同一条纪律），每项 `{keyId, reason, status}`。
+   * 只在真实尝试过的终态填；实现侧负责排序校验、上限 16、序列化与 scrub。
+   */
+  attemptTrail?: readonly { keyId: string; reason: string; status: number }[];
 }

@@ -533,6 +533,93 @@ describe('POST /api/assistant/chat —— 取数与 prompt 组装（§13.1 / §1
     expect(citations[1]?.['summary']).toBe('old failure');
   });
 
+  it('v1.17.2 三腿进注入块：网关 key 掩码 / 指纹 / 来源 IP / 逐把死因各成一段（§12.1 / ADR-0042）', async () => {
+    const stub = stubInvoker(DELTA_SCRIPT);
+    const h = await setup({ assistant: stub.invoker });
+    const now = Date.now();
+    // 一行为 401 腿（指纹 + IP、无上游 key），一行为 502 全灭腿（上游 key + trail）
+    seedEvent(h.db, {
+      ts: new Date(now - 20 * 60_000).toISOString(),
+      category: 'AUTH_FAILED',
+      status: 401,
+      gatewayCode: 'INVALID_API_KEY',
+      failureReason: 'AUTH_INVALID',
+      keyId: null,
+      keyMasked: '****',
+      model: null,
+      upstreamId: null,
+      attempts: 0,
+      candidates: null,
+      clientKeyMasked: null,
+      sourceIp: '203.0.113.7',
+      invalidKeyFingerprint: 'deadbeef',
+      message: 'invalid gateway key',
+    });
+    seedEvent(h.db, {
+      ts: new Date(now - 10 * 60_000).toISOString(),
+      keyId: 'k2',
+      keyMasked: '****k2',
+      attempts: 2,
+      // 落库形态就是 JSON 数组串（§12.1）：仓储只兜底 scrub，不做序列化
+      attemptTrail: JSON.stringify([
+        { keyMasked: '****k1', reason: 'AUTH_INVALID', status: 401 },
+        { keyMasked: '****k2', reason: 'NETWORK', status: 0 },
+      ]),
+      sourceIp: '198.51.100.4',
+    });
+
+    seedEvent(h.db, {
+      ts: new Date(now - 2 * 60_000).toISOString(),
+      category: 'RATE_LIMITED',
+      severity: 'warn',
+      status: 429,
+      gatewayCode: 'RATE_LIMITED',
+      failureReason: 'RATE_LIMITED',
+      // 组级 429：网关自己拒的、0 次真实尝试 —— 有客户端腿、**没有**上游 key 腿
+      keyId: '',
+      keyMasked: '****',
+      clientKeyMasked: '****gw01',
+      attempts: 0,
+      candidates: null,
+      message: 'group rate limited',
+    });
+
+    await chat(h, {
+      messages: [{ role: 'user', content: '刚才的错误都是哪把 key 的问题？' }],
+      logContext: { from: new Date(now - 30 * 60_000).toISOString(), to: new Date(now).toISOString() },
+    });
+
+    const system = stub.calls[0]?.messages[0]?.content ?? '';
+    // ① 401 腿：指纹与来源必须进块 —— 否则助手只会复述一个光秃秃的 `****`，
+    //    正是业主本次要查的"都没办法查是哪个 key 的问题"
+    expect(system).toContain('keyFp=deadbeef');
+    expect(system).toContain('src=203.0.113.7');
+    // ② 502 全灭腿：trail 压成紧凑串（每把 = 哪把/怎么死的/状态码），且带来源 IP
+    expect(system).toContain('trail=****k1=AUTH_INVALID/401,****k2=NETWORK/0');
+    expect(system).toContain('src=198.51.100.4');
+    // ③ 客户端腿：已过鉴权的组级拒绝（网关 key 掩码）—— 与上游 key 两条腿互不顶替，
+    //    同一个块里必须同时看得见 `key=****k2` 与 `clientKey=****gw01`
+    expect(system).toContain('clientKey=****gw01');
+    expect(system).toContain('key=****k2');
+  });
+
+  it('trail 渲染：解析不出原样回退，不因渲染问题让观测数据消失', async () => {
+    const stub = stubInvoker(DELTA_SCRIPT);
+    const h = await setup({ assistant: stub.invoker });
+    const now = Date.now();
+    // 人工改库 / 老库畸形串：注入块的纪律是"宁可难看也不许消失"
+    seedEvent(h.db, {
+      ts: new Date(now - 5 * 60_000).toISOString(),
+      attempts: 1,
+      attemptTrail: 'not json at all' as unknown as string,
+    });
+    await chat(h, {
+      messages: [{ role: 'user', content: '刚才有什么错误？' }],
+      logContext: { from: new Date(now - 30 * 60_000).toISOString(), to: new Date(now).toISOString() },
+    });
+    expect(stub.calls[0]?.messages[0]?.content ?? '').toContain('trail=not json at all');
+  });
+
   it('纯闲聊（无 logContext）→ 不注入 [观测数据] 块、citations 为空', async () => {
     const stub = stubInvoker(DELTA_SCRIPT);
     const h = await setup({ assistant: stub.invoker });

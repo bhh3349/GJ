@@ -438,14 +438,15 @@ export function deleteGatewayKey(db: Db, groupId: string, keyId: string): void {
   appendChange(db, 'gateway_key', keyId, 'delete', null);
 }
 
-/** 网关鉴权用：按明文摘要查组。明文不落盘，所以只能这样查。 */
-export function findGroupByGatewayKeyHash(db: Db, hash: string): GroupRow | null {
+/** 网关鉴权用：按明文摘要查组，**顺带取回这把 key 的掩码**（v1.17.2 / ADR-0042 客户端腿）。
+ * 明文不落盘，所以只能按摘要查；掩码是既有的 `masked_key` 列（`****后4位`），零额外查询。 */
+export function findGroupByGatewayKeyHash(db: Db, hash: string): (GroupRow & { maskedKey: string | null }) | null {
   const row = db
     .prepare(
-      `SELECT g.* FROM gateway_keys k
+      `SELECT g.*, k.masked_key AS maskedKey FROM gateway_keys k
        JOIN groups g ON g.id = k.group_id
        WHERE k.key_hash = ?`,
     )
-    .get(hash) as GroupRow | undefined;
+    .get(hash) as (GroupRow & { maskedKey: string | null }) | undefined;
   return row ?? null;
 }

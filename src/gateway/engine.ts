@@ -153,6 +153,14 @@ export interface ForwardRequest {
    * 这里只做一个搬运工，否则同一个请求会在两个地方各得一个 id。
    */
   requestId: string;
+  /**
+   * 调用方 **socket 层 IP**（契约 §12.1 `sourceIp` / v1.17.2 / ADR-0042）。
+   *
+   * **可选**：路由层从 `request.ip` 填（网关面 `trustProxy:false`，永远是 socket 层，
+   * **不读 X-Forwarded-For**）；内部助手（`wiring/assistant-invoker.ts` 直调引擎）没有
+   * 真实调用方 IP，不填 → 事件侧落 `null`。引擎只搬运，不做任何判定。
+   */
+  sourceIp?: string;
   signal?: AbortSignal;
 }
 
@@ -266,6 +274,12 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
     upstreamStatus?: number | null;
     attempts?: number;
     candidates?: number | null;
+    // v1.17.2 / ADR-0042：转发路径能填的是上游腿 + trail；客户端腿/来源腿只在路由层拒绝时
+    // 才有值（`reportRejection` 自己填）。缺省 = 没这腿，不为了填满而编。
+    clientKeyMasked?: string | null;
+    sourceIp?: string | null;
+    invalidKeyFingerprint?: string | null;
+    attemptTrail?: readonly { keyId: string; reason: string; status: number }[];
   }
 
   /**
@@ -303,6 +317,14 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
         // 关联键与同一次请求的 usage_logs 行同值（契约 §6）：0 次真实尝试的两条终态
         // 上游侧毫无痕迹，这个键是唯一能把事件和那次调用对上的东西（ADR-0014 §3）。
         requestId: req.requestId,
+        // v1.17.2 / ADR-0042：三腿字段透传（转发路径事件只有上游腿 + trail；客户端腿与
+        // 指纹是路由层拒绝事件的专属，路由侧的 reportRejection 自己填）。
+        clientKeyMasked: facts.clientKeyMasked ?? null,
+        // 来源腿：引擎侧事件（502/499/egress-429）的 socket IP 从 `req.sourceIp` 来
+        // （路由层填；助手直调时不填 → null）。`facts.sourceIp` 优先，留给未来引擎内可能的覆盖。
+        sourceIp: facts.sourceIp ?? req.sourceIp ?? null,
+        invalidKeyFingerprint: facts.invalidKeyFingerprint ?? null,
+        attemptTrail: facts.attemptTrail,
         message: outcome.message,
       };
       errors.record(entry); // 只入队（端口契约：O(1)、不抛、不同步落库）
@@ -375,6 +397,13 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
     let lastStatus = 0;
     let lastTimedOut = false;
     let previousUpstreamId: string | null = null;
+    // v1.17.2 / ADR-0042「尝试明细」：真实尝试过的候选逐把记 `{keyId, reason, status}`，
+    // 终态随事件一起交给 sink（掩码映射、上限与序列化都在 sink 侧）。**只记真实尝试**
+    // （attempts 计数的那几把）：跳过类（冷却/饱和/密文缺失）没敲过上游，不是"怎么死的"，
+    // 混进来会让 trail 失真。上限 16 在 sink 侧，这里只管按次序追加。
+    const attemptTrail: { keyId: string; reason: string; status: number }[] = [];
+    let lastAttemptKey: string | null = null;
+    let lastAttemptUpstream: string | null = null;
     // 0 真实尝试的分型（ADR-0011）：三件事共用「attempts===0」但含义完全不同，
     // 客户端的重试策略与值班归因都靠它们分开 —— 不得再合流到 502 UPSTREAM_ERROR。
     let skippedSaturated = 0; // beginAttempt=false：并发槽位全满 → 429 RATE_LIMITED
@@ -383,6 +412,10 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
     // 出口级冷却（§16.7）：冷却期内的候选**不换 key**，全被跳完则径直回 429。
     // 与 key 级冷却的分野：key 级「换一把就好」，出口级「换一把必然再撞」。
     let skippedEgress = 0;
+    // v1.17.2 / ADR-0042（业主裁定 B「全带」）：出口冷却终态也要有 key 腿 —— 记**第一把被跳过
+    // 的候选**。诚实边界：这把 key **没被敲过**（0 次真实尝试），掩码只说明"谁被困在这个冷却
+    // 出口后面"，不是"谁挂了"；且照旧**不 reportFailure**（ADR-0021 决策 4a 原样）。
+    let firstEgressSkipped: { keyId: string; upstreamId: string } | null = null;
     let egressRetryAfterMs = 0; // 上述跳过里最长的剩余冷却 → 回给客户端的 Retry-After
     // 死绑定计数（决策 9(5)）：绑定出口全 retired / 已从池摘除 ⇒ 该候选**永远**选不出。
     // 与「现在用不了」的冷却/饱和（429 + Retry-After）分型；全部候选都死 ⇒ 503 NO_AVAILABLE_EGRESS。
@@ -438,6 +471,7 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
       const coolingUntil = egressId === null ? null : egress.cooldownUntil(egressId);
       if (coolingUntil !== null) {
         skippedEgress += 1;
+        if (firstEgressSkipped === null) firstEgressSkipped = { keyId: candidate.keyId, upstreamId: candidate.upstreamId };
         egressRetryAfterMs = Math.max(egressRetryAfterMs, coolingUntil - now());
         pool.endAttempt(candidate.keyId);
         emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'skipped' });
@@ -504,6 +538,9 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
         lastReason = 'NETWORK';
         lastStatus = 0;
         lastTimedOut = timedOut;
+        attemptTrail.push({ keyId: candidate.keyId, reason: 'NETWORK', status: 0 });
+        lastAttemptKey = candidate.keyId;
+        lastAttemptUpstream = candidate.upstreamId;
         emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'failure', reason: 'NETWORK' });
         continue;
       }
@@ -546,6 +583,7 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
           parseRetryAfter(response.headers.get('retry-after'), now()) ?? 0,
         );
         skippedEgress += 1;
+        if (firstEgressSkipped === null) firstEgressSkipped = { keyId: candidate.keyId, upstreamId: candidate.upstreamId };
         emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'skipped' });
         break;
       }
@@ -620,11 +658,17 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
             });
             const untilMs = verdict.cooldownUntilMs ?? now();
             const error = egressRateLimitedError(retryAfterSecOf(untilMs - now()));
+            // v1.17.2 / ADR-0042：事件带「当时正在用的上游 key」（candidate.keyId 就在手边，
+            // 此前只因不传而落成裸 `****`）。**带 keyId ≠ 进冷却**：ADR-0021 决策 10(4) 原样 ——
+            // 上面没有调 `reportFailure`，冷却落在出口上；掩码是"案发位置"，不是"记过"。
             reportGatewayError(req, started, error, {
               failureReason: reason,
+              keyId: candidate.keyId,
+              upstreamId: candidate.upstreamId,
               attempts,
               candidates: candidates.length,
               upstreamStatus: response.status,
+              attemptTrail: [...attemptTrail, { keyId: candidate.keyId, reason, status: response.status }],
             });
             return { kind: 'error', error, attempts };
           }
@@ -634,6 +678,9 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
         lastReason = reason;
         lastStatus = response.status;
         lastTimedOut = false;
+        attemptTrail.push({ keyId: candidate.keyId, reason, status: response.status });
+        lastAttemptKey = candidate.keyId;
+        lastAttemptUpstream = candidate.upstreamId;
         emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'failure', reason, status: response.status, ttfbMs });
         continue;
       }
@@ -729,7 +776,16 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
         logAttempt(req, { keyId: '', upstreamId: '', statusCode: 429, usage: null, ttfbMs: now() - started, attempts, failureReason: null, started });
         const error =
           skippedEgress > 0 ? egressRateLimitedError(retryAfterSecOf(egressRetryAfterMs)) : poolSaturatedError(attemptableCandidates);
-        reportGatewayError(req, started, error, { attempts, candidates: candidates.length });
+        // v1.17.2 / ADR-0042：出口冷却终态带 key 腿（**第一把被跳过的候选**）——
+        // 掩码只说明"谁被困在这个出口后面"，这把 key 没被敲过、没被记过（不 reportFailure，
+        // ADR-0021 原样）；池饱和终态（skippedEgress=0）没有出口语境，照旧不带 key。
+        reportGatewayError(req, started, error, {
+          attempts,
+          candidates: candidates.length,
+          ...(skippedEgress > 0 && firstEgressSkipped !== null
+            ? { keyId: firstEgressSkipped.keyId, upstreamId: firstEgressSkipped.upstreamId }
+            : {}),
+        });
         return { kind: 'error', error, attempts };
       }
       // 密文缺失/解析不到（可能叠加饱和）：配置侧异常，值班去查密文，不给客户端退避信号
@@ -750,14 +806,22 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
       lastTimedOut && lastReason === 'NETWORK'
         ? new GatewayError(504, GATEWAY_ERROR_CODES.UPSTREAM_TIMEOUT, `all ${attempts} attempt(s) timed out`, 'api_error')
         : upstreamError(`all ${attempts} attempt(s) failed: ${detail}`);
-    // 全试完了还是失败：没有"那把 key"可言（外键留空），但**最后一次**失败原因必须留下来 ——
-    // 排障时「502 里藏着 401」完全是另一种处置，靠 attempts + failureReason + upstreamStatus
-    // 三个数把三层口径都钉住（§12.1 那张"不可互相反推"的表就是为这一条写的）。
+    // 全试完了还是失败：**最后一次失败原因必须留下来** —— 排障时「502 里藏着 401」完全是
+    // 另一种处置，靠 attempts + failureReason + upstreamStatus 三个数把三层口径都钉住
+    // （§12.1 那张"不可互相反推"的表就是为这一条写的）。
+    //
+    // v1.17.2 / ADR-0042 语义修订：`keyId` 改带「最后摸过的那把」（`lastAttemptKey`）——
+    // 它**不等于**"它坏了"（可能是前面哪把先挂才轮换到它），要判罪配 `attemptTrail` 一起读
+    // （§12.3 `?keyId=` 筛选语义一句话就是为这条修订改的口）。trail 为空（attempts=0）时不带：
+    // 没有"摸过"，lastAttemptKey 也是 null，宁可没有也不编。
     reportGatewayError(req, started, error, {
       failureReason: lastReason,
+      ...(lastAttemptKey !== null ? { keyId: lastAttemptKey } : {}),
+      ...(lastAttemptUpstream !== null ? { upstreamId: lastAttemptUpstream } : {}),
       attempts,
       candidates: candidates.length,
       upstreamStatus: lastStatus > 0 ? lastStatus : null,
+      attemptTrail,
     });
     return { kind: 'error', error, attempts };
   }
@@ -842,6 +906,8 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
           upstreamStatus: ctx.upstreamStatus,
           attempts: ctx.attempts,
           candidates: ctx.candidates,
+          // v1.17.2 / ADR-0042：流中断只摸过这一把（首字节已到），trail 就是它一个
+          attemptTrail: [{ keyId: ctx.keyId, reason: 'NETWORK', status: 0 }],
         },
       );
     };

@@ -9,6 +9,8 @@
 // 落盘纪律：本函数是 gateway_error_events.message 与 error-event sink 的唯一入口，
 // 任何绕过它写库的路径都视为违规。
 
+import { createHash } from 'node:crypto';
+
 /** message 落盘前的字符上限（契约 §12.1）。超出部分截断，保留前半段归因线索。 */
 export const MAX_MESSAGE_CHARS = 512;
 
@@ -84,4 +86,19 @@ export function scrubMessage(raw: string | null | undefined): string | null {
  */
 export function fallbackMask(): string {
   return MASK;
+}
+
+/**
+ * 废 key 指纹（契约 §12.1 `invalidKeyFingerprint` / ADR-0042）：sha256 **前 8 hex**。
+ *
+ * 为什么只有 8 hex：用途只有归并「同一把废 key 反复敲门」，前 8 hex（32 bit）够归并；
+ * 全 64 hex 就是存的 `key_hash` 本身，指纹能与 `gateway_keys.key_hash` 等值比对 ——
+ * 那就成了"这把废 key 是否曾有效"的预言机。砍到 8 hex 保留归并、砍掉比对。
+ *
+ * 放在事件侧共用的 redact.ts（而不是 db/crypto.ts）：网关内核（engine/routes）不许 import
+ * db 层（AGENTS.md §8），而路由层是唯一产出点。碰撞域 2^32 对 192 bit 熵的网关 key
+ * 不可反推 —— 拿指纹验证一把猜测的 key 仍要逐把真实请求。
+ */
+export function keyFingerprint(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 8);
 }

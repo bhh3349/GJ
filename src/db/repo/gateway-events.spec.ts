@@ -225,3 +225,49 @@ describe('落盘前脱敏（仓储层兜底）', () => {
     expect(listGatewayErrorEvents(db, LIST).items[0]?.message).toBeNull();
   });
 });
+
+describe('三腿四列 roundtrip（v1.17.2 / ADR-0042）', () => {
+  it('四列逐项对得上；省略 = null（老语义零漂移），空串归 null 不留第二种"空"', () => {
+    const db = setup();
+    appendGatewayErrorEvent(
+      db,
+      input({
+        clientKeyMasked: '****abcd',
+        sourceIp: '203.0.113.7',
+        invalidKeyFingerprint: 'deadbeef',
+        attemptTrail: '[{"keyMasked":"****ef01","reason":"AUTH_INVALID","status":401}]',
+      }),
+    );
+    appendGatewayErrorEvent(db, input({}));
+    // 空串与缺省同型：掩码列不该出现空串（"有但认不出"是 keyMasked/**** 的专责）
+    appendGatewayErrorEvent(db, input({ clientKeyMasked: '', sourceIp: '', invalidKeyFingerprint: '', attemptTrail: '' }));
+
+    const items = listGatewayErrorEvents(db, LIST).items;
+    const full = items.find((e) => e.clientKeyMasked !== null);
+    expect(full?.clientKeyMasked).toBe('****abcd');
+    expect(full?.sourceIp).toBe('203.0.113.7');
+    expect(full?.invalidKeyFingerprint).toBe('deadbeef');
+    expect(full?.attemptTrail).toBe('[{"keyMasked":"****ef01","reason":"AUTH_INVALID","status":401}]');
+    // 上游腿 keyMasked 与新列互不干扰
+    expect(full?.keyMasked).toBe('****robe');
+
+    const bare = items.filter((e) => e.clientKeyMasked === null);
+    // 省略与空串同落 NULL：查询面只有一种"空"
+    expect(bare).toHaveLength(2);
+    for (const e of bare) {
+      expect(e.sourceIp).toBeNull();
+      expect(e.invalidKeyFingerprint).toBeNull();
+      expect(e.attemptTrail).toBeNull();
+    }
+  });
+
+  it('attemptTrail 兜底 scrub：绕过 sink 直写仓储的路径同样过凭据抹除（幂等）', () => {
+    const db = setup();
+    const cred = 'sk-probe-' + 'D'.repeat(24);
+    appendGatewayErrorEvent(db, input({ attemptTrail: `[{"keyMasked":"${cred}","reason":"AUTH_INVALID","status":401}]` }));
+    const e = listGatewayErrorEvents(db, LIST).items[0];
+    expect(e?.attemptTrail ?? '').not.toContain(cred);
+    // 抹完仍是合法 JSON（scrub 只替换凭据形状，不动结构）
+    expect(() => JSON.parse(e?.attemptTrail ?? '')).not.toThrow();
+  });
+});

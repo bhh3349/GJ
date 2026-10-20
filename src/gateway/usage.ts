@@ -114,18 +114,26 @@ export function resolveUsage(requestBody: unknown, responsePayload: unknown): To
  * - 上游 `stream_options.include_usage=true` 时最后一个 chunk 带 usage → 采信
  * - 否则拼 delta.content 估算 completion，prompt 从请求体估算
  * - 中途 `data: [DONE]` 不终止累积（上游可能之后才补 usage，实际按顺序结束即可）
+ * - 同时记录终局信号（`choices[].finish_reason` / `data: [DONE]`）：
+ *   openai-node 一类 SDK 看到终局帧就 abort 底层连接，网关必须能把
+ *   「收尾后的断开」与「真的中途断开」区分开（否则成功流量被记成 499 + 0 token）
  */
 export interface StreamUsageTracker {
   /** 喂一段原始 SSE 文本（可跨 chunk 切断，内部保留残行） */
   push(chunk: string): void;
   /** 流正常结束：给出最终 usage */
   finish(requestBody: unknown): TokenUsage;
+  /** 已经看到流式终局信号（finish_reason 或 [DONE]） */
+  observedCompletion(): boolean;
+  /** 上游末帧已给出真实 usage */
+  hasUpstreamUsage(): boolean;
 }
 
 export function createStreamUsageTracker(): StreamUsageTracker {
   let buffer = '';
   let upstreamUsage: TokenUsage | null = null;
   let completionText = '';
+  let sawTerminal = false;
 
   return {
     push(chunk: string): void {
@@ -148,13 +156,23 @@ export function createStreamUsageTracker(): StreamUsageTracker {
       const completion = estimateTokens(completionText);
       return { prompt, completion, total: prompt + completion, isEstimated: true };
     },
+    observedCompletion(): boolean {
+      return sawTerminal;
+    },
+    hasUpstreamUsage(): boolean {
+      return upstreamUsage !== null;
+    },
   };
 
   function consumeLine(line: string): void {
     const trimmed = line.trim();
     if (!trimmed.startsWith('data:')) return;
     const data = trimmed.slice(5).trim();
-    if (data === '' || data === '[DONE]') return;
+    if (data === '') return;
+    if (data === '[DONE]') {
+      sawTerminal = true;
+      return;
+    }
 
     let parsed: unknown;
     try {
@@ -174,6 +192,9 @@ export function createStreamUsageTracker(): StreamUsageTracker {
     if (!Array.isArray(choices)) return;
     for (const choice of choices) {
       if (typeof choice !== 'object' || choice === null) continue;
+      // 终局判定在读 delta 之前：`finish_reason` 一到就是终局，与后面有没有内容增量无关
+      const finishReason = (choice as { finish_reason?: unknown }).finish_reason;
+      if (finishReason !== null && finishReason !== undefined) sawTerminal = true;
       const delta = (choice as { delta?: unknown }).delta;
       if (typeof delta !== 'object' || delta === null) continue;
       const content = (delta as { content?: unknown }).content;

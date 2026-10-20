@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.17.0**　｜
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.17.1**　｜
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -1800,7 +1800,7 @@ REST 全量 `/api/stats/balance`（`live.ts` 注释里写明：通道只报"变�
 | `NO_AVAILABLE_KEY` | `error` | 503 | `NO_AVAILABLE_KEY` | 查池子与模型档案（候选为空的**或**密文解不出的） |
 | `UPSTREAM_ERROR` | `error` | 502 | `UPSTREAM_ERROR` | 候选存在但用尽 → 查上游 |
 | `UPSTREAM_TIMEOUT` | `error` | 504 | `UPSTREAM_TIMEOUT` | 上游首字节超时 |
-| `CLIENT_ABORTED` | `warn` | 499（内部） | 引擎内部 `499` | 调用方中途断开；**仅存在于事件流**，真实响应里没有这个状态，§10 也未登记 |
+| `CLIENT_ABORTED` | `warn` | 499（内部） | 引擎内部 `499` | 调用方中途断开；**仅存在于事件流**，真实响应里没有这个状态，§10 也未登记。判据（v1.17.1 补遗）：**终局帧已转发 ⇒ 视为正常完成**——openai-node 等主流 SDK 在 `[DONE]` 后立即 abort 底层连接，答案已完整送达，网关按 200 + 真实 usage 收账；499 只留给未见终局帧的真断开，且真断开也按估算落 usage（`is_estimated=1`），不再写 0 |
 | `INTERNAL` | `error` | 500 | 网关自身未预期异常 | 网关自己的问题 |
 
 `severity` 的分界是**归因侧**，不是"HTTP 是不是 >= 500"：429 与 502 都是失败，但一个在调用方/配额侧（`warn`）、一个在系统侧（`error`）。助手与值班按 `severity` 先分诊、再按 `category` 定位。
@@ -3947,6 +3947,27 @@ spec 三条判据：新库自带、老库真被 ALTER 到、重复跑不抛 dupl
 | ⑨ | 容量口径 | 所有容量数字（`capacity` / `reserveForData` / 每轮 token 数 / §15.5 的 ≈14 min 与重开门槛）都是**「单出口」口径**：出口 > 1 时**逐出口各自成立，不得跨出口加总** |
 
 > **§15.5 连带（v1.8.0 已同批落）**：「27 个账号一轮刷新 ≈ 1 分钟」按 ⑥ 重算为 **≈14 min**（`ceil(54/4)×60s`，单出口口径），0.6s 降为账号级内层纪律，重开门槛（ADR-0017 补遗 6）登记为 §15.5 脚注。本表是那三处改动的唯一口径源。
+>
+> **v1.17.1（2026-10-19，流式「终局后断开」误判 499 修复 —— openai-node SDK 收尾行为成文）**：
+> **动机**：DSH（openai-node SDK）全部 SSE 流量被记 `499 + prompt/completion 全 0`，而客户端实际收到了
+> 完整答案与真实 usage（差分实测：同一网关同一 key，一路读到 EOF 记 `200/63/34`，SDK 式收尾记
+> `499/0/0`）。**根因是外部事实 + 网关判据的组合**：openai-node 的流迭代器在收到 `data: [DONE]` 时
+> 即 return，其实现约定「提前停止迭代即 abort 底层请求」（`ChatCompletionStream.js:945/:1539`）——
+> 客户端拿到完整答案后**不等服务器关闭响应**就拆掉 TCP 连接；而网关的流包装器 `cancel()` 一律
+> `settle('client-abort')`（硬写 `usage=null`、跳过 `reportSuccess`），抢在 `settle('success')` 之前赢了竞争。
+> ① **tracker 新增两个只读探针**（`StreamUsageTracker.observedCompletion()` / `hasUpstreamUsage()`，
+> `src/gateway/usage.ts`）：终局信号 = 任一 `choices[].finish_reason != null` 或一行 `data: [DONE]`；
+> 心跳 / 坏 JSON / 纯增量帧不置位，且**只置位、永不复位**。
+> ② **`engine.ts` 的 `cancel()` 收尾分叉**：终局已转发 ⇒ 有界补读上游尾帧（窗口 1.5s、上限 64 帧、
+> 补读期间上游抛错一律吞掉——答案已送达，不能因此改判 502），采到真实 usage 后按**正常完成**收账
+> （200 + `reportSuccess` + `emitUsage`）；未见终局 ⇒ 仍走 499。`settled` 守卫保留，并发位只归还一次。
+> ③ **真断开也不丢账**：`CLIENT_ABORTED` 分支的 `usage` 从硬写 `null` 改为 `tracker.finish()`
+> 估算值（`is_estimated=1` 落库）；499 语义不变——不计失败、不进冷却、`outcome:'failure'` 不发、
+> `gatewayCode` 仍为 null。
+> ④ **§12.1 `CLIENT_ABORTED` 判据补一行**：**终局帧已转发 ⇒ 视为正常完成**；499 只留给未见终局帧的真断开
+> （用户 ESC / 上下文溢出 / 超时重试）。`category` 枚举、`severity`、§10 码表零变更。
+> **`/v1/*` 响应形状零变更、`SCHEMA_VERSION` 仍为 2、零 DDL、`ERROR_CODES` / `GATEWAY_ERROR_CODES` 零新增、
+> `routes.ts` / 非流式路径 / embeddings / `/api/*` 零改动。**
 >
 > **v1.17.0（2026-10-19，透支锁存 —— 余额 key 与套餐 key 耗尽即锁出选路，只有人工解锁才回池）**：**动机是业主原话**
 > 「那现在是不是能优化一下这个余额key和套餐key都透支意味着余额低于0.1的账号和关联key全部标记或者直接停用。

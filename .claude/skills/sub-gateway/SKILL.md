@@ -12,13 +12,13 @@ description: sub-gateway 项目（OpenAI 兼容多上游 key 池网关）的仓�
 | 需求 | 文件 |
 |---|---|
 | 起停实例、管理面 curl、错误事件/日志、直接查 SQLite | `references/ops-manual.md` |
-| `docs/api-contract.md`（约 4,700 行 / 120 个标题，当前 v1.17.0）章节 → 行号 | `references/contract-index.md` |
+| `docs/api-contract.md`（约 4,756 行 / 120 个标题，当前 v1.17.1）章节 → 行号 | `references/contract-index.md` |
 | `src/` `web/` 目录职责、关键文件、热路径红线 | `references/module-map.md` |
 | ADR-0001…0041 一行表（含"什么时候必须去读它"） | `references/adr-index.md` |
 
 ## 三条最容易踩的检索纪律
 
-1. **不要整读契约**。约 4,700 行。先到 `contract-index.md` 找行号，再 `sed -n 'A,Bp' docs/api-contract.md`。
+1. **不要整读契约**。约 4,750 行。先到 `contract-index.md` 找行号，再 `sed -n 'A,Bp' docs/api-contract.md`。
 2. **不要整读 ADR 目录**。41 份约 7,200 行。`adr-index.md` 一行一份；只有被现行问题直接点名时才读那一份全文。
 3. **不要用 Read 扫源码**。`src/` 非测试代码约 3 万行。先用 Grep 定位 `文件:行`，再 Read 带 offset/limit 的窗口。
 

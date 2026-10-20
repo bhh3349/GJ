@@ -16,7 +16,7 @@
 ## src/ 各目录的关键文件
 
 ### src/gateway/（转发热路径，~8.4k 行）
-- **`engine.ts`**（~970）转发核心。`/v1/*` 对 body **纯透传**（:371 附近只覆盖 `model`）；`finish_reason` 全仓库无处理代码 → "输出被限"几乎从不是网关干的。上游超时 120s（:195）。
+- **`engine.ts`**（~970）转发核心。`/v1/*` 对 body **纯透传**（:371 附近只覆盖 `model`）；`finish_reason` 的唯一消费点是 `usage.ts` tracker 的终局探针（§12.1 判据补遗）：**openai-node 等 SDK 在 `[DONE]` 后即 abort 底层连接**，所以流包装器 `cancel()` 见终局已转发就走有界补读（1.5s 窗 / 64 帧 / 单读超时竞速）按 200 收账，`499` 只留给未见终局的真断开。上游超时 120s（:195）。
 - **`routes.ts`** `/v1` 路由注册：鉴权、限流、OpenAI 错误形状、`bodyLimitBytes`（默认 8MB，字节不是 token）、`UNSUPPORTED_PREFIXES`（images/audio/rerank/moderations/files/fine_tuning → 501）。
 - **`key-pool.ts`** 内存 key 池。`getAvailableKeys` 只读内存快照；快照由 **change_log 事件 + 1s 轮询兜底** 刷新（AGENTS.md §5）。`isUsable` 早退顺序：status → **depleted（锁存，§20/ADR-0041）** → autoDisabled → cooldown → inflight → 类别规则（余额 `null||>0` / 套餐时效+余量）—— 注意锁存与"余额 ≤0 排除"是**两道独立的闸**，解一个不等于解另一个。
 - **`egress.ts`** 出口（IP 级）限流/预算；**`cooldown.ts`** 冷却阶梯；**`limiter.ts`**；**`usage.ts`** 从响应 choices 里数 token（不碰 finish_reason）。

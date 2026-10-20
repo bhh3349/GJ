@@ -700,6 +700,123 @@ describe('流式透传', () => {
     assert.equal(k1.inflight, 0, '断开也必须归还并发位');
   });
 
+  // ---- 终局后的断开（§12.1 判据补遗）：openai-node 迭代到 [DONE] 即 abort 底层
+  // 连接，答案已完整送达。这一组用例把「按成功收账」与「真中途断开」钉成两条路 ----
+
+  it('SDK 式收尾：终局帧后 cancel 按成功收账（200 + 真实 usage），不记 499', async () => {
+    const sse = controlledSse();
+    const h = makeHarness({ keys: [keyConfig('k1')], steps: [() => sse.response] });
+
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o', true), stream: true, requestId: REQUEST_ID });
+    assert.equal(result.kind, 'stream');
+    if (result.kind !== 'stream') return;
+
+    // 上游把整段答案推完（含终局帧与 usage 帧），但**故意不 close**：
+    // 模拟真实上游在 [DONE] 之后还挂着连接，而客户端此刻已经决定走人
+    sse.push('data: {"choices":[{"delta":{"content":"好"}}]}\n\n');
+    sse.push('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n');
+    sse.push('data: {"choices":[],"usage":{"prompt_tokens":63,"completion_tokens":15,"total_tokens":78}}\n\n');
+    sse.push('data: [DONE]\n\n');
+
+    const reader = result.body.getReader();
+    await reader.read();
+    await reader.read();
+    // SDK 行为：拿到终局就拆连接（cancel 底层流）
+    await reader.cancel();
+
+    // 补读是有界的（1.5s 窗口 / 64 帧），用真实时钟等它落定
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    assert.equal(h.logs.length, 1, '恰好一条账，不得二次落库');
+    assert.equal(h.logs[0]?.statusCode, 200, '终局已转发 ⇒ 必须记 200，而不是 499');
+    assert.equal(h.usages[0]?.total, 78, '必须采到上游真实 usage（prompt 63 + completion 15）');
+    assert.equal(h.logs[0]?.promptTokens, 63, 'prompt 不得归零');
+    assert.equal(h.logs[0]?.isEstimated, false, '采到上游 usage 就不该是估算值');
+    const k1 = runtimeOf(h.pool, 'k1');
+    assert.equal(k1.consecutiveFails, 0, '收尾不算失败');
+    assert.equal(k1.lastLatencyMs !== null && k1.lastLatencyMs >= 0, true, 'reportSuccess 必须被调用（lastLatencyMs 被回填）');
+    assert.equal(k1.inflight, 0, '并发位只归还一次');
+  });
+
+  it('真中途断开：无终局帧即 cancel ⇒ 仍记 499，不计失败，并发位归还', async () => {
+    const sse = controlledSse();
+    const h = makeHarness({ keys: [keyConfig('k1')], steps: [() => sse.response] });
+
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o', true), stream: true, requestId: REQUEST_ID });
+    assert.equal(result.kind, 'stream');
+    if (result.kind !== 'stream') return;
+
+    sse.push('data: {"choices":[{"delta":{"content":"半句"}}]}\n\n'); // 只有内容，没有终局
+    const reader = result.body.getReader();
+    await reader.read();
+    await reader.cancel(); // 用户按 ESC
+
+    const k1 = runtimeOf(h.pool, 'k1');
+    assert.equal(h.logs[0]?.statusCode, 499, '没看到终局的断开仍是「客户端断开」');
+    assert.equal(k1.consecutiveFails, 0, '真断开也不把 key 打进冷却');
+    assert.equal(k1.lastLatencyMs, null, '真断开不 reportSuccess（lastLatencyMs 不该被回填）');
+    assert.equal(k1.inflight, 0, '并发位必须归还');
+  });
+
+  it('终局后 usage 迟到：补读窗口把它采回来，按真实 usage 收账', async () => {
+    const sse = controlledSse();
+    const h = makeHarness({ keys: [keyConfig('k1')], steps: [() => sse.response] });
+
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o', true), stream: true, requestId: REQUEST_ID });
+    assert.equal(result.kind, 'stream');
+    if (result.kind !== 'stream') return;
+
+    sse.push('data: {"choices":[{"delta":{"content":"好"}}]}\n\n');
+    sse.push('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n');
+    const reader = result.body.getReader();
+    await reader.read(); // 内容帧
+    await reader.read(); // 终局帧：此刻网关已认识终局
+    await reader.cancel(); // 客户端拆连接
+
+    // 客户端走了之后上游才补 usage 帧（顺序上「终局在前、usage 在后」的真实形状）
+    setTimeout(() => {
+      sse.push('data: {"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":34,"total_tokens":46}}\n\n');
+    }, 20);
+
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    assert.equal(h.logs[0]?.statusCode, 200);
+    assert.equal(h.logs[0]?.totalTokens, 46, '补读窗口必须采到迟到的 usage');
+    assert.equal(h.logs[0]?.isEstimated, false);
+    assert.equal(runtimeOf(h.pool, 'k1').inflight, 0);
+  });
+
+  it('终局后上游永不补帧：窗口到点按估算收账，不卡死、并发位归还', async () => {
+    // controlledSse 的流既不 close 也不补帧 —— read() 永远悬着。
+    // 单读超时竞速必须能把它拉出来：收账照常发生，进程不被挂住的 read 拖死。
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const sse = controlledSse();
+      const h = makeHarness({ keys: [keyConfig('k1')], steps: [() => sse.response] });
+
+      const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o', true), stream: true, requestId: REQUEST_ID });
+      assert.equal(result.kind, 'stream');
+      if (result.kind !== 'stream') return;
+
+      sse.push('data: {"choices":[{"delta":{"content":"好"}}]}\n\n');
+      sse.push('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n');
+      const reader = result.body.getReader();
+      await reader.read();
+      await reader.read();
+      await reader.cancel(); // 客户端走了，上游永不再发帧
+
+      // 推进假时钟穿过补读窗口（1.5s 单读超时 + 3s 总窗兜底）；用例能走到断言 = 没卡死
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      assert.equal(h.logs.length, 1, '恰好一条账（settle 幂等，总窗与 pump 谁先到都不二次落库）');
+      assert.equal(h.logs[0]?.statusCode, 200, '终局已转发 ⇒ 按成功收账');
+      assert.equal(h.logs[0]?.isEstimated, true, '上游没给 usage ⇒ 估算值收账（宁可少记不可不记）');
+      assert.equal(runtimeOf(h.pool, 'k1').inflight, 0, '并发位必须归还（不能悬在挂死的 read 上）');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('首把 401 时流式请求同样在「首字节前」换 key', async () => {
     const sse = controlledSse();
     const h = makeHarness({

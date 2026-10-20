@@ -811,8 +811,10 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
       }
 
       if (kind === 'client-abort') {
-        // 客户端断开：不计失败、不进冷却（否则用户一按 ESC 就把 key 打进冷却），只留痕
-        streamLog(499, null, null);
+        // 客户端断开：不计失败、不进冷却（否则用户一按 ESC 就把 key 打进冷却），只留痕。
+        // usage 用估算收着（isEstimated=true）而不是写 null：真断开也该留下半截账，
+        // 否则成本/配额对账永远少一块（usage_logs.is_estimated 落 1）
+        streamLog(499, tracker.finish(ctx.req.body), null);
         // 高频正常现象，不是故障（§12.1 给它单独分型、severity=warn）。
         // 与上面的 499 同一处置：`gatewayCode: null`，实现侧据状态码归入 CLIENT_ABORTED。
         reportError(
@@ -844,6 +846,60 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
       );
     };
 
+    // SDK 式收尾（§12.1 判据补遗）：客户端在终局帧后拆连接（openai-node 迭代到
+    // `[DONE]` 即 return → abort 底层 fetch，这是它的标准行为，OpenAI 官方端点
+    // 同样被这样访问）。答案其实已经完整送达，若直接按中途断开收账：
+    // 499 + 0 token + 跳过 reportSuccess —— 成功流量被记成失败。所以有界补读上游
+    // 尾帧（usage 帧常在 `[DONE]` 前后一两帧），采到真实 usage 再按正常完成结算。
+    const TERMINAL_DRAIN_WINDOW_MS = 1_500; // 覆盖 usage 慢半拍，又不吊住进程退出
+    const TERMINAL_DRAIN_MAX_CHUNKS = 64; // keep-alive 空转硬兜底
+
+    const settleAfterTerminalDrain = (reason: unknown): Promise<void> => {
+      let chunks = 0;
+      const readOnce = async (): Promise<Awaited<ReturnType<typeof reader.read>> | null> => {
+        // 单次 read 独立超时竞速：上游挂死（永不 resolve 的 read）时窗口仍能到点，
+        // 不然 watchdog 赢了竞速、pump 却永远悬在 await 上，并发位照样泄漏
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<null>((resolve) => {
+          timer = setTimeout(() => resolve(null), TERMINAL_DRAIN_WINDOW_MS);
+          if (typeof timer.unref === 'function') timer.unref();
+        });
+        try {
+          return await Promise.race([reader.read().catch(() => null), timeout]);
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+      // 答案已送达：补读期间上游抛错直接吞（不能因此改判 502）
+      let stopped = false;
+      const pump = async (): Promise<void> => {
+        for (;;) {
+          if (stopped) break;
+          if (tracker.hasUpstreamUsage()) break;
+          if (chunks >= TERMINAL_DRAIN_MAX_CHUNKS) break;
+          const result = await readOnce();
+          if (stopped) break;
+          if (result === null) break;
+          if (result.done) break;
+          chunks += 1;
+          tracker.push(decoder.decode(result.value, { stream: true }));
+        }
+        settle('success');
+        await reader.cancel(reason).catch(() => undefined);
+      };
+      // 总窗兜底：补读全程超过窗口即放弃等待。`settle` 自带 `settled` 守卫，
+      // 与 pump 的收尾是幂等的（先到者胜，不会二次 endAttempt / 二次落库）。
+      const watchdog = new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          stopped = true;
+          settle('success');
+          resolve();
+        }, TERMINAL_DRAIN_WINDOW_MS * 2);
+        if (typeof timer.unref === 'function') timer.unref();
+      });
+      return Promise.race([pump(), watchdog]);
+    };
+
     return new ReadableStream<Uint8Array>({
       async pull(controller) {
         let result: Awaited<ReturnType<typeof reader.read>>;
@@ -873,6 +929,12 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
       },
 
       cancel(reason) {
+        // openai-node 一类 SDK 在终局帧后立即 abort 底层连接：此时上游流其实已经完整送达。
+        // 终局已转发 ⇒ 这不是客户端中途跑路，按正常完成收账（否则成功流量被记成 499 + 0 token）。
+        if (tracker.observedCompletion()) {
+          void settleAfterTerminalDrain(reason);
+          return;
+        }
         settle('client-abort');
         void reader.cancel(reason).catch(() => undefined);
       },

@@ -131,4 +131,38 @@ describe('createStreamUsageTracker', () => {
     const usage = tracker.finish({ messages: [] });
     assert.ok(usage.completion > 0);
   });
+
+  // ---- 终局探针（§12.1 判据补遗）：SDK 在终局帧后 abort 连接，网关据此把
+  // 「收尾后的断开」与「真中途断开」分开。以下用例钉住判据本身 ----
+
+  it('终局探针：finish_reason 出现即置位；纯增量帧不置位', () => {
+    const tracker = createStreamUsageTracker();
+    assert.equal(tracker.observedCompletion(), false, '还没见到任何终局信号');
+    tracker.push('data: {"choices":[{"delta":{"content":"半"}}]}\n\n');
+    assert.equal(tracker.observedCompletion(), false, '只有 delta.content、finish_reason=null 不是终局');
+    tracker.push('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n');
+    assert.equal(tracker.observedCompletion(), true, 'finish_reason 一到即终局');
+  });
+
+  it('终局探针：data: [DONE] 置位；心跳/坏 JSON 不置位', () => {
+    const tracker = createStreamUsageTracker();
+    tracker.push(': keep-alive\n\n');
+    tracker.push('event: ping\n\n');
+    tracker.push('data: {broken\n\n');
+    assert.equal(tracker.observedCompletion(), false, '心跳与坏 JSON 都不是终局');
+    tracker.push('data: [DONE]\n\n');
+    assert.equal(tracker.observedCompletion(), true);
+    // 已终局后到来的心跳不得「取消」终局（只置位、永不复位）
+    tracker.push(': keep-alive\n\n');
+    assert.equal(tracker.observedCompletion(), true);
+  });
+
+  it('hasUpstreamUsage：末帧 usage 到手才为真', () => {
+    const tracker = createStreamUsageTracker();
+    assert.equal(tracker.hasUpstreamUsage(), false);
+    tracker.push('data: {"choices":[{"delta":{"content":"x"}}]}\n\n');
+    assert.equal(tracker.hasUpstreamUsage(), false, '增量帧不算');
+    tracker.push('data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":1,"total_tokens":6}}\n\n');
+    assert.equal(tracker.hasUpstreamUsage(), true);
+  });
 });

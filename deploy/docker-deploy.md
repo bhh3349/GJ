@@ -139,6 +139,17 @@ pnpm web:build
 docker compose build && docker compose up -d   # 数据在命名卷，重建不动数据
 ```
 
+改了后端代码时的实测流程（2026-10-20，499 修复部署）：
+
+- 前端没动就跳过 `pnpm web:build`（`web/dist` 是 bind 只读挂载，容器直接读宿主机的文件）。
+- `docker compose up -d --force-recreate gateway` 会在新镜像存在时只重建容器；纯
+  `docker build -t sub-gateway:local .` + `--force-recreate` 与 `docker compose build` 等价。
+- 镜像建了先验证再换容器：`docker run --rm --entrypoint node sub-gateway:local -e "..."` 查
+  `dist/` 里是否真有新代码——镜像标签对不代表内容新。
+- 重建前做 DB 快照（VACUUM INTO 只读连接跑，`docker cp` 拷出来），数据虽在命名卷
+  理论上不动，但快照在手，任何翻车都能回到重建前一刻。
+- 建议同时打日期标签（`-t sub-gateway:2026-10-20`），回滚就是 `docker tag` 换回去 + recreate。
+
 ## 6. 已知不粉饰
 
 - 镜像留着构建期工具链（python3/make/g++，~120MB）：没做 multi-stage，

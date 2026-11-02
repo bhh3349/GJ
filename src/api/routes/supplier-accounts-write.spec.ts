@@ -1067,6 +1067,24 @@ describe('POST /keys/sync', () => {
     expect(rows[1]?.pooled_key_id).toBeNull();
   });
 
+  // v1.18.2：画师在真接口自测里撞到的那一形态 —— 一批账号里有一把凭据解不开时，
+  // 曾经整任务 failed、`result` 为 null，前端浮层连"哪些账号已经同步完"都读不到。
+  // 兜底壳（`oneOrItem`）之后：炸的那行落 `INTERNAL`，任务照常 succeeded。
+  it('单账号凭据解密炸 ⇒ 落 INTERNAL 行，任务仍 succeeded、result 不为 null', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    tamperCipher(h.db, accountId);
+
+    const { result } = await runBatch(h, '/api/supplier-accounts/keys/sync', { upstreamId: id, ids: [accountId] });
+    expect(result.total).toBe(1);
+    expect(result.ok).toBe(0);
+    expect(result.failed).toBe(1);
+    expect(result.items[0]).toMatchObject({ accountId, action: 'sync', ok: false, code: 'INTERNAL' });
+    // 零上游请求：连凭据都没读出来，不该有任何一发打出去。
+    expect(h.upstream.count('/api/token/search')).toBe(0);
+  });
+
   it('后 4 位撞号 → KEY_MASK_AMBIGUOUS，且**一行都不更新**', async () => {
     const h = await setup();
     const { id } = tierflowUpstream(h.db);
@@ -1213,37 +1231,50 @@ describe('审计（§15.7：四个批量端点各一条，`detail` 只放计数�
     expect(dump).not.toContain(SECRET_A);
   });
 
-  // 审计项 E：收尾回调一度在 `work()` **里面**手调（而不是 `startTask` 的第 5 参），
-  // 而 `appendAudit` 是裸的 `.run()` —— DB 忙 / 外键一炸就抛。那句 throw 会 reject 掉
-  // `work()`，把一个**已经跑完**的批量倒置成 failed，`result` 也一起丢。
-  // 第 5 参在终态落库之后调用，抛错影响不到任务本身。
-  //
-  // 这里用一个**真会让 `work()` 整支 reject** 的形状：密文解不开。驱动器把每次 fetch
-  // 都裹在 try 里（上游不可达只算一行失败），所以"让假 fetch 抛错"到不了这条支 ——
-  // 而 `refreshOne` 里 `readSupplierCredential` 的 `decryptSecret` 是裸的
+  // 审计项 E 的回归锁 + v1.18.2 单行兜底：
+  // 驱动器把每次 fetch 都裹在 try 里（上游不可达只算一行失败），所以"让假 fetch 抛错"
+  // 到不了这条支。而 `readSupplierCredential` 的 `decryptSecret` 是裸的
   // `decipher.final()`，AUTH_TAG 不对就当场抛。密文被改动过一次正是"MASTER_KEY 换过"
   // 的现场形态（服务层那句话自己写着"多半是 MASTER_KEY 与写入时不一致"）。
-  it('任务失败 ⇒ auditBatch 收到 result=null 且记 result=fail（回调走 startTask 第 5 参）', async () => {
+  //
+  // v1.18.2 裁决：这类错误只影响那**一个**账号，不能把整批倒置成 failed ——
+  // 契约 §5 给 failed 同时钉了 `result: null`，前端浮层读的恰是 `result.items`，
+  // 一次单账号异常会连"同批其他账号跑完没有"都变得读不到。
+  // 单账号异常一律落 `INTERNAL` 行（`oneOrItem` 兜底壳），任务照常 succeeded，
+  // 审计 `detail` 照常给计数。
+  //
+  // 「任务级 failed ⇒ result=null ⇒ 审计 fail」这一支由 startTask 的结构保证
+  // （第 5 参在终态落库**之后**调用），没有合成夹具能触达它 —— 本用例断言
+  // result 非 null 本身就是在锁"回调没有写回 work 里面"（审计项 E 的原始回归）。
+  it('单账号解密炸 ⇒ 逐行 INTERNAL、任务 succeeded、审计照常计数（兜底壳不丢整批明细）', async () => {
     const h = await setup();
     const { id } = tierflowUpstream(h.db);
-    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
     // 把密码密文的最后一个字节翻掉：GCM 的 tag 必炸。**只动一个字节** ——
     // 翻整个 blob 会连密文版本字节一起坏掉，那条路的报错是"版本不支持"而不是 tag，
     // 而这里要的正是"密文读得出来、但校验不过"这一种。
-    tamperCipher(h.db, accountId);
+    const bad = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    tamperCipher(h.db, bad);
+    // 同批混一个健康账号：兜底壳只许影响炸的那一行，不许搭上别人。
+    const good = seedPasswordAccount(h.db, id, { phone: PHONE_B, secret: SECRET_B, session: 'sess-ok' });
 
-    const res = await post(h, '/api/supplier-accounts/refresh', { upstreamId: id, ids: [accountId] });
-    expect(res.status).toBe(202);
-    const task = await settle(h.db, String(res.body['taskId']));
-    expect(task.status).toBe('failed');
+    const { result } = await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id, ids: [bad, good] });
+    expect(result.ok).toBe(1);
+    expect(result.failed).toBe(1);
+    const badItem = result.items.find((i) => i.accountId === bad);
+    expect(badItem?.action).toBe('refresh');
+    expect(badItem?.ok).toBe(false);
+    expect(badItem?.code).toBe('INTERNAL');
+    expect(badItem?.message ?? '').not.toBe('');
+    const goodItem = result.items.find((i) => i.accountId === good);
+    expect(goodItem?.ok).toBe(true);
 
     const audits = h.db
       .prepare("SELECT result, detail FROM audit_log WHERE action = 'supplier.refresh'")
       .all() as { result: string; detail: string }[];
     expect(audits).toHaveLength(1);
-    // 任务炸了 ⇒ 这次审计动作本身失败，不能写成 ok
-    expect(audits[0]?.result).toBe('fail');
-    expect(audits[0]?.detail).toBe('task failed');
+    // 逐项有失败 ⇒ 仍是 'ok'（§15.7：detail 的计数说明一切），不再倒置成 task failed
+    expect(audits[0]?.result).toBe('ok');
+    expect(audits[0]?.detail).toBe('ok=1 failed=1 skipped=0 total=2');
   });
 });
 

@@ -427,6 +427,41 @@ function emptyItem(
 }
 
 /**
+ * 单账号一行的**兜底壳**：per-account 的意外异常不炸整批。
+ *
+ * 为什么必须有这一层：契约 §5 给任务终态的 `failed` 同时钉了 `result: null`
+ * （`docs/api-contract.md` §5「`failed` 时 `message` 非空、`result` 为 `null`」），
+ * 而前端浮层读的就是 `result.items` —— 一次单账号异常会把它变得**读不到**：
+ * 同一批次里其他账号明明已经跑完，逐行明细却整份消失，界面上只剩「任务失败」。
+ *
+ * 这类错误天然属于单行：凭据解密失败（`MASTER_KEY` 与写入时不一致，见
+ * `readSupplierCredential` 的两个调用点注释）、台账行畸形、驱动程序没接住的意外。
+ * 它们只影响那一个账号。
+ *
+ * 所以口径是：**`failed` 留给真正的任务级意外**（批量框架自身炸），
+ * 单账号异常一律落成 `INTERNAL` 行、任务照常 `succeeded`。
+ * `message` 只取异常文本 —— 解密失败那句不含密文，也不会带上 key 明文。
+ */
+async function oneOrItem(
+  ref: SupplierAccountRef,
+  action: SupplierBatchAction,
+  run: () => Promise<SupplierBatchItem>,
+): Promise<SupplierBatchItem> {
+  try {
+    return await run();
+  } catch (err) {
+    return emptyItem({
+      accountId: ref.id,
+      identifier: ref.identifier,
+      action,
+      ok: false,
+      code: 'INTERNAL',
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
  * 逐行结果的累加器。
  *
  * 行按**输入次序**排（`index`），不按完成次序 —— 并发 4 之下完成次序是随机的，
@@ -1197,7 +1232,7 @@ export function startSupplierRefresh(ctx: SupplierOps, body: unknown, hooks: Bat
       await Promise.all(
         targets.map((ref, index) =>
           queue.run(async () => {
-            tally.put(index, await refreshOne(ctx, baseUrl, supplier, ref, excluded));
+            tally.put(index, await oneOrItem(ref, 'refresh', () => refreshOne(ctx, baseUrl, supplier, ref, excluded)));
             reporter.step();
           }),
         ),
@@ -1518,7 +1553,12 @@ export function startSupplierKeys(ctx: SupplierOps, body: unknown, hooks: BatchH
       await Promise.all(
         targets.map((ref, index) =>
           queue.run(async () => {
-            tally.put(index, await createKeysOne(ctx, baseUrl, supplier, upstreamId, ref, spec, excluded));
+            tally.put(
+              index,
+              await oneOrItem(ref, 'create', () =>
+                createKeysOne(ctx, baseUrl, supplier, upstreamId, ref, spec, excluded),
+              ),
+            );
             reporter.step();
           }),
         ),
@@ -1825,7 +1865,10 @@ export function startSupplierRotateKey(ctx: SupplierOps, body: unknown, hooks: B
       await Promise.all(
         targets.map((ref, index) =>
           queue.run(async () => {
-            tally.put(index, await rotateOne(ctx, baseUrl, supplier, upstreamId, ref, excluded, subNo));
+            tally.put(
+              index,
+              await oneOrItem(ref, 'rotate', () => rotateOne(ctx, baseUrl, supplier, upstreamId, ref, excluded, subNo)),
+            );
             reporter.step();
           }),
         ),
@@ -2032,7 +2075,7 @@ export function startSupplierKeysSync(ctx: SupplierOps, body: unknown, hooks: Ba
       await Promise.all(
         targets.map((ref, index) =>
           queue.run(async () => {
-            tally.put(index, await syncKeysOne(ctx, baseUrl, supplier, ref, excluded));
+            tally.put(index, await oneOrItem(ref, 'sync', () => syncKeysOne(ctx, baseUrl, supplier, ref, excluded)));
             reporter.step();
           }),
         ),

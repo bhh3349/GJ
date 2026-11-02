@@ -13,6 +13,18 @@
  *
  * 注意 `balancePreset.effective`：它为 `false` 只说明"当前生效的是用户模板"，
  * 而模板那条路是否完整由第 1 条判，不参与这里的判定。
+ *
+ * **为什么停两档、不补契约 §2 曾经写的第 ③ 档「账号型驱动」**（Chief 裁决 2026-11-03，契约 v1.18.1）：
+ * 取证过那条腿在后端**从未实现** —— `resolveQueryPlan`（`src/api/services/balance-query.ts:182-205`）
+ * 只有 template → preset → none，`assertQueryable`（`:223-234`）没有 supplier 分支，三条 key 级刷新路由
+ * （`routes/keys.ts:293`/`:391`、`routes/upstreams.ts:233`）都拿它当闸。真接口实测：账号型上游（tierflow /
+ * tokenrhythm）无模板无 preset 时，`POST /api/keys/:id/balance/refresh` 与
+ * `POST /api/upstreams/:id/balance/refresh` 均 **HTTP 422**「该上游没有可用的余额查询方式」，
+ * `POST /api/supplier-accounts/keys/sync` 在无账号时也是 422。
+ * 所以前端补第 ③ 档 = 造一批**注定被当场拒**的请求，与本文件开头那条纪律直接冲突。
+ * 账号型 key 的余额真相源是**账号维度**（`POST /api/supplier-accounts/refresh` 写账号行；
+ * 套餐余量靠 §15.2 `keys/sync` 的回填腿），不在 key 维度 —— 页面上那类行改成**引导入口**（见 `KeysPage`），
+ * 本判据不参与、也保持与后端逐条对齐。
  */
 import type { Upstream } from '@/api/types';
 

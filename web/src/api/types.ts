@@ -393,14 +393,62 @@ export type FailureReason =
 
 export type BalanceSource = 'manual' | 'template';
 
+/**
+ * §3（v1.18.0）套餐快照的**读侧**形状。
+ *
+ * `remainingTokens: null` = **未同步**（从未查到过），与 `0`（查到过、确实烧干）是两个值，
+ * 前端**不得渲染成同一句话** —— 与 `balance` 同一条纪律（§0.2「未知 ≠ 0」）。v1.18.0 起
+ * 读路径不再把 NULL 塌成 0（此前 `repo/keys.ts` 的 `?? 0` 让管理面把「没同步」显示成「没钱」，
+ * 而网关选路对 NULL 按未知哨兵排序，两个消费面语义分裂，ADR-0030）。
+ *
+ * `totalTokens` = 归属账号**当前套餐**的基础 Token 总量（`basic_token_total`）；无归属 /
+ * 撞号 / 上游没给 → `null`，渲染「—」而不是 0。
+ */
 export interface TokenPlan {
-  remainingTokens: number;
+  remainingTokens: number | null;
+  totalTokens: number | null;
   expiresAt: Iso8601 | null;
+}
+
+/**
+ * 写侧套餐体（`POST /api/keys`、`PATCH /api/keys/:id` 的 `tokenPlan`）。
+ *
+ * 与读侧**必须是两个类型**：契约 §3 的 `tokenPlanSchema` 只收 `remainingTokens`（必填整数）
+ * 与 `expiresAt`，`totalTokens` 是从订阅台账反查出来的**派生只读**字段，写不进去。
+ * 合成一个类型就会逼着表单发一个服务端 400（`additionalProperties`）或补一个假 `totalTokens`。
+ */
+export interface TokenPlanInput {
+  remainingTokens: number;
+  expiresAt?: Iso8601 | null;
+}
+
+/**
+ * §3（v1.18.0 新增 / v1.18.1 扩容）key 的归属供应商账号引用。
+ *
+ * `identifier` 与 §15.1 `SupplierAccount.identifier` 同源同形：**掩码**手机号 / 邮箱
+ * （如 `138****0000`），真值不出后端。`null` 归属 = 手工建的 key（非账号池来源），
+ * **不是「未知」**；同一把 key 被多条台账行指向（撞号）时也回 `null` —— 宁缺勿假。
+ *
+ * `balanceCents` / `balanceUpdatedAt`（v1.18.1）= 账号余额的**只读镜像**（同 §15.1 账号行
+ * 同源同值，含「查失败不动时间戳」纪律）。账号型上游的 key **没有** key 级余额
+ * （§2 v1.18.1：key 级查询不支持，恒 422），「余额」列渲染这一对而**不是** key 自己的
+ * `balance`（那列对账号型 key 恒为 null）。`balanceCents` 的 `null` = **未知 ≠ 0**。
+ */
+export interface KeyAccountRef {
+  id: string;
+  identifier: string;
+  balanceCents: number | null;
+  balanceUpdatedAt: Iso8601 | null;
 }
 
 export interface UpstreamKey {
   id: string;
   upstreamId: string;
+  /**
+   * §3（v1.18.0）：该 key 的**归属供应商账号**（`supplier_account_keys.pooled_key_id` 反查，
+   * 唯一归属才算）。`null` = 非账号池来源（手工建的 key），**不是「未知」** —— 渲染「—」。
+   */
+  account: KeyAccountRef | null;
   label: string;
   /** 后端唯一出口，形如 `****a1b2`。明文永不出现。 */
   maskedKey: string;
@@ -467,7 +515,7 @@ export interface KeyCreateRequest {
   label?: string;
   weight?: number;
   balance?: Cents | null;
-  tokenPlan?: TokenPlan | null;
+  tokenPlan?: TokenPlanInput | null;
 }
 
 export interface KeyPatchRequest {
@@ -475,7 +523,7 @@ export interface KeyPatchRequest {
   enabled?: boolean;
   weight?: number;
   category?: KeyCategory;
-  tokenPlan?: TokenPlan | null;
+  tokenPlan?: TokenPlanInput | null;
   revision: number;
 }
 

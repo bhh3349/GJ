@@ -12,7 +12,7 @@ import { useEffect } from 'react';
 
 import { keysApi } from '@/api/endpoints';
 import { useAction } from '@/api/hooks';
-import type { KeyCategory, TokenPlan, Upstream, UpstreamKey } from '@/api/types';
+import type { KeyCategory, TokenPlanInput, Upstream, UpstreamKey } from '@/api/types';
 import { tokens } from '@/theme/tokens';
 import { formatBalance } from '@/utils/format';
 
@@ -82,7 +82,10 @@ export function KeyFormModal({
     const values = await form.validateFields();
     const category = values.category;
 
-    const tokenPlan: TokenPlan | null =
+    // 写侧只收 `remainingTokens` / `expiresAt`（`TokenPlanInput`）；`totalTokens` 是订阅台账
+    // 反查的只读派生值，写进去会被 400。留空 = 两个字段都落 NULL = 「未同步」——
+    // 与「录入一个 0」不是一回事（0 是"查到过且烧干"），所以这里不替用户补 0。
+    const tokenPlan: TokenPlanInput | null =
       category === 'token-plan' && values.planTokens !== null && values.planTokens !== undefined
         ? { remainingTokens: values.planTokens, expiresAt: values.planExpiresAt ?? null }
         : null;

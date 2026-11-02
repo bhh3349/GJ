@@ -55,6 +55,28 @@ export function formatTokens(value: number | null | undefined): string {
   return `${sign}${wan} 万（${(abs / 1_000_000).toFixed(1)}M）`;
 }
 
+/**
+ * Token 计数的**紧凑形**：`6.2M` / `8M` / `50 万`。
+ *
+ * 为什么不用 `formatTokens`：那是「单值读数」的口径（万为主、M 做附注），一格放一个数很合适；
+ * Key 管理页的「剩余 / 总量」要在 220px 的一格里放**两个**数（契约 §3 v1.18.0 明写渲染成
+ * `6.2M / 8M`），两个 `800 万（8.0M）` 拼起来直接撑爆列宽。所以这里只给一个单位、
+ * 尾随零裁掉（`8M` 不是 `8.00M`），量级取舍入后最短可读的那个。
+ *
+ * `null` / `undefined` 返回 `—`：**这不是 0**。套餐的「未同步」由调用方用徽标表达，
+ * 不该由格式化函数替它编一个数。
+ */
+export function formatTokensShort(value: number | null | undefined): string {
+  if (value === null || value === undefined) return '—';
+  const sign = value < 0 ? '\u2212' : '';
+  const abs = Math.abs(value);
+  if (abs < 10_000) return `${sign}${abs.toLocaleString('zh-CN')}`;
+  if (abs < 1_000_000) {
+    return `${sign}${(abs / 10_000).toFixed(1).replace(/\.0$/, '')} 万`;
+  }
+  return `${sign}${(abs / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+}
+
 /** 紧凑计数：列表里省宽度，如 `154.0k`。 */
 export function formatCompact(value: number | null | undefined): string {
   if (value === null || value === undefined) return '—';

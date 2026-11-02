@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.19.0**　｜
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.20.0**　｜
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -739,7 +739,7 @@
 | `models` | `string[]` \| `null` | **v1.4.2 新增**。该 key 的**模型白名单**，取自上游 `model_limits` CSV（TierFlow `model_limits_enabled=true` 时）。`null` = **无白名单、不限模型**（老 key 恒为 `null`，行为与 v1.4.1 逐字相同）。**`[]` 与 `null` 同义**：网关冻结件 `matchesModel()` 对二者同判为"不限"（`src/gateway/key-pool.ts`，v1.1 口径"留空即按 upstream 继承"），本契约**不制造一个实现不了的三态** —— 空 CSV 在落库时归一化为 `NULL`，库里不会出现空串。**只读**：`PATCH /api/keys/:id` 不收该字段。生效范围见 §5「白名单口径」 |
 | `balance` | `int`(分) \| `null` | `null` = **未知**（查不到或从未录入）。前端显示"未知"，不得显示 0。`unlimited=true` 时 `null` 表示"无限"，要看 `unlimited` 才分得清（§15.6） |
 | `balanceSource` | `"manual"` \| `"template"` \| `null` | 数据来源，用于 UI 标注可信度 |
-| `tokenPlan` | 对象 \| `null` | **v1.18.0 修订**：`{ "remainingTokens": int\|null, "totalTokens": int\|null, "expiresAt": ISO8601\|null }`。**`remainingTokens: null` = 未同步**（余量未知 ≠ 0；网关按「未知」哨兵排序，ADR-0030），**v1.18.0 起不再塌成 0** —— §3 与 `balance` 同一条纪律：**0 和 null 是两个值，前端不得渲染成同一个东西**（0 = 查到过且烧干；null = 从未同步过）。`totalTokens` = 归属账号**当前套餐**的基础 Token 总量（`supplier_account_subscriptions.basic_token_total`，按 `key_masked` 匹配本 key 掩码取**唯一**行，撞号/无归属/多套餐同掩码 → `null`，宁缺勿假）；前端据此渲染「剩余 / 总量」（如 `6.2M / 8M`），两个都 null 只渲染「未同步」 |
+| `tokenPlan` | 对象 \| `null` | **v1.18.0 修订**：`{ "remainingTokens": int\|null, "totalTokens": int\|null, "expiresAt": ISO8601\|null }`。**`remainingTokens: null` = 未同步**（余量未知 ≠ 0；网关按「未知」哨兵排序，ADR-0030），**v1.18.0 起不再塌成 0** —— §3 与 `balance` 同一条纪律：**0 和 null 是两个值，前端不得渲染成同一个东西**（0 = 查到过且烧干；null = 从未同步过）。`totalTokens` = 归属账号**当前套餐**的基础 Token 总量（`supplier_account_subscriptions.basic_token_total`，按 `key_masked` 匹配本 key 掩码取**唯一**行，撞号/无归属/多套餐同掩码 → `null`，宁缺勿假）；前端据此渲染「剩余 / 总量」（如 `6.2M / 8M`），两个都 null 只渲染「未同步」。**`expiresAt` 参与网关选路排序**（v1.20.0 / ADR-0044）：到期升序优先烧；`null` / 不可解析 = 未知到期，排在所有已知到期之后，仍参与选路、不被过滤 |
 | `health` | `"healthy"` \| `"cooling"` \| `"disabled"` | **网关运行态**，管理端只读。`disabled` 优先于 `cooling` |
 | `cooldownUntil` | ISO8601 \| `null` | `health=cooling` 时非空 |
 | `consecutiveFailures` | int | 连续失败次数，决定冷却档位 |
@@ -3568,6 +3568,15 @@ PROBE 预算 9 次出网、凭据零落地）。抓到三处**静默**偏差 + �
 
 一个上游挂多 key 是**既有能力**；`getAvailableKeys` / `reportFailure` / `reportSuccess` 签名**零改动**。
 
+> **v1.20.0 选路顺序（ADR-0044，业主 B1/B2/C 三件事；本段与 ADR-0044 决策 4 逐字同步，勿两处措辞漂移）**：
+> `getAvailableKeys` 的返回顺序即引擎尝试顺序，比较键依次为：**①类目**（套餐 key 一律排在余额 key 之前，
+> 不可被其它键跨越）**②`tokenPlan.expiresAt` 升序**（快到期先烧；`null` 或不可解析 = 未知到期，排在所有已知到期之后，
+> 仍参与选路、不被过滤）**③`weight` 降序**（仅在类目内生效，不可跨类目插队）**④剩余额度降序**（套餐类有值者优先，
+> 未知额度按最小正值参与）**⑤最近失败时间升序**（30 分钟时效窗）**⑥最近使用序升序**（LRU），快照序兜底。
+> 引擎按此序尝试，单请求**真实尝试总数 ≤ `maxAttempts`**；当候选中存在余额类 key 且 `maxAttempts ≥ 2` 时，
+> 套餐类在本请求内最多消耗 `maxAttempts − 1` 次真实尝试，剩余预算（含未消耗部分）留给余额类；
+> 被跳过（冷却 / 饱和 / 密文 / 死绑定）的候选不计入尝试数。`maxAttempts = 1` 时不预留，行为与本修订前一致。
+
 > **v1.4.2 的落地缺口，点名给路由者**：`KeyConfig.models` 字段**早就存在**且 `matchesModel()` /
 > `keyModels()` 语义完全够用（`null` / 空 = 不限、非空 = 白名单、`*` 通配），**但 `src/wiring/store.ts`
 > 至今把每个 key 的 `models` 硬编码为 `null`**（原注释："档案里没有 key→模型 的关联，故按 upstream 继承"）。
@@ -4034,6 +4043,30 @@ spec 三条判据：新库自带、老库真被 ALTER 到、重复跑不抛 dupl
 | ⑨ | 容量口径 | 所有容量数字（`capacity` / `reserveForData` / 每轮 token 数 / §15.5 的 ≈14 min 与重开门槛）都是**「单出口」口径**：出口 > 1 时**逐出口各自成立，不得跨出口加总** |
 
 > **§15.5 连带（v1.8.0 已同批落）**：「27 个账号一轮刷新 ≈ 1 分钟」按 ⑥ 重算为 **≈14 min**（`ceil(54/4)×60s`，单出口口径），0.6s 降为账号级内层纪律，重开门槛（ADR-0017 补遗 6）登记为 §15.5 脚注。本表是那三处改动的唯一口径源。
+>
+> **v1.20.0（2026-11-03，§16.3 选路顺序语义修订 —— 类目第一、到期优先、单请求滑池；业主 B1/B2/C 三件事）**：
+> 落笔依据 **ADR-0044**（路由者起草，Chief 拍板两点：键序**到期优先于 weight**、`reserve=1`）。
+> **触发**（业主原话摘要）：**B1** 同一请求内套餐类 key 失败后**要能继续尝试余额类 key**（总尝试上限仍受
+> `maxAttempts` 约束）；**B2** **类目（套餐 vs 余额）成为第一排序键、weight 只在类内生效**；**C** 套餐类内
+> **快到期的 key 先烧**（业主：「优先使用快到期的账号 key」——业务硬约束，不用即作废）。
+> ① **§16.3 新增「选路顺序」**（逐字引用块）：比较键改**六维** —— ①类目（套餐一律先于余额，**weight 从此不可
+> 跨类目插队**；ADR-0030 的「套餐优先」由「weight 相同时的排序结果」升级为**无条件不变式**）→ ②`tokenPlan.expiresAt`
+> 升序（快到期先烧；`null`/不可解析 = 未知到期，排最后、仍可用不被过滤）→ ③weight 降序（仅类内）→ ④剩余额度降序
+> （哨兵 `UNKNOWN_PLAN_QUOTA=1` 原样）→ ⑤最近失败时间升序（30min 时效窗）→ ⑥LRU，快照序兜底。
+> ② **§3 `tokenPlan.expiresAt` 补参与排序句**：到期升序参与网关选路，`null` = 未知到期排最后、仍可用。
+> ③ **单请求滑池**：候选中存在余额类 key 且 `maxAttempts ≥ 2` 时 `reserve = 1`，套餐类在本请求内最多消耗
+> `maxAttempts − 1` 次真实尝试，剩余预算（含未消耗部分）**自然滚入**余额段；**跳过不耗预算**（冷却 / 饱和 / 密文 /
+> 死绑定）；`maxAttempts = 1` 时 `reserve = 0`，行为与本修订前逐字节相同（诚实降级）。
+> `reserve` 是**语义**不是部署参数，不进 env（`PoolOptions` 零新增）。
+> ④ **`/v1/*` 响应形状零字节变更、§10 错误码零新增**（`GATEWAY_ERROR_CODES` / `hintCode` 同零）。行为面：
+> `x-gateway-attempts` 语义不变（真实尝试数，`≤ maxAttempts`）但**值分布变化**；502 终态 `attemptTrail` 可能
+> **同时含两类 key**（§12.1 无 schema 变化，消费侧本来按序展示）；`crossUpstreamRetry=false` 与出口轴、
+> ADR-0041 透支闸、0-attempt 三型分型**全部零交互**。
+> ⑤ **冻结面**：`KeyPool` 三函数签名、`ports.ts`、`types.ts` **零改动**；**§13.4 助手同源自动生效**（正文零改动）；
+> §9「返回顺序即优先级」规矩（ADR-0011 立）保持成立；ADR-0011 / ADR-0030 由 ADR-0044 修订。
+> **`docs/dev-constraints.md` §三.6 与 :99 注释同批改为六维键序 + 滑池规则**（KeyPool 冻结描述文件，属契约侧）。
+> 实现 owner=路由者、载体 `dev/gateway-m3`；判据 10 例 + 变异验证（删类目键 / 键1键2对调 / 删 reserve /
+> reserve=2 / reserve 不看 `maxAttempts≥2`）见 ADR-0044「判据」。
 >
 > **v1.19.0（2026-11-03，§21 废号池 + §21.5 删账号强绑定删 key —— 业主拍板的四件套之一）**：
 > **触发**：业主原话四件事：①key 池分两类、套餐优先（v1.18.0/v1.18.1 已落地）；②余额/套餐看得见（v1.18.0 已落地）；

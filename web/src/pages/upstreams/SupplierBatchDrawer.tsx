@@ -31,13 +31,15 @@ import { formatCount, formatIso } from '@/utils/format';
 
 const { Text } = Typography;
 
-/** `action` 七值 → 人话。七值**每个都有生产者**（§15.3 / §15.13 / v1.16.4），所以这里没有兜底项要写"其它"。 */
+/** `action` 七值 → 人话。七值**每个都有生产者**（§15.3 / §15.13 / v1.16.4），所以这里没有兜底项要写"其它"。
+ * `sync` 的口径订正（Chief 2026-11-03）：这个动作不只搬掩码，它是套餐余量回填的**唯一服务端腿**
+ * （`keys/sync` → `backfillSubscriptionTokenPlan`），与 Key 管理页「同步套餐余量」按钮同名词。 */
 const ACTION_TEXT: Record<SupplierBatchAction, string> = {
   login: '首登',
   relogin: '重登',
   refresh: '刷新余额',
   create: '建 key',
-  sync: '同步 key',
+  sync: '同步 key 与套餐余量',
   rotate: '重置套餐 key',
   import: '导入 Cookie',
 };
@@ -132,7 +134,7 @@ export function SupplierBatchDrawer({
     {
       title: '动作',
       dataIndex: 'action',
-      width: 90,
+      width: 120,
       render: (value: SupplierBatchAction | null) =>
         value === null ? (
           <Text type="secondary" style={{ fontSize: 12 }}>

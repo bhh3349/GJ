@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.21.0**　｜
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.22.0**　｜
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -739,7 +739,7 @@
 | `models` | `string[]` \| `null` | **v1.4.2 新增**。该 key 的**模型白名单**，取自上游 `model_limits` CSV（TierFlow `model_limits_enabled=true` 时）。`null` = **无白名单、不限模型**（老 key 恒为 `null`，行为与 v1.4.1 逐字相同）。**`[]` 与 `null` 同义**：网关冻结件 `matchesModel()` 对二者同判为"不限"（`src/gateway/key-pool.ts`，v1.1 口径"留空即按 upstream 继承"），本契约**不制造一个实现不了的三态** —— 空 CSV 在落库时归一化为 `NULL`，库里不会出现空串。**只读**：`PATCH /api/keys/:id` 不收该字段。生效范围见 §5「白名单口径」 |
 | `balance` | `int`(分) \| `null` | `null` = **未知**（查不到或从未录入）。前端显示"未知"，不得显示 0。`unlimited=true` 时 `null` 表示"无限"，要看 `unlimited` 才分得清（§15.6） |
 | `balanceSource` | `"manual"` \| `"template"` \| `null` | 数据来源，用于 UI 标注可信度 |
-| `tokenPlan` | 对象 \| `null` | **v1.18.0 修订**：`{ "remainingTokens": int\|null, "totalTokens": int\|null, "expiresAt": ISO8601\|null }`。**`remainingTokens: null` = 未同步**（余量未知 ≠ 0；网关按「未知」哨兵排序，ADR-0030），**v1.18.0 起不再塌成 0** —— §3 与 `balance` 同一条纪律：**0 和 null 是两个值，前端不得渲染成同一个东西**（0 = 查到过且烧干；null = 从未同步过）。`totalTokens` = 归属账号**当前套餐**的基础 Token 总量（`supplier_account_subscriptions.basic_token_total`，按 `key_masked` 匹配本 key 掩码取**唯一**行，撞号/无归属/多套餐同掩码 → `null`，宁缺勿假）；前端据此渲染「剩余 / 总量」（如 `6.2M / 8M`），两个都 null 只渲染「未同步」。**`expiresAt` 参与网关选路排序**（v1.20.0 / ADR-0044）：到期升序优先烧；`null` / 不可解析 = 未知到期，排在所有已知到期之后，仍参与选路、不被过滤 |
+| `tokenPlan` | 对象 \| `null` | **v1.18.0 修订**：`{ "remainingTokens": int\|null, "totalTokens": int\|null, "amountTotalCents": int\|null, "amountUsedCents": int\|null, "expiresAt": ISO8601\|null }`。**`remainingTokens: null` = 未同步**（余量未知 ≠ 0；网关按「未知」哨兵排序，ADR-0030），**v1.18.0 起不再塌成 0** —— §3 与 `balance` 同一条纪律：**0 和 null 是两个值，前端不得渲染成同一个东西**（0 = 查到过且烧干；null = 从未同步过）。`totalTokens` = 归属账号**当前套餐**的基础 Token 总量（`supplier_account_subscriptions.basic_token_total`，按 `key_masked` 匹配本 key 掩码取**唯一**行，撞号/无归属/多套餐同掩码 → `null`，宁缺勿假）；前端据此渲染「剩余 / 总量」（如 `6.2M / 8M`），两个都 null 只渲染「未同步」。**`amountTotalCents` / `amountUsedCents`（v1.22.0 / ADR-0046 新增，单位分）**：同一份套餐台账的**钱额度**面（`amount_total_cents` / `amount_used_cents`），与 `totalTokens` **同一唯一匹配条件**；三格**各自透传**（token 未知不拖累金额、金额未知不拖累 token），`null` = 无归属 / 撞号 / 上游没给。业主要求两个额度面一起可见 —— 只给 token 会把「台账有 ¥29.90、Key 管理什么都没有」读成没同步。**`expiresAt` 参与网关选路排序**（v1.20.0 / ADR-0044）：到期升序优先烧；`null` / 不可解析 = 未知到期，排在所有已知到期之后，仍参与选路、不被过滤 |
 | `health` | `"healthy"` \| `"cooling"` \| `"disabled"` | **网关运行态**，管理端只读。`disabled` 优先于 `cooling` |
 | `cooldownUntil` | ISO8601 \| `null` | `health=cooling` 时非空 |
 | `consecutiveFailures` | int | 连续失败次数，决定冷却档位 |
@@ -2164,7 +2164,7 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 
 - **绝不写 `0`**：`0` 是合法余额，与"未知"严格区分（§0.2）。
 - **绝不用旧值刷新时间戳**：查失败时 `balanceUpdatedAt` 保持不动 —— 它是"最近一次**真的查到**的时刻"；把它推到"现在"等于把陈旧读数伪装成实时读数，比不显示更坏。
-- `category="token-plan"` 的 key 同理（`tokenPlan.remainingTokens` 与其 `expiresAt`）。**v1.18.0 补充**：未同步时库里该列保持 `NULL`、§3 响应透传 `null`（渲染「未同步」），**不写 0** —— 与上一行「0 是合法值」同一条纪律；套餐余量的真相源是 §15.2 `keys/sync` 的回填腿，模板腿只是辅助。
+- `category="token-plan"` 的 key 同理（`tokenPlan.remainingTokens` 与其 `expiresAt`）。**v1.18.0 补充**：未同步时库里该列保持 `NULL`、§3 响应透传 `null`（渲染「未同步」），**不写 0** —— 与上一行「0 是合法值」同一条纪律；套餐余量的真相源是 §15.2 `keys/sync` 的回填腿，模板腿只是辅助。**v1.22.0（ADR-0046）补**：回填腿**不止** `keys/sync` —— 账号「刷新余额」（`refresh`）与 `rotate-key` 拿到套餐响应后**同批回填**，因为业主要的是「台账已有的数，Key 管理立刻能看见」，而不是再手点一次同步、再打一遍上游（见 §15.2 各动作说明与 §15.3 变更条）。
 - **刷新任务 `result.retryAfterSeconds` 与本表无关（v1.8.1）**：它是任务 `result` 的解释字段（非破坏新增，见 §3），429 仍落在"不可达 / 超时 / 非 2xx"这一行的**处置**里 —— 一个字都不写；本表零改动。
 - `balanceSource` 枚举**不变**（仍只有 `"manual"` / `"template"`）；`hintCode` **四值 → 五值**（v1.7.0，枚举新增，非破坏）—— 五值口径见 §2「失败引导字段」。
 - **本表是"写库纪律"表，不是"触发条件"表**（v1.7.0 明写）：429（**上游的与本地合成的同属一类**）落在"不可达 / 超时 / 非 2xx"这一行的**处置**里 —— **一个字都不写**，
@@ -4045,6 +4045,17 @@ spec 三条判据：新库自带、老库真被 ALTER 到、重复跑不抛 dupl
 | ⑨ | 容量口径 | 所有容量数字（`capacity` / `reserveForData` / 每轮 token 数 / §15.5 的 ≈14 min 与重开门槛）都是**「单出口」口径**：出口 > 1 时**逐出口各自成立，不得跨出口加总** |
 
 > **§15.5 连带（v1.8.0 已同批落）**：「27 个账号一轮刷新 ≈ 1 分钟」按 ⑥ 重算为 **≈14 min**（`ceil(54/4)×60s`，单出口口径），0.6s 降为账号级内层纪律，重开门槛（ADR-0017 补遗 6）登记为 §15.5 脚注。本表是那三处改动的唯一口径源。
+>
+> **v1.22.0（2026-11-03，套餐数据单源：台账 → key 列同批回填 + §3 增钱额度两格 —— 业主现场「台账已经有了，为什么 key 管理不同步、还要再打一遍上游」）**：
+> 落笔依据 **ADR-0046**（触发 = 业主两张截图对比：账号池台账 ¥29.90 / 800 万 / 到期齐全，Key 管理仍为旧值或「未同步」）。
+> ① **`refresh` 与 `rotate-key` 同批回填**（实现腿，不改请求/响应形状）：两者都已把上游套餐响应写进台账，
+> 从本版起**同一笔**顺带 `backfillSubscriptionTokenPlan` —— 那个函数的注释一直写着「由 keys/sync / **余额刷新**回填」，
+> 而实现只接了前半句，这正是本次症状的直接原因。`keys/sync` 腿不变，仍是唯一会补 `key_masked` 的路径。
+> ② **§3 `tokenPlan` 增 `amountTotalCents` / `amountUsedCents`**（int\|null，分）：同一份套餐台账的钱额度面，
+> 与 `totalTokens` 同一唯一匹配条件、三格各自透传。只给 token 会让「台账有 ¥29.90、Key 管理什么都没有」被读成没同步。
+> ③ **前端到期列的相对时间**必须换成到期专用格式化（`formatRelative` 只会说「N 天前」）：
+> 未来时间读作「还剩 N 天」，过去读作「已过期 N 天」，精确时刻进 tooltip —— 否则「还有 29 天」会显示成「29 天前」。
+> 零 DDL、零端点新增、零枚举变更。
 >
 > **v1.21.0（2026-11-03，§20.6 账号级连坐收窄 + 批量解除透支 —— 业主现场反馈「有套餐余额还是透支了，还禁止我全部 key」）**：
 > 落笔依据 **ADR-0045**（触发 = 业主截图：账号余额 ¥0.00、套餐 ¥29.90，却被打透支锁、名下 key 全被级联停用）。

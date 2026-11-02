@@ -26,8 +26,13 @@
 - **健康探针是 WS 101 握手**（`/api/stats/live`），不是 HTTP 200：`/api/*` 除 `auth/login`
   全量鉴权，HTTP 探针恒 401 → 好容器被反复重启。镜像里没 curl，探针用 Node 内置 `net` 裸 socket。
 - **镜像 multi-stage（2026-11-03）**：运行期 = slim + `pnpm install --prod` + dist，无编译器、
-  无 devDeps；better-sqlite3 原生绑定靠 prebuild（GitHub releases），**GitHub 不可达的机器
-  构建会在 `pnpm install --prod` 显式失败** —— 那类网络走三包搬运，别回去翻旧单阶段 Dockerfile。
+  无 devDeps。实测（阿里云 Ubuntu24.04/Docker29）：`docker images` **922MB→432MB**，
+  `docker save|gzip` **209MB→94MB**；四项验证（体积/healthy/双面在听/重启数据在）已过，
+  原始数据在 `docker-deploy.md` §7。
+- **构建时 GitHub 是间歇可达的**（阿里云成都实测：2s 200 与 10s 超时交替）。运行期阶段没有
+  编译器，prebuild 下不来就**显式失败**（`prebuild-install warn install Request timed out` +
+  gyp 找不到 Python）。逃生口：`--build-arg NPM_BINARY_MIRROR=https://registry.npmmirror.com/-/binary/better-sqlite3`
+  （prebuild-install 认 `npm_config_<pkg>_binary_host`，配了就不查 GitHub API；npmmirror 资产实测 200）。
 - **"上游全挂"先跑 §5c 四步自检**：域名拼错（② `getent` 空）与被墙（③ connect timeout）症状
   相同、修法反向。
 - **备份不能用 `cp`**：源库有未 checkpoint 的 WAL（本地实测 -wal 有 4MB），`cp` 拿到撕裂的库。

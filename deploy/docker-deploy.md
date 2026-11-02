@@ -18,8 +18,21 @@
 - **multi-stage 化后（2026-11-03）新增一条**：运行期阶段没有编译器，better-sqlite3
   的原生绑定只来自 prebuild（GitHub releases）。**GitHub 不可达的构建机会在
   `pnpm install --prod` 层显式失败**（症状：`pnpm install` 报 better-sqlite3
-  prebuild 下载超时/403）。这不是回退到旧单阶段的理由 —— 那类网络本来就按 §5b
-  三包搬运，构建放在能联网的机器上做。
+  install Failed，日志里 `prebuild-install warn install Request timed out` 后跟着
+  gyp 找不到 Python）。实测（阿里云成都）：GitHub release 资产是**间歇性**可达，
+  不可靠 —— 所以构建时可以走镜像站逃生口：
+
+  ```bash
+  docker build \
+    --build-arg NPM_BINARY_MIRROR=https://registry.npmmirror.com/-/binary/better-sqlite3 \
+    -t sub-gateway:local .
+  # 原理：prebuild-install 读 npm_config_better_sqlite3_binary_host，配了它就直接
+  # 从镜像站拼 {mirror}/v{version}/better-sqlite3-v{version}-node-v{abi}-linux-x64.tar.gz，
+  # 不查 GitHub API。缺省空串 = 官方 GitHub。npmmirror 资产 2026-11-03 实测 200。
+  ```
+
+  这不是回退到旧单阶段的理由 —— 旧单阶段在这种网络上是**源码编译兜底**（要
+  python3/make/g++，慢且把工具链烧进最终镜像）。
 
 ## 1. 构建
 
@@ -183,7 +196,8 @@ docker save sub-gateway:local | gzip > sub-gateway-image.tar.gz
 git archive HEAD | gzip > sub-src.tar.gz      # 源码：无 .git、无 .env（.gitignore 挡着）
 tar czf web-dist.tar.gz -C web dist           # 前端产物：宿主机 pnpm web:build 产出
 
-# —— 传输 + 校验（multi-stage 后镜像显著变小，实测值见 §6；国内跨机实测 30s 量级）——
+# —— 传输 + 校验（multi-stage 后 `docker save | gzip` ≈ 94MB，旧单阶段同机 209MB；
+#    2026-11-03 实测值，见 §6/§7）——
 scp sub-*.tar.gz web-dist.tar.gz root@<host>:/root/
 ssh root@<host> 'cd /root && sha256sum *.tar.gz'   # 与本地逐条比对，不等就是传坏了
 
@@ -247,35 +261,45 @@ curl -x http://<用户>:<口令>@<VPS_IP>:8080 -s https://api.ipify.org; echo
 
 ## 6. 已知不粉饰
 
-- ~~镜像留着构建期工具链（python3/make/g++，~120MB）~~ **2026-11-03 已 multi-stage 化**：
-  工具链与 devDependencies 只在 build 阶段，运行期阶段 = slim 基座 + `pnpm install
-  --prod` + dist。当年否掉 `COPY --from` 的理由（搬漏原生 `.node`）不再适用 —— 现在
-  运行期自己按同一份 lockfile 装，不搬 node_modules。**换来的新代价**：运行期原生绑定
-  只来自 better-sqlite3 prebuild（GitHub releases），GitHub 不可达的构建机会显式失败
-  （见 §0 末条）；镜像体积实测值以 `docker images` 为准，四项部署机验证见 **§7 待实测**。
+- ~~镜像留着构建期工具链（python3/make/g++，~120MB）~~ **2026-11-03 已 multi-stage 化
+  并实测**：阿里云成都 Ubuntu 24.04 / Docker 29.1.3，同机同基座两镜像对比 ——
+  `docker images` **922MB → 432MB**（运行期在基座之上的部分 593MB → 103MB，工具链与
+  devDeps 全部消失：容器内 `gcc/make/python3/g++` 全部 ABSENT，`/app/node_modules`
+  只剩 `@fastify better-sqlite3 fastify undici`）；`docker save | gzip` **209MB → 94MB**
+  （三包搬运的实际传输量）。当年否掉 `COPY --from` 的理由（搬漏原生 `.node`）不再
+  适用 —— 运行期自己按同一份 lockfile 装，不搬 node_modules。**换来的新代价**：运行期
+  原生绑定只来自 better-sqlite3 prebuild（GitHub releases），GitHub 不可达时构建显式
+  失败 —— 用 `--build-arg NPM_BINARY_MIRROR=…` 走镜像站（见 §0 末条）。四项容器验证
+  结果见 **§7**。
 - 生产 `.env` 模板已有：`deploy/env.production.example`（只含必改项；键位全集仍以
   根目录 `.env.example` 为唯一事实源，模板不重抄）。
 - `EGRESS_HEARTBEAT_INBOX_DIR`（入口 A）缺省关，要开在 `.env` + compose 卷两处一起。
 - 管理面 4101 对整个网段开放（compose `ports` 的左半边是 `4101`，不是 `127.0.0.1:4101`）。
   裸跑实例时代它也是 0.0.0.0 —— 但切到对外部署时**必须**改 `127.0.0.1:4101` + 反代 TLS。
 
-## 7. 待实测：multi-stage 镜像的四项部署机验证（2026-11-03 挂账）
+## 7. 镜像与宿主四项验证（2026-11-03 已实测，留作换机复验清单）
 
-**为什么挂账**：multi-stage 的**代码正确性**已在开发机验完（prebuild 资产存在性、
-prod-only 安装、原生模块加载 + 读写回路）。下面四项验的是**镜像与宿主环境的配合**，
-只能在装好 Docker 的部署机上做 —— 开发机没有容器运行时。
+**实测环境**：阿里云成都，Ubuntu 24.04.2 / Docker 29.1.3 / compose 2.40.3。方法：仓库
+compose **原文件** `--no-build` 起实例（镜像预打 `sub-gateway:local` 标签，与生产同流程），
+全新命名卷 + 首启引导库，`.env` 临时生成用后即删。
 
-**这四项没跑完，镜像不算验收（合并 ≠ 收口）**。三要素：
+| # | 项 | 实测结果 |
+|---|---|---|
+| ① | 体积对比（同机同基座） | `docker images`：单阶段 **922MB → multi-stage 432MB**（基座 329MB；基座之上的部分 593MB → 103MB）。`docker save \| gzip`：**209MB → 94MB**（三包实际传输量）。旧文档的"235MB"是另一台机器的口径，**别跨机比绝对值** |
+| ② | healthy | `docker compose ps` → **Up 10 seconds (healthy)**（WS 101 探针真工作；40s start_period 没用满） |
+| ③ | 双面在听 | 宿主：4100 `/v1/models` → **401**（活着）、4101 `/` → **200**（返回真 HTML）；容器内：4000 → 401、4001 → 200 |
+| ④ | 重启数据在 | 卷名 `sg-test_sub-gateway-data`（**带项目名前缀**，坑 1 复证）；restart 前后 `integrity_check=ok` 且 `admin_users=1 / groups=1 / gateway_keys=1 / change_log=2` 全等；`gateway_health_snapshots` 2→3 = 新进程启动正常写库、旧行全在 |
 
-- **owner**：基建（分支 `dev/infra`）
-- **载体**：部署机（业主提供，Docker 29+ / compose v2）
-- **回执口径**：四项证据 + 新镜像标签 —— ①体积前后两个数字 ②`(healthy)` 状态行
-  ③两条响应首行 ④重启前后 `integrity_check` 与行数；数字回填本节与 §6。
+加分佐证：**容器内 G1**（prebuild 与容器 ABI 匹配）`G1(容器内) ok`；运行期镜像
+`gcc/make/python3/g++` 全 ABSENT，`/app/node_modules` 只剩 `@fastify better-sqlite3
+fastify undici` 四个运行时依赖。
+
+换机/换版本时把下面四条重跑一遍（④ 的表清单按当时 schema 用参数化计数，**别写死业务表名**
+—— 本机实测 `call_logs` 在 v1.19+ 已不是表名，写死必踩 `no such table`）：
 
 ```bash
-# ① 体积对比：旧单阶段基线 235MB（§6 旧值），multi-stage 目标 ~115MB
+# ① 体积对比（同机才有意义）
 docker images --format '{{.Repository}}:{{.Tag}}\t{{.Size}}' | grep sub-gateway
-# 判据：新标签明显小于旧标签（机器上还留着旧标签就直接对比，没留就用 235MB 做基线）。
 
 # ② healthy（WS 101 探针，不是 HTTP 200 —— 别改判据，见 §3）
 docker compose ps --format '{{.Name}}\t{{.Status}}'
@@ -286,13 +310,13 @@ curl -sI http://127.0.0.1:4100/v1/models | head -1
 curl -sI http://127.0.0.1:4101/ | head -1
 # 判据：网关面 401/404 都算"活着"；管理面 200。
 
-# ④ 重启后数据在（命名卷 + 真库；先记，再重启，再记，两次数值相等）
+# ④ 重启后数据在（先记 → restart → 再记 → 两次全等）
 docker inspect <容器> --format '{{range .Mounts}}{{.Name}} -> {{.Destination}}{{"\n"}}{{end}}'
-docker exec <容器> node -e 'const D=require("better-sqlite3");const db=new D("/app/data/gateway.db",{readonly:true});console.log("integrity",db.prepare("pragma integrity_check").get().integrity_check);console.log("call_logs",db.prepare("select count(*) c from call_logs").get().c);'
-docker compose restart gateway && sleep 5
-docker exec <容器> node -e 'const D=require("better-sqlite3");const db=new D("/app/data/gateway.db",{readonly:true});console.log("integrity",db.prepare("pragma integrity_check").get().integrity_check);console.log("call_logs",db.prepare("select count(*) c from call_logs").get().c);'
-# 判据：挂载卷名是 <项目名>_sub-gateway-data（**不是**裸名 sub-gateway-data，见 §3b 坑 1）；
-#       重启前后 integrity 都是 ok 且 call_logs 行数相等（0 也算过，只要"相等 + 库文件在"）。
+docker exec <容器> node -e 'const D=require("better-sqlite3");const db=new D("/app/data/gateway.db",{readonly:true});const t=db.prepare(`select name from sqlite_master where type=@k`).all({k:"table"});const c={integrity:db.prepare("pragma integrity_check").get().integrity_check};for(const {name:n} of t){try{c[n]=db.prepare(`select count(*) c from "${n}"`).get().c}catch(e){}}console.log(JSON.stringify(c));db.close()'
+docker compose restart gateway && sleep 10 && docker compose ps --format '{{.Status}}'
+docker exec <容器> node -e '<同上一条>'
+# 判据：卷名是 <项目名>_sub-gateway-data（**不是**裸名 sub-gateway-data，见 §3b 坑 1）；
+#       两次 JSON 全等（health_snapshots/usage_logs 这类"运行时自增"表允许变大，其余必须相等）。
 ```
 
 部署后**可达性**（能不能出去）另见 §5c —— 两节别混：§7 验镜像与宿主，§5c 验网络与出口。

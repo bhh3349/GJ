@@ -26,7 +26,13 @@
 #      代价：**GitHub 不可达的构建机会在这一层显式失败**（prebuild 下载不走
 #      任何回退 —— 没有编译器，装不出来就是装不出来）。旧单阶段在那种网络上
 #      会静默退回源码编译；multi-stage 后这类机器直接走 §5b 三包搬运，构建
-#      放在能联网的机器上。换来的是运行期镜像少 ~120MB 工具链 + ~25MB devDeps。
+#      放在能联网的机器上。**2026-11-03 实测**：阿里云成都机器到 GitHub
+#      release 资产是**间歇性**可达（同一台机 2 秒 200 / 10 秒超时交替出现），
+#      所以留了 `NPM_BINARY_MIRROR` 逃生口（见下面各阶段的 RUN 前缀）：
+#        docker build --build-arg NPM_BINARY_MIRROR=https://registry.npmmirror.com/-/binary/better-sqlite3 .
+#      原理：prebuild-install 读 `npm_config_<包名>_binary_host`（util.getHostMirrorUrl），
+#      配了它就直接拼 `{mirror}/v{version}/{name}-v{version}-node-v{abi}-{platform}-{arch}.tar.gz`，
+#      **不再查 GitHub API**。缺省空串 = 走官方 GitHub，行为与未加该参数时一致。
 #    - 为什么运行期阶段自己 `pnpm install --prod` 而不是 `COPY --from=build
 #      /app/node_modules`：后者曾因"搬漏原生 `.node`/符号表"被否（构建不报错、
 #      运行才炸是最隐蔽的失败形状）。现在依赖树由**同一份 lockfile** 决定，
@@ -61,7 +67,10 @@ WORKDIR /app
 # `pnpm-lock.yaml` 必须一起拷 —— 少了它 pnpm 会按 semver 重新解析，
 # 于是"同一份 Dockerfile 两次构建出的依赖树不同"。
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile
+# NPM_BINARY_MIRROR：空串 = 官方 GitHub（缺省行为不变）；只在下面这个 RUN 内生效，
+# 不写进镜像 env —— 它是构建期开关，不是运行时配置。
+ARG NPM_BINARY_MIRROR=
+RUN npm_config_better_sqlite3_binary_host="${NPM_BINARY_MIRROR}" pnpm install --frozen-lockfile
 
 # 再拷源码并构建。
 COPY tsconfig.json tsconfig.build.json ./
@@ -83,7 +92,10 @@ WORKDIR /app
 # `node dist/server.js` 直接 SyntaxError）+ lockfile（树与 build 阶段同源）+
 # pnpm-workspace.yaml（onlyBuiltDependencies 白名单，见第 3 条）。
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile --prod
+# 与 build 阶段同一个逃生口（见头注释第 3 条）：GitHub 间歇不可达时不加
+# --build-arg 会在这一层显式失败 —— 没有编译器兜底，这是设计而不是意外。
+ARG NPM_BINARY_MIRROR=
+RUN npm_config_better_sqlite3_binary_host="${NPM_BINARY_MIRROR}" pnpm install --frozen-lockfile --prod
 
 # 只搬 tsc 产物。不搬 node_modules、不搬 src/：运行期不读它们。
 COPY --from=build /app/dist ./dist

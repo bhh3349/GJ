@@ -34,6 +34,19 @@
   这不是回退到旧单阶段的理由 —— 旧单阶段在这种网络上是**源码编译兜底**（要
   python3/make/g++，慢且把工具链烧进最终镜像）。
 
+- **部署机上现成的 `sub-gateway:local` 可能是旧代码，真部署前先重建**（2026-11-03
+  验证机踩点：机上那份 `local` 构建于 `NPM_BINARY_MIRROR` 落地之前，不含该 ARG，
+  直接 `up` 跑的是旧代码）。标签同名 ≠ 内容新 —— 真部署第一步是用**当时 main 的
+  代码**重建一次再起栈：
+
+  ```bash
+  docker build \
+    --build-arg NPM_BINARY_MIRROR=https://registry.npmmirror.com/-/binary/better-sqlite3 \
+    -t sub-gateway:local .
+  ```
+
+  复验/换机同理（§7 的 `docker images` 对比必须在**重建后**的镜像上做）。
+
 ## 1. 构建
 
 ```bash
@@ -281,7 +294,9 @@ curl -x http://<用户>:<口令>@<VPS_IP>:8080 -s https://api.ipify.org; echo
 
 **实测环境**：阿里云成都，Ubuntu 24.04.2 / Docker 29.1.3 / compose 2.40.3。方法：仓库
 compose **原文件** `--no-build` 起实例（镜像预打 `sub-gateway:local` 标签，与生产同流程），
-全新命名卷 + 首启引导库，`.env` 临时生成用后即删。
+全新命名卷 + 首启引导库，`.env` 临时生成用后即删。**镜像必须是当时 main 现建的**：机上
+残留的同名旧镜像不算数（见 §0 末条）—— 2026-11-03 那份验证镜像已从机上删除，只剩
+`node:22-bookworm-slim` 基座，下次部署重新 `build`。
 
 | # | 项 | 实测结果 |
 |---|---|---|

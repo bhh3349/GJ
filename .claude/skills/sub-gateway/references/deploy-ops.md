@@ -19,7 +19,10 @@
 ## 现场事实（本地推断不出来的）
 
 - **镜像标签不代表内容新**。验法：`docker run --rm --entrypoint node sub-gateway:local -e "..."`，
-  在容器里查 `dist/` 是否真有那行新代码。换容器前必做。
+  在容器里查 `dist/` 是否真有那行新代码。换容器前必做。**部署机上现成的同名镜像尤其危险**：
+  2026-11-03 验证机那份 `sub-gateway:local` 构建于 `NPM_BINARY_MIRROR` 落地之前，直接 `up`
+  跑的是旧代码 —— 真部署第一步是用当时 main 重建（`docker build --build-arg NPM_BINARY_MIRROR=…`，
+  见 `docker-deploy.md` §0 末条）。
 - **compose 卷名带项目名前缀**：本目录项目名 `sub` → 实际卷 `sub_sub-gateway-data`。
   `docker volume create sub-gateway-data` 建的是**另一个空卷**，症状是容器启动日志出现
   「已创建管理组」。核对：`docker inspect <容器> --format '{{range .Mounts}}{{.Name}}{{"\n"}}{{end}}'`。

@@ -39,6 +39,12 @@ export function ManualRefreshCostBody({ scope, outcome }: ManualRefreshCostBodyP
 export interface ConfirmManualRefreshOptions extends ManualRefreshCostBodyProps {
   /** 动作名。**写动词短语**（"查余额"），不写"确认刷新？"这类无信息的标题。 */
   title: string;
+  /**
+   * 确认按钮文案。缺省「执行（会打上游）」—— 这句是**代价语义**，所以只有**真的不打上游**
+   * 的动作才允许改（v1.21.0 的批量解除透支就是：纯本地清锁，不消耗上游预算、不解密凭据）。
+   * 给会打上游的动作改成"轻量"措辞等于把代价藏起来，那是这条缺省存在的理由。
+   */
+  okText?: string | undefined;
   /** 真正的提交。返回 Promise 时确认框自带 loading，不会出现"点了没反应"。 */
   onOk: () => void | Promise<void>;
 }
@@ -49,7 +55,7 @@ export function confirmManualRefresh(modal: ModalHook, options: ConfirmManualRef
     title: options.title,
     width: 480,
     content: <ManualRefreshCostBody scope={options.scope} outcome={options.outcome} />,
-    okText: '执行（会打上游）',
+    okText: options.okText ?? '执行（会打上游）',
     cancelText: '取消',
     onOk: options.onOk,
   });

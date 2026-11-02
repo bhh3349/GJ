@@ -25,12 +25,17 @@ import { formatIso, formatRelative } from '@/utils/format';
  * 前者去充这把 key（或换一把），后者去充那个**账号**（充 key 没用）。
  *
  * v1.19.0 起 `'account'` 有**两种来源**（§21.3 把废号池的级联腿复用在这一格上）：
- * 账号欠费、账号进废号池。这一格分不出是哪一种，所以文案把两条都写上去 ——
+ * 账号透支级联、账号进废号池。这一格分不出是哪一种，所以文案把两条都写上去 ——
  * 只说「欠费」会让一个因套餐耗尽进池的账号被读成"充钱就好"。
+ *
+ * v1.21.0 把账号那一档的**判据**收窄了（ADR-0045）：不再是"余额见底一项"，而是
+ * **余额见底且套餐也不可用**才连坐。文案必须按这句写 —— 写成"账号欠费"，业主就会
+ * 以为给账号充点钱就该回池，而实际上一边有钱另一边没了照样会被锁（反过来说，
+ * 他现在看到的"有套餐余额还是被锁"正是收窄前的旧判据留下的历史锁，靠「解除透支」清）。
  */
 const REASON_HINT: Record<DepletedReason, string> = {
   balance: '它自己的余额 / 套餐余量已耗尽',
-  account: '它所属的账号停了它（账号欠费，或该账号已进废号池）',
+  account: '它所属的账号停了它（账号余额见底且套餐也不可用，或该账号已进废号池）',
 };
 
 export interface DepletedTagProps {
@@ -46,7 +51,9 @@ export function DepletedTag({ depleted, depletedAt = null, depletedReason = null
   const reason = depletedReason ? REASON_HINT[depletedReason] : '原因未记录';
   const parts = [
     `透支锁存：${reason}`,
-    '网关已把它排除出选路。只有人工「重新启用」才解除 —— 余额回升**不会**自动解锁。',
+    // 「重新启用」是旧写法，而 `enable` **不清锁**（后端定死）—— 照字面点「启用」会得到一个
+    // "点了没报错、什么都没变"，是这一格最容易误导人的一处。这里写动作的真名。
+    '网关已把它排除出选路。只有人工「解除透支」才解除 —— 余额回升**不会**自动解锁，点「启用」也不清这把锁。',
   ];
   if (depletedAt) parts.push(`最早发现于 ${formatIso(depletedAt)}（${formatRelative(depletedAt)}）`);
 

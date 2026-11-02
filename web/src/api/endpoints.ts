@@ -345,6 +345,17 @@ export const supplierAccountsApi = {
    * 点之前必须让用户知道"如果还是欠费，下一轮刷新会再次锁上"。
    */
   undeplete: (id: string) => api.post<SupplierAccount>(`/supplier-accounts/${id}/undeplete`),
+  /**
+   * §15.2 批量解除透支（v1.21.0 / ADR-0045）。`202 {taskId}`，任务类型 `supplier_undeplete`，
+   * 逐行结果复用 §15.3（`action` 第 8 值 `undeplete`）；`ids` 省略 = 该上游全部账号，
+   * 不存在的 id 静默略过，一个都没剩 ⇒ 422、上游不存在 ⇒ 404（都不变成"0 行成功"的假任务）。
+   *
+   * **纯本地动作，不打上游**：一行一个账号，清账号锁 + 清名下原因「账号连坐」的 key 锁
+   * （同时重新启用）。**不动** key 自己的「余额不足」锁 —— 那把 key 没钱这件事没变，
+   * 解了账号的锁它也回不了池，下一轮刷新照样锁。判据没变的账号也会被下一轮刷新再次锁上。
+   */
+  undepleteBatch: (body: SupplierBatchRequest) =>
+    api.post<TaskAccepted>('/supplier-accounts/undeplete', body),
   /** 连接自测。**永不写库**，业务性失败一律 `200 + ok:false`（诊断结论走响应体）。 */
   test: (id: string) => api.post<SupplierTestResult>(`/supplier-accounts/${id}/test`),
   /**

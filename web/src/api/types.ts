@@ -376,12 +376,16 @@ export type KeyCategory = 'balance' | 'token-plan';
 export type KeyHealth = 'healthy' | 'cooling' | 'disabled';
 
 /**
- * 透支锁存的解除原因（契约 §20.2）。
+ * 透支锁存的成因（契约 §20.2）。
  *
-/**
- * `'balance'` = 自己的余额 / 套餐余量耗尽；`'account'` = 其所属账号级联（§20.6）。
- * **v1.19.0 起 `'account'` 承载两种来源**：账号欠费级联、账号进废号池（§21.3 把进池的
+ * `'balance'` = 这把 key 自己的余额 / 套餐余量耗尽；`'account'` = 其所属账号连坐（§20.6）。
+ *
+ * **v1.19.0 起 `'account'` 承载两种来源**：账号透支级联、账号进废号池（§21.3 把进池的
  * 级联腿复用在这一格上）—— 这格本身**分不出**是哪一种，要看账号行的 `scrapped`。
+ * **v1.21.0 收窄了账号那一档的判据**（ADR-0045）：不再是「余额 < 10 分」单项见底，而是
+ * **余额见底且套餐也不可用**（已过期 或 有效余量 < 1）才连坐。前端**不自算**这条判据，
+ * 只展示服务端给的 `depleted` / `depletedReason`；措辞按 §20.6 的事实写。
+ *
  * **没有 `'token_plan'`**：套餐余量耗尽与余额不足是同一句话的事实，要区分看 `category`。
  */
 export type DepletedReason = 'balance' | 'account';
@@ -1682,7 +1686,13 @@ export interface SupplierSessionImportRequest {
   text?: string;
 }
 
-/** 四个批量端点共用的「打谁」参数。`ids` 省略 = 该上游全部账号。 */
+/**
+ * 批量端点共用的「打谁」参数（`refresh` / `keys` / `keys/sync` / `rotate-key` /
+ * v1.21.0 的 `undeplete`）。`ids` 省略 = 该上游全部账号。
+ *
+ * `upstreamId` 在本仓是**必填**：路由的 body schema 写了 `required: ['upstreamId']`，
+ * 上游不存在直接 404（不让它变成一个"0 行成功"的空任务）。
+ */
 export interface SupplierBatchRequest {
   upstreamId: string;
   ids?: string[];
@@ -1707,8 +1717,8 @@ export interface SupplierKeysRequest extends SupplierBatchRequest {
 }
 
 /**
- * §15.3 `action` 七值，每个都必须有生产者（不留"枚举里有、没人发"的空值）；
- * `rotate` 见 §15.13，`import` 见 v1.16.4 Cookie 粘贴导入。
+ * §15.3 `action` 八值，每个都必须有生产者（不留"枚举里有、没人发"的空值）；
+ * `rotate` 见 §15.13，`import` 见 v1.16.4 Cookie 粘贴导入，`undeplete` 见 v1.21.0 批量解除透支。
  */
 export type SupplierBatchAction =
   | 'login'
@@ -1718,7 +1728,13 @@ export type SupplierBatchAction =
   | 'sync'
   | 'rotate'
   /** v1.16.4：只登记会话，没有发生登录。 */
-  | 'import';
+  | 'import'
+  /**
+   * v1.21.0（ADR-0045）：批量解除账号透支（第 8 值）。纯本地动作 —— 一行一个账号，
+   * 清账号锁 + 清名下原因「账号连坐」的 key 锁（同时重新启用），**不动** key 自己的
+   * 「余额不足」锁：那把 key 没钱这件事没变，下一轮刷新照样锁上。
+   */
+  | 'undeplete';
 
 /** 逐行结果的一行。**不含任何凭据** —— `keyMasked` 是掩码，`keyId`/`tokenNo` 是内部标识。 */
 export interface SupplierBatchItem {

@@ -61,7 +61,15 @@
  * `succeeded` / `failed` 才读（§15.12 锚 2）—— 本页**不碰** `result`，
  * 免得"认结果形状"出现第二份实现。
  */
-import { ArrowLeftOutlined, DeleteOutlined, DownloadOutlined, KeyOutlined, PlusOutlined, SyncOutlined } from '@ant-design/icons';
+import {
+  ArrowLeftOutlined,
+  DeleteOutlined,
+  DownloadOutlined,
+  KeyOutlined,
+  PlusOutlined,
+  SyncOutlined,
+  UnlockOutlined,
+} from '@ant-design/icons';
 import {
   Alert,
   App,
@@ -79,6 +87,7 @@ import {
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
+import type { ReactNode } from 'react';
 import { useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 
@@ -147,7 +156,7 @@ const CREDENTIAL_SHORT: Record<SupplierCredentialSource, string> = {
  */
 const HOST_EGRESS_VALUE = '__host__';
 
-/** 一个「打上游」的批量动作：确认标题 / 真正的提交函数 / 确认框末句（有代价语义的动作给）。 */
+/** 一个批量动作：确认标题 / 真正的提交函数 / 确认框末句（有代价语义的动作给）。 */
 interface BatchActionSpec {
   key: string;
   label: string;
@@ -159,6 +168,17 @@ interface BatchActionSpec {
    * 缺省 `false` = 所有账号面供应商都有。
    */
   requiresPlans?: boolean;
+  /**
+   * 确认按钮文案。缺省「执行（会打上游）」—— 只有**纯本地**动作（不打上游、不解密凭据、
+   * 不占出口预算）才允许换掉：v1.21.0 的批量解除透支就是这一种，代价语义从"打上游"
+   * 变成"放回池中"，按钮文案必须跟代价走，否则就是把一条会改资金状态的动作说轻了。
+   */
+  okText?: string | undefined;
+  /**
+   * 按钮图标。缺省 `SyncOutlined` —— 那一类的共同点是"打上游取新数据回来"；
+   * 批量解除透支不打上游、只做本地清锁，给它一把解锁的图标，别让人以为它又是同步。
+   */
+  icon?: ReactNode | undefined;
 }
 
 const BATCH_ACTIONS: readonly BatchActionSpec[] = [
@@ -183,6 +203,24 @@ const BATCH_ACTIONS: readonly BatchActionSpec[] = [
     submit: (body) => supplierAccountsApi.rotateKey(body),
     outcome: '执行后等终态，逐行结论见明细浮层；旧套餐 key 会立即失效。',
     requiresPlans: true,
+  },
+  {
+    /**
+     * v1.21.0 批量解除透支（ADR-0045）。**为什么需要它**：透支锁是粘性的（§20.3），
+     * 判据在 v1.21.0 收窄了（不再"余额见底一项"就锁，而是「余额见底 **且** 套餐不可用」），
+     * 但按旧判据锁上的账号不会自己回来 —— 没有这个出口，业主只能一个一个点"解除透支"。
+     *
+     * 按钮**恒在**，不跟"有没有勾到透支行"联动：它的另一个用途是把历史误锁一次清干净
+     * （不勾选 = 该上游全部账号，与 §15.2 `refresh` 同一口径）。点不动不报错的那种
+     * "看起来没反应"，比一个恒在的按钮更糟。
+     */
+    key: 'undeplete',
+    label: '批量解除透支',
+    submit: (body) => supplierAccountsApi.undepleteBatch(body),
+    outcome:
+      '执行后等终态，逐行结论见明细浮层；只解「账号连坐」这一层：账号锁清掉，被账号带停的 key 重新启用。自己余额不足的那几把 key 不会被放回池中 —— 它没钱这件事没变；判据仍然成立的账号，下一轮余额刷新会再次锁上。',
+    okText: '执行（本地清锁，不打上游）',
+    icon: <UnlockOutlined />,
   },
 ];
 
@@ -437,6 +475,7 @@ export default function SupplierAccountsPage() {
       title: spec.label,
       scope: scopeOf(),
       outcome: spec.outcome ?? '执行后等终态，逐行结论见明细浮层。',
+      okText: spec.okText,
       onOk: async () => {
         const accepted = await run(spec.key, () => spec.submit(body), '已提交任务');
         if (accepted === null) return;
@@ -574,8 +613,9 @@ export default function SupplierAccountsPage() {
       title: '解除这个账号的透支锁？',
       content: (
         <span>
-          解除后该账号与其名下被级联锁住（原因「账号欠费」或「已进废号池」）的 key 会<strong>回到选路池</strong>。
-          如果下一次余额刷新显示它仍然透支，会<strong>再次自动锁上</strong> —— 那是预期行为，不是故障。
+          解除后该账号与其名下被「账号连坐」停用的 key 会<strong>回到选路池</strong>；自己余额不足的那些 key
+          仍在池外 —— 它们没钱这件事没变。
+          如果下一次余额刷新显示账号仍然透支（余额见底且套餐也不可用），会<strong>再次自动锁上</strong> —— 那是预期行为，不是故障。
         </span>
       ),
       okText: '解除并启用',
@@ -931,7 +971,7 @@ export default function SupplierAccountsPage() {
         <Space size={tokens.space.sm}>
           {/* 只在真锁着的时候画：一个恒在的「解除透支」会变成噪声，也会让人以为它是常规维护动作。 */}
           {row.depleted ? (
-            <Tooltip title="清账号锁 + 清名下被级联锁住的 key（原因「账号欠费」或「已进废号池」），并把它们重新启用。余额回升不会自动解锁，只有这个动作能解。">
+            <Tooltip title="清账号锁 + 清名下被账号连坐停用的 key，并把它们重新启用；自己余额不足的 key 不会被放回池中。余额回升不会自动解锁，只有这个动作能解。">
               <Button
                 size="small"
                 type="link"
@@ -1167,7 +1207,7 @@ export default function SupplierAccountsPage() {
                         <Button
                           key={spec.key}
                           size="small"
-                          icon={<SyncOutlined />}
+                          icon={spec.icon ?? <SyncOutlined />}
                           loading={isPending(spec.key)}
                           onClick={() => {
                             runBatch(spec);

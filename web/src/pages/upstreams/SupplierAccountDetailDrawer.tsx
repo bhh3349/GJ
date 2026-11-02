@@ -197,8 +197,9 @@ export function SupplierAccountDetailDrawer({
       title: '解除这个账号的透支锁？',
       content: (
         <span>
-          解除后该账号与其名下被级联锁住（原因「账号欠费」或「已进废号池」）的 key 会<strong>回到选路池</strong>。
-          如果下一次余额刷新显示它仍然透支，会<strong>再次自动锁上</strong> —— 那是预期行为，不是故障。
+          解除后该账号与其名下被「账号连坐」停用的 key 会<strong>回到选路池</strong>；自己余额不足的那些 key
+          仍在池外 —— 它们没钱这件事没变。
+          如果下一次余额刷新显示账号仍然透支（余额见底且套餐也不可用），会<strong>再次自动锁上</strong> —— 那是预期行为，不是故障。
         </span>
       ),
       okText: '解除并启用',
@@ -433,7 +434,7 @@ export function SupplierAccountDetailDrawer({
         <Space size={tokens.space.sm} wrap style={{ width: '100%', justifyContent: 'flex-end' }}>
           {/* §20.5：只在真锁着的时候画 —— 一个恒在的「解除透支」会让人以为它是常规维护动作。 */}
           {account?.depleted ? (
-            <Tooltip title="清账号锁 + 清名下被级联锁住的 key（原因「账号欠费」），并把它们重新启用。余额回升不会自动解锁，只有这个动作能解。">
+            <Tooltip title="清账号锁 + 清名下被账号连坐停用的 key，并把它们重新启用；自己余额不足的 key 不会被放回池中。余额回升不会自动解锁，只有这个动作能解。">
               <Button
                 size="small"
                 style={{ color: tokens.color.orange, borderColor: tokens.color.orange }}

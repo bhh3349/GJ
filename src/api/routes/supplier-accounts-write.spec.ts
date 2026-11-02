@@ -668,6 +668,26 @@ describe('POST /refresh 的账号透支锁存与级联（§20.4 / §20.6）', ()
     const orphan = seedBoundKey(h, id, accountId, {});
     h.db.prepare('DELETE FROM supplier_account_keys WHERE pooled_key_id = ?').run(orphan);
 
+    // **v1.21.0（ADR-0045）判据收窄的前置**：账号级连坐现在要求「余额见底 **且** 套餐不可用」。
+    // 让上游回一条"套餐已烧干"的台账 —— 没有它，这个账号只是"余额见底、套餐情况未知"，
+    // 判据按 ADR-0003（未知 ≠ 0）**不连坐**，本用例断言的级联就永不发生。
+    // 必须走 mock 而不是直接种库：`refresh` 成功路径会用上游响应 `replaceSupplierSubscriptions`
+    // 整批覆盖台账，种进去的行活不过这一轮。
+    h.upstream.on('/api/subscription/self', () =>
+      ok({
+        all_subscriptions: [
+          {
+            sub_no: 'SB-LATCH-1',
+            end_at: '2026-12-31 00:00:00',
+            auto_renew: false,
+            has_key: true,
+            basic_token_total: 8_000_000,
+            basic_token_used: 8_000_000,
+          },
+        ],
+      }),
+    );
+
     // quota 0 → 0 分 < 10（§15.1 的换算：`quotaToCents(0) === 0`）。
     h.upstream.on('/api/user/self', () => ok({ quota: 0, id: '42' }));
     // 基线：入池与挂台账各自发过广播（`createKey` 的 `insert` 已被滤掉，这里是 `link` 那条）。
@@ -684,11 +704,16 @@ describe('POST /refresh 的账号透支锁存与级联（§20.4 / §20.6）', ()
     expect(accountLatch(h, accountId)).toMatchObject({ reason: 'balance' });
     for (const [name, keyId] of [['balance', balKey], ['token-plan', planKey], ['unlimited', unlimitedKey]] as const) {
       expect(keyLatch(h, keyId), name).toMatchObject({ reason: 'account' });
-      // 锁存**绝不碰 `enabled`**（§20.5 决策 6）：库里仍是启用态，排除靠标记。
-      // 这一行同时钉住"级联不是批量 disable 的另一种写法"。
-      expect(keyLatch(h, keyId).enabled, name).toBe(1);
-      // 每把各发一条：网关 ≤1s 重建快照。漏发的表现是"页面红标、网关照选它"。
-      expect(keyBroadcasts(h, keyId) - (base.get(keyId) ?? 0), name).toBe(1);
+      // **v1.21.0（ADR-0045）后这一格的含义变了**：本夹具是「余额 0 + 套餐烧干」，
+      // 它同时满足 §21 废号池判据（余额 < 1 元 **且** 套餐余量 < 1），所以 `enabled` 被
+      // `disableKeysOfAccount` 置 0 —— 那不是透支锁碰的，是废号池碰的（§21.3 ②③）。
+      // 「锁存绝不碰 `enabled`」（§20.5 决策 6）由 key 级用例独立守着（`repo/keys.spec.ts`），
+      // 这里不再兼职：两条腿在同一个账号上叠在一起，断言写 1 会变成一句假话。
+      expect(keyLatch(h, keyId).enabled, name).toBe(0);
+      // **两条腿各发一条**（v1.21.0 夹具变化，同上一格）：透支级联（打 `account` 锁）与
+      // 废号池停用（`enabled=0`）是两个独立动作，网关两件事都要重建快照 ⇒ 2。
+      // 旧夹具只命中透支腿（没有套餐台账 ⇒ 判不出废号），所以这里曾写 1。
+      expect(keyBroadcasts(h, keyId) - (base.get(keyId) ?? 0), name).toBe(2);
     }
     expect(keyLatch(h, orphan).at).toBeNull();
     expect(keyBroadcasts(h, orphan) - (base.get(orphan) ?? 0)).toBe(0);
@@ -727,6 +752,13 @@ describe('POST /refresh 的账号透支锁存与级联（§20.4 / §20.6）', ()
     const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
     const pooled = seedBoundKey(h, id, accountId);
 
+    // v1.21.0（ADR-0045）：连坐要求「余额且套餐」两个都见底。台账里先有一条余量 0 的套餐行——
+    // 这正是本用例要证的点：套餐腿**失败**时判的是**库里那份台账**（本次响应拿不到新的），
+    // 判据读库、不读响应，所以锁存照样发生。
+    replaceSupplierSubscriptions(h.db, accountId, [
+      { subNo: 'SB-LATCH-2', basicTokenTotal: 8_000_000, basicTokenUsed: 8_000_000, endAt: '2026-12-31T00:00:00.000Z', hasKey: true },
+    ]);
+
     h.upstream.on('/api/user/self', () => ok({ quota: 0, id: '42' }));
     // 套餐接口抖一下：这一行按**失败**报，但余额已经写进库了（§15.5 的两条腿分开算）。
     h.upstream.on('/api/subscription/self', () => rejected('套餐接口抖了'));
@@ -737,6 +769,75 @@ describe('POST /refresh 的账号透支锁存与级联（§20.4 / §20.6）', ()
     expect(accountRow(h.db, accountId)['balance_cents']).toBe(0);
     // 关键那一行：欠费事实已经落库，打标就不能再等 —— `ok:false` 那一支里漏调
     // `latchAccountIfDepleted` 的话，这个账号要带着整批 key 在池里跑到下一轮刷新。
+    expect(accountLatch(h, accountId)).toMatchObject({ reason: 'balance' });
+    expect(keyLatch(h, pooled)).toMatchObject({ reason: 'account' });
+  });
+
+  it('**业主现场（ADR-0045）**：余额 0 但套餐还有 800 万 ⇒ 不连坐，套餐 key 照常可用', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+
+    const balKey = seedBoundKey(h, id, accountId);
+    const planKey = seedBoundKey(h, id, accountId, { category: 'token-plan' });
+
+    // 截图里那个账号的形状：余额 ¥0.00、套餐 ¥29.90（这里用 token 余量表达：一点没烧过）。
+    // 同样走 mock：refresh 会用响应覆盖台账。
+    h.upstream.on('/api/subscription/self', () =>
+      ok({
+        all_subscriptions: [
+          {
+            sub_no: 'SB-ALIVE-1',
+            end_at: '2099-12-31 00:00:00',
+            auto_renew: false,
+            has_key: true,
+            basic_token_total: 8_000_000,
+            basic_token_used: 0,
+          },
+        ],
+      }),
+    );
+    h.upstream.on('/api/user/self', () => ok({ quota: 0, id: '42' }));
+
+    const { result } = await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id });
+
+    expect(result.items[0]?.ok).toBe(true);
+    expect(accountRow(h.db, accountId)['balance_cents']).toBe(0);
+
+    // ① 账号不锁 —— 它还有套餐能干活（旧判据在这里会打 `balance` 锁，是本 ADR 要修的那一格）。
+    expect(accountLatch(h, accountId).at).toBeNull();
+    // ② **套餐 key 不锁** —— 业主原话「这种余额 key 透支，不应该禁止该账号下所有的 key」。
+    expect(keyLatch(h, planKey).at).toBeNull();
+    // ③ 余额类 key 也不在这里被锁：`refresh` 只走账号级判定腿，key 级余额判据挂在自己的
+    //    落库点（§20.4 的表）。这一条同时钉住"收窄没有把账号级判据搬到 key 上"。
+    expect(keyLatch(h, balKey).at).toBeNull();
+  });
+
+  it('余额 0 + 套餐**已过期**（台账还剩 800 万）⇒ 连坐（过期按 0 计）', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    const pooled = seedBoundKey(h, id, accountId);
+
+    // 到期时刻在过去：`currentPlanForScrap` 把余量按 0 计（与 ADR-0043 同口径）。
+    h.upstream.on('/api/subscription/self', () =>
+      ok({
+        all_subscriptions: [
+          {
+            sub_no: 'SB-EXPIRED-1',
+            end_at: '2020-01-01 00:00:00',
+            auto_renew: false,
+            has_key: true,
+            basic_token_total: 8_000_000,
+            basic_token_used: 0,
+          },
+        ],
+      }),
+    );
+    h.upstream.on('/api/user/self', () => ok({ quota: 0, id: '42' }));
+
+    await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id });
+
     expect(accountLatch(h, accountId)).toMatchObject({ reason: 'balance' });
     expect(keyLatch(h, pooled)).toMatchObject({ reason: 'account' });
   });
@@ -1644,5 +1745,98 @@ describe('废号池（§21）', () => {
     expect(res.statusCode).toBe(409);
     expect(keyState(h, keyId)['deleted_at']).toBeNull();
     expect(h.db.prepare('SELECT id FROM supplier_accounts WHERE id = ?').get(accountId)).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// POST /undeplete 批量解除透支（v1.21.0 / ADR-0045）
+//
+// 业主原话「需要一个一个解除」→ 批量出口。它是**纯本地动作**：不打上游、不解密、不看能力位。
+// 判据 9（本文件最重要的一条）：只清 `reason='account'` 的锁 —— 一把自己余额不足的 key
+// 不因解账号的锁而回池，否则"批量解除"会变成"绕过余额判据"的后门。
+// ---------------------------------------------------------------------------
+
+describe('POST /undeplete 批量解除透支（v1.21.0 / ADR-0045）', () => {
+  const LOCKED_AT = '2026-11-03T00:00:00.000Z';
+
+  const accountLatchOf = (h: Harness, id: string): { at: string | null; reason: string | null } =>
+    h.db
+      .prepare('SELECT depleted_at AS at, depleted_reason AS reason FROM supplier_accounts WHERE id = ?')
+      .get(id) as { at: string | null; reason: string | null };
+
+  const keyLatchOf = (h: Harness, id: string): { at: string | null; reason: string | null; enabled: number } =>
+    h.db
+      .prepare('SELECT depleted_at AS at, depleted_reason AS reason, enabled AS enabled FROM upstream_keys WHERE id = ?')
+      .get(id) as { at: string | null; reason: string | null; enabled: number };
+
+  /** 手工造出"已锁存"的库态（比跑一轮刷新更直接：本用例只验解除，不验判定）。 */
+  function lockAccount(h: Harness, accountId: string): void {
+    h.db
+      .prepare("UPDATE supplier_accounts SET depleted_at = ?, depleted_reason = 'balance' WHERE id = ?")
+      .run(LOCKED_AT, accountId);
+  }
+
+  function lockKey(h: Harness, keyId: string, reason: 'account' | 'balance', enabled = 1): void {
+    h.db
+      .prepare('UPDATE upstream_keys SET depleted_at = ?, depleted_reason = ?, enabled = ? WHERE id = ?')
+      .run(LOCKED_AT, reason, enabled, keyId);
+  }
+
+  /** 种一把入池并挂到账号名下的 key（本 describe 局部；`W` 前缀区别于其他 describe 的桩 key）。 */
+  function seedBoundKey(h: Harness, upstreamId: string, accountId: string): string {
+    const dto = createKey(
+      h.db,
+      {
+        upstreamId,
+        key: 'sk-probe-' + 'W'.repeat(20) + String(++plaintextSeq).padStart(4, '0'),
+        category: 'balance',
+        balance: 500,
+      },
+      MASTER_KEY,
+    );
+    linkSupplierAccountKey(h.db, accountId, dto.id, dto.maskedKey, '批量解除用');
+    return dto.id;
+  }
+
+  it('清账号锁 + 清名下 `account` 锁并 `enabled=1`；**`balance` 锁保留**（§20.5 只清 `account`）', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+
+    // 两把 key：一把是被账号连坐的（`account`），一把是自己余额不足的（`balance`）。
+    const cascaded = seedBoundKey(h, id, accountId);
+    const ownDepleted = seedBoundKey(h, id, accountId);
+    lockAccount(h, accountId);
+    lockKey(h, cascaded, 'account', 0);
+    lockKey(h, ownDepleted, 'balance', 1);
+
+    const { result } = await runBatch(h, '/api/supplier-accounts/undeplete', { upstreamId: id, ids: [accountId] });
+
+    expect(result.ok).toBe(1);
+    expect(result.items[0]).toMatchObject({ accountId, action: 'undeplete', ok: true, code: null });
+
+    // ① 账号锁清掉。
+    expect(accountLatchOf(h, accountId)).toMatchObject({ at: null, reason: null });
+    // ② 被连坐那把：锁清 + `enabled` 恢复（与单账号端点逐字同语义）。
+    expect(keyLatchOf(h, cascaded)).toMatchObject({ at: null, reason: null, enabled: 1 });
+    // ③ **自己余额不足那把：锁还在** —— 它没钱这件事没变，解账号的锁不该放它回池。
+    expect(keyLatchOf(h, ownDepleted)).toMatchObject({ at: LOCKED_AT, reason: 'balance' });
+  });
+
+  it('`ids` 里不存在的账号被静默略过（`total` 随之变小），不整批失败', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    lockAccount(h, accountId);
+
+    const { result } = await runBatch(h, '/api/supplier-accounts/undeplete', {
+      upstreamId: id,
+      ids: [accountId, 'acc_does_not_exist'],
+    });
+
+    // 与 §15.2 `refresh` 同口径：点名的 id 少一两个通常是刚被删掉，不是参数错误。
+    expect(result.total).toBe(1);
+    expect(result.ok).toBe(1);
+    expect(accountLatchOf(h, accountId).at).toBeNull();
   });
 });

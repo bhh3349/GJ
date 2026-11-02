@@ -52,6 +52,7 @@ import {
   startSupplierKeysSync,
   startSupplierRefresh,
   startSupplierRotateKey,
+  startSupplierUndeplete,
   testSupplierAccount,
 } from '../services/supplier-accounts.js';
 import {
@@ -366,6 +367,37 @@ export function registerSupplierAccountRoutes(app: FastifyInstance, ctx: ApiCont
       const upstreamId = req.body.upstreamId ?? '';
       const task = startSupplierRefresh(supplier, req.body, {
         onFinish: (result, failed) => auditBatch(ctx, who, 'supplier.refresh', upstreamId, result, failed),
+      });
+      return reply.code(202).send({ taskId: task.id });
+    },
+  );
+
+  /**
+   * 批量解除透支（契约 §15.2 / §20.5；v1.21.0 / ADR-0045）。`ids` 省略 = 该上游全部账号。
+   *
+   * 与 `refresh` / `keys` 的差别：**不打上游**、不解密凭据、不看重登能力位 —— 它是纯本地清锁动作，
+   * 两家同形（§15.14 能力表在这条路上没有任何分支）。历史误锁（按 v1.21.0 前的旧判据锁上的）
+   * 用它批量清一次即可；判据没变的会被下一轮刷新重新锁上，那时该看 `depletedReason`，不是怀疑按钮。
+   */
+  app.post<{ Body: BatchBody }>(
+    '/api/supplier-accounts/undeplete',
+    {
+      schema: {
+        body: {
+          type: 'object',
+          required: ['upstreamId'],
+          properties: {
+            upstreamId: { type: 'string', minLength: 1, maxLength: 64 },
+            ids: { type: 'array', items: { type: 'string', minLength: 1 }, maxItems: 500 },
+          },
+        },
+      },
+    },
+    (req, reply) => {
+      const who = captureAuditActor(req, config);
+      const upstreamId = req.body.upstreamId ?? '';
+      const task = startSupplierUndeplete(supplier, req.body, {
+        onFinish: (result, failed) => auditBatch(ctx, who, 'supplier.undeplete', upstreamId, result, failed),
       });
       return reply.code(202).send({ taskId: task.id });
     },

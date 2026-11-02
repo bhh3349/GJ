@@ -34,7 +34,7 @@ import type { Db } from '../../db/database.js';
 import { isAccountDepleted } from '../../db/depletion.js';
 import { decideAccountScrap } from '../../db/scrap.js';
 import { newId } from '../../db/ids.js';
-import { latchAccountCascade, latchAccountDepleted } from '../../db/repo/depletion-latch.js';
+import { clearAccountDepletedCascade, latchAccountCascade, latchAccountDepleted } from '../../db/repo/depletion-latch.js';
 import { disableKeysOfAccount, latchAccountScrapped } from '../../db/repo/scrap-latch.js';
 import { createKey, deleteKey } from '../../db/repo/keys.js';
 import {
@@ -806,14 +806,24 @@ async function refreshAccount(
  * 这里不重复写一遍阈值。
  *
  * **只置位、不解锁**（§20.3）：余额回升**不**自动回池 —— 业主要的"用户可以自己再次核查"
- * 正是这一步。解除只有 `POST /api/supplier-accounts/:id/undeplete` 一个人工入口。
+ * 正是这一步。解除只有两个入口：单账号 `POST /api/supplier-accounts/:id/undeplete`，
+ * 以及 v1.21.0 的批量 `POST /api/supplier-accounts/undeplete`（ADR-0045）。
+ *
+ * **v1.21.0 判据收窄**（ADR-0045）：`isAccountDepleted` 现在还看套餐 —— 余额见底**且**套餐不可用
+ * 才连坐。套餐快照取库（`currentPlanForScrap`，与废号池判定腿 6 同一个函数），不取上游响应：
+ * 判定腿 5 在 `replaceSupplierSubscriptions` 之后调，库里那一行就是本轮刚写进去的。
  */
 function latchAccountIfDepleted(
   ctx: SupplierOps,
   accountId: string,
   self: { unlimited: boolean; balanceCents: number | null },
 ): void {
-  if (!isAccountDepleted({ unlimited: self.unlimited, balanceCents: self.balanceCents })) return;
+  const depleted = isAccountDepleted({
+    unlimited: self.unlimited,
+    balanceCents: self.balanceCents,
+    plan: currentPlanForScrap(ctx.db, accountId),
+  });
+  if (!depleted) return;
   latchAccountDepleted(ctx.db, accountId);
   latchAccountCascade(ctx.db, accountId);
 }
@@ -1281,6 +1291,62 @@ export function startSupplierRefresh(ctx: SupplierOps, body: unknown, hooks: Bat
         ),
       );
 
+      return tally.build();
+    },
+    hooks.onFinish,
+  );
+}
+
+/**
+ * 批量解除透支（契约 §15.2 / §20.5；v1.21.0 / ADR-0045）。
+ *
+ * **纯本地动作**：只碰 `depleted_at` / `enabled`，不打任何上游接口 —— 所以不需要 baseUrl /
+ * 凭据 / 能力位（§15.14 两家同形）。这也解释了它为什么能整批同步跑完却仍复用批量任务形态：
+ * 前端要用同一套抽屉读逐行结果，形状一致比"省一次任务"值钱。
+ *
+ * 逐行语义 = 单账号 `POST /:id/undeplete` **逐字复用**（`clearAccountDepletedCascade`）：
+ * 清账号锁 + 清名下 `reason="account"` 的 key 锁（同时 `enabled=1`），**不动** `"balance"` 锁
+ * —— 一把自己余额不足的 key，不因解账号的锁而回池（§20.5）。
+ *
+ * 为什么现在需要它：判据在 v1.21.0 收窄了（ADR-0045），但锁存是粘性的（§20.3）——
+ * 按旧判据锁上的账号不会自己回来，业主得有个批量出口清一次。
+ */
+export function startSupplierUndeplete(
+  ctx: SupplierOps,
+  body: unknown,
+  hooks: BatchHooks = {},
+): TaskDto {
+  const upstreamId = requiredString(body, 'upstreamId');
+  const ids = readIds(body);
+  // 上游不存在 ⇒ 404（与 refresh 同一条前置）：别让它变成一个"0 行成功"的空任务。
+  requireSupplierUpstream(ctx.db, upstreamId);
+  // `ids` 里不存在的 id 由 `resolveTargets` 静默略过、`total` 随之变小（同 §15.2 refresh 口径）；
+  // 一个都没剩 ⇒ 422 —— 那种情况通常是上游选错了，不是"没什么可解"。
+  const targets = resolveTargets(ctx.db, upstreamId, ids, undefined);
+
+  return startTask(
+    ctx.db,
+    'supplier_undeplete',
+    targets.length,
+    async (reporter) => {
+      const tally = new BatchTally(targets.length);
+      for (const [index, ref] of targets.entries()) {
+        // 恒 `ok:true`：本地动作没有"上游失败"这一维。账号若在任务创建后被删掉，
+        // `clearAccountDepletedCascade` 幂等返回 0 —— 那不是失败（目标集是创建时的快照）。
+        clearAccountDepletedCascade(ctx.db, ref.id);
+        tally.put(
+          index,
+          emptyItem({
+            accountId: ref.id,
+            identifier: ref.identifier,
+            action: 'undeplete',
+            ok: true,
+            code: null,
+            message: null,
+          }),
+        );
+        reporter.step();
+      }
       return tally.build();
     },
     hooks.onFinish,

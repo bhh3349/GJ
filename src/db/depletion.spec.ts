@@ -76,16 +76,95 @@ describe('§20.2 套餐类：落库余量 `=== 0` 才锁', () => {
   });
 });
 
-describe('§20.2 账号：与余额类同一口径', () => {
-  it('账号判据就是余额判据 —— 不许有第二套', () => {
-    const cases: { unlimited: boolean; balanceCents: number | null }[] = [
-      { unlimited: false, balanceCents: null },
-      { unlimited: false, balanceCents: 9 },
-      { unlimited: false, balanceCents: 10 },
-      { unlimited: true, balanceCents: null },
-    ];
-    for (const input of cases) {
-      expect(isAccountDepleted(input), JSON.stringify(input)).toBe(isBalanceDepleted(input));
-    }
+describe('§20.6 账号：余额见底 **且** 套餐不可用才连坐（v1.21.0 / ADR-0045）', () => {
+  // 钉住"过期那一刻"：NOW 落在 PAST 与 FUTURE 之间。
+  const NOW = Date.parse('2026-11-03T04:00:00.000Z');
+  const FUTURE = '2026-12-31T00:00:00.000Z';
+  const PAST = '2026-10-31T00:00:00.000Z';
+
+  it('业主现场：余额 ¥0 + 套餐还剩 800 万 ⇒ **不连坐**（套餐 key 花的是套餐额度）', () => {
+    // 这是 ADR-0045 的核心用例：截图里那个账号「余额 ¥0.00、套餐 ¥29.90」被连坐锁死，
+    // 而套餐 key 明明能出量。收窄后它不该再被连坐。
+    expect(
+      isAccountDepleted({
+        unlimited: false,
+        balanceCents: 0,
+        plan: { remainingTokens: 8_000_000, expiresAt: FUTURE },
+        now: NOW,
+      }),
+    ).toBe(false);
+  });
+
+  it('余额 0 + 套餐余量 0 ⇒ 连坐（两项都见底）', () => {
+    expect(
+      isAccountDepleted({
+        unlimited: false,
+        balanceCents: 0,
+        plan: { remainingTokens: 0, expiresAt: FUTURE },
+        now: NOW,
+      }),
+    ).toBe(true);
+  });
+
+  it('余额 0 + 套餐已过期（余量仍 800 万）⇒ 连坐（过期把余量按 0 计）', () => {
+    expect(
+      isAccountDepleted({
+        unlimited: false,
+        balanceCents: 0,
+        plan: { remainingTokens: 8_000_000, expiresAt: PAST },
+        now: NOW,
+      }),
+    ).toBe(true);
+  });
+
+  it('台账没有套餐行 ⇒ 不连坐（判不出"套餐也见底"；余额 key 仍被自己的判据逐把锁）', () => {
+    expect(isAccountDepleted({ unlimited: false, balanceCents: 0, plan: null, now: NOW })).toBe(false);
+  });
+
+  it('余额未知 / 无限额度 ⇒ 不连坐（ADR-0003；连坐也要求"值非 NULL"）', () => {
+    const plan = { remainingTokens: 0, expiresAt: FUTURE };
+    expect(isAccountDepleted({ unlimited: false, balanceCents: null, plan, now: NOW })).toBe(false);
+    expect(isAccountDepleted({ unlimited: true, balanceCents: null, plan, now: NOW })).toBe(false);
+    // unlimited 即便带着一个 0 也够不着（上游 unlimited 的 balanceCents 按设计恒 null）。
+    expect(isAccountDepleted({ unlimited: true, balanceCents: 0, plan, now: NOW })).toBe(false);
+  });
+
+  it('余额还够（500 分）+ 套餐耗尽 ⇒ 不连坐（余额一项不成立；套餐 key 由自己的判据锁）', () => {
+    expect(
+      isAccountDepleted({
+        unlimited: false,
+        balanceCents: 500,
+        plan: { remainingTokens: 0, expiresAt: FUTURE },
+        now: NOW,
+      }),
+    ).toBe(false);
+  });
+
+  it('套餐余量未知（上游没说）⇒ 不连坐（未知 ≠ 0）', () => {
+    expect(
+      isAccountDepleted({
+        unlimited: false,
+        balanceCents: 0,
+        plan: { remainingTokens: null, expiresAt: FUTURE },
+        now: NOW,
+      }),
+    ).toBe(false);
+  });
+
+  it('余量 1（最小可用值）⇒ 不连坐；余量 0 才连坐（token 是整数，边界 `< 1`）', () => {
+    const base = { unlimited: false, balanceCents: 0, now: NOW };
+    expect(isAccountDepleted({ ...base, plan: { remainingTokens: 1, expiresAt: FUTURE } })).toBe(false);
+    expect(isAccountDepleted({ ...base, plan: { remainingTokens: 0, expiresAt: FUTURE } })).toBe(true);
+  });
+
+  it('到期时间解析不出来 ⇒ 当"没说"处理（不因为坏时间串锁整批 key）', () => {
+    expect(
+      isAccountDepleted({
+        unlimited: false,
+        balanceCents: 0,
+        plan: { remainingTokens: 8_000_000, expiresAt: 'not-a-date' },
+        now: NOW,
+      }),
+    ).toBe(false);
   });
 });

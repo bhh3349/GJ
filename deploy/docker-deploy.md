@@ -1,6 +1,8 @@
 # sub-gateway Docker 部署（单机）
 
-> 2026-10-19 由部署准备生成。前置阅读：根目录 `Dockerfile` 头注释（三条构建决定）、
+> 2026-10-19 由部署准备生成。2026-11-03 增补：镜像 multi-stage 化、生产 `.env`
+> 模板（`deploy/env.production.example`）、部署后可达性自检（§5c）。
+> 前置阅读：根目录 `Dockerfile` 头注释（四条构建决定，含 multi-stage 的代价）、
 > `docker-compose.yml` 注释（健康探针为什么是 WS 101 而不是 HTTP 200）。
 
 ## 0. 前置条件
@@ -13,6 +15,11 @@
     BuildKit 拉外部 frontend 镜像，那条路径不走代理，直接超时。
   - 症状识别：`docker build` 报 `failed to fetch anonymous token ... i/o timeout`
     且指到 `docker-image://docker/dockerfile:1`，就是这条。
+- **multi-stage 化后（2026-11-03）新增一条**：运行期阶段没有编译器，better-sqlite3
+  的原生绑定只来自 prebuild（GitHub releases）。**GitHub 不可达的构建机会在
+  `pnpm install --prod` 层显式失败**（症状：`pnpm install` 报 better-sqlite3
+  prebuild 下载超时/403）。这不是回退到旧单阶段的理由 —— 那类网络本来就按 §5b
+  三包搬运，构建放在能联网的机器上做。
 
 ## 1. 构建
 
@@ -30,7 +37,10 @@ node v24 会弄坏 better-sqlite3 原生 ABI —— 只影响宿主机构建，�
 ## 2. 配置
 
 ```bash
-cp .env.example .env   # 然后按需改，或用部署准备时已生成的那份
+# 生产部署用新模板（只含必改项，键位说明不重抄）：
+cp deploy/env.production.example .env
+# 全键位模板（本地开发 / 要查某个键的完整语义）：
+cp .env.example .env             # 然后按需改，或用部署准备时已生成的那份
 ```
 
 `.env` 最少要填：
@@ -173,7 +183,7 @@ docker save sub-gateway:local | gzip > sub-gateway-image.tar.gz
 git archive HEAD | gzip > sub-src.tar.gz      # 源码：无 .git、无 .env（.gitignore 挡着）
 tar czf web-dist.tar.gz -C web dist           # 前端产物：宿主机 pnpm web:build 产出
 
-# —— 传输 + 校验（镜像约 235MB，国内跨机实测 30s）——
+# —— 传输 + 校验（multi-stage 后镜像显著变小，实测值见 §6；国内跨机实测 30s 量级）——
 scp sub-*.tar.gz web-dist.tar.gz root@<host>:/root/
 ssh root@<host> 'cd /root && sha256sum *.tar.gz'   # 与本地逐条比对，不等就是传坏了
 
@@ -203,10 +213,87 @@ tar xzf /root/web-dist.tar.gz -C /opt/sub/web   # 产出 /opt/sub/web/dist
 
 `ADMIN_WEB_DIST` 在 `.env` 里要写 `/app/web/dist`（容器内路径，不是宿主机的 `/opt/sub/web/dist`）。
 
+## 5c. 部署后 5 分钟可达性自检（手检清单）
+
+**为什么单列这一节**：启动 `(healthy)` 只证明"进程活着 + 管理面在服务"（§3 的 WS 101 探针），
+**不证明它能出去**。而"上游域名拼错"与"出口被墙"在网关观测面上是**同一个症状**
+（`last failure NETWORK`、上游"全挂"）—— 所以下面四步各自只回答一个问题，一条不过就停。
+
+```bash
+# ① 容器内 G1 等价判据：原生绑定真能加载（multi-stage 后运行期阶段不带编译器，
+#    better-sqlite3 的绑定只来自 prebuild —— 这一步就是在验证"prebuild 与容器 Node ABI 匹配"）
+docker exec <容器> node -e 'const D=require("better-sqlite3");const db=new D(":memory:");db.exec("create table t(v)");db.prepare("insert into t values(?)").run("ok");console.log("G1(容器内)",db.prepare("select v from t").get().v);'
+# 判据：打印 G1(容器内) ok。抛 "Could not locate the bindings file" = 该层 prebuild 没落盘。
+
+# ② 容器内解析上游域名（DNS 通不通；坑 3 的现场复核）
+docker exec <容器> getent hosts tierflow.cn
+# 判据：有输出（IP 行）= 解析通。空输出 = 容器 DNS 瞎了 → 查 compose 的 dns 段。
+
+# ③ 容器内直连上游（链路通不通 / 是不是被墙）
+docker exec <容器> node -e 'fetch("https://tierflow.cn/v1/models").then(r=>console.log("HTTP",r.status)).catch(e=>console.log("FAIL",(e.cause&&e.cause.code)||e.message))'
+# 判据：HTTP 200/401 = 通（401 只是没带 key，链路是通的）。
+#       FAIL ENOTFOUND = 回到 ②（域名拼错或解析坏）；
+#       FAIL UND_ERR_CONNECT_TIMEOUT / ECONNRESET = 出口被墙或安全组没放行 —— 这才是"被墙"专属症状。
+
+# ④ 配了出口池的话，逐出口回显（证明流量真从那个 VPS 出去）
+curl -x http://<用户>:<口令>@<VPS_IP>:8080 -s https://api.ipify.org; echo
+# 判据：返回 VPS 的 IP = 通；返回项目服务器自己的 IP = 没走代理。
+# 与 deploy/vps-egress/README.md §2 的 30 秒自检是同一条命令。
+```
+
+**分界口径（省一次误判）**：② 空输出/`ENOTFOUND` = **名字问题**（拼错、DNS 瞎）；
+③ `timeout`/`reset` 但 ② 有输出 = **通路问题**（被墙、安全组、出口挂了）。
+两件事的修法反向，别混着查。
+
 ## 6. 已知不粉饰
 
-- 镜像留着构建期工具链（python3/make/g++，~120MB）：没做 multi-stage，
-  因为 `COPY --from` 搬 node_modules 有搬漏原生 `.node` 的风险，自用镜像不为 120MB 付它。
+- ~~镜像留着构建期工具链（python3/make/g++，~120MB）~~ **2026-11-03 已 multi-stage 化**：
+  工具链与 devDependencies 只在 build 阶段，运行期阶段 = slim 基座 + `pnpm install
+  --prod` + dist。当年否掉 `COPY --from` 的理由（搬漏原生 `.node`）不再适用 —— 现在
+  运行期自己按同一份 lockfile 装，不搬 node_modules。**换来的新代价**：运行期原生绑定
+  只来自 better-sqlite3 prebuild（GitHub releases），GitHub 不可达的构建机会显式失败
+  （见 §0 末条）；镜像体积实测值以 `docker images` 为准，四项部署机验证见 **§7 待实测**。
+- 生产 `.env` 模板已有：`deploy/env.production.example`（只含必改项；键位全集仍以
+  根目录 `.env.example` 为唯一事实源，模板不重抄）。
 - `EGRESS_HEARTBEAT_INBOX_DIR`（入口 A）缺省关，要开在 `.env` + compose 卷两处一起。
 - 管理面 4101 对整个网段开放（compose `ports` 的左半边是 `4101`，不是 `127.0.0.1:4101`）。
   裸跑实例时代它也是 0.0.0.0 —— 但切到对外部署时**必须**改 `127.0.0.1:4101` + 反代 TLS。
+
+## 7. 待实测：multi-stage 镜像的四项部署机验证（2026-11-03 挂账）
+
+**为什么挂账**：multi-stage 的**代码正确性**已在开发机验完（prebuild 资产存在性、
+prod-only 安装、原生模块加载 + 读写回路）。下面四项验的是**镜像与宿主环境的配合**，
+只能在装好 Docker 的部署机上做 —— 开发机没有容器运行时。
+
+**这四项没跑完，镜像不算验收（合并 ≠ 收口）**。三要素：
+
+- **owner**：基建（分支 `dev/infra`）
+- **载体**：部署机（业主提供，Docker 29+ / compose v2）
+- **回执口径**：四项证据 + 新镜像标签 —— ①体积前后两个数字 ②`(healthy)` 状态行
+  ③两条响应首行 ④重启前后 `integrity_check` 与行数；数字回填本节与 §6。
+
+```bash
+# ① 体积对比：旧单阶段基线 235MB（§6 旧值），multi-stage 目标 ~115MB
+docker images --format '{{.Repository}}:{{.Tag}}\t{{.Size}}' | grep sub-gateway
+# 判据：新标签明显小于旧标签（机器上还留着旧标签就直接对比，没留就用 235MB 做基线）。
+
+# ② healthy（WS 101 探针，不是 HTTP 200 —— 别改判据，见 §3）
+docker compose ps --format '{{.Name}}\t{{.Status}}'
+# 判据：STATUS 出现 (healthy)。(unhealthy) 先看 logs；若是探针探到错端口，回 §3b 坑 2。
+
+# ③ 双面在听（宿主缺省 4100/4101）
+curl -sI http://127.0.0.1:4100/v1/models | head -1
+curl -sI http://127.0.0.1:4101/ | head -1
+# 判据：网关面 401/404 都算"活着"；管理面 200。
+
+# ④ 重启后数据在（命名卷 + 真库；先记，再重启，再记，两次数值相等）
+docker inspect <容器> --format '{{range .Mounts}}{{.Name}} -> {{.Destination}}{{"\n"}}{{end}}'
+docker exec <容器> node -e 'const D=require("better-sqlite3");const db=new D("/app/data/gateway.db",{readonly:true});console.log("integrity",db.prepare("pragma integrity_check").get().integrity_check);console.log("call_logs",db.prepare("select count(*) c from call_logs").get().c);'
+docker compose restart gateway && sleep 5
+docker exec <容器> node -e 'const D=require("better-sqlite3");const db=new D("/app/data/gateway.db",{readonly:true});console.log("integrity",db.prepare("pragma integrity_check").get().integrity_check);console.log("call_logs",db.prepare("select count(*) c from call_logs").get().c);'
+# 判据：挂载卷名是 <项目名>_sub-gateway-data（**不是**裸名 sub-gateway-data，见 §3b 坑 1）；
+#       重启前后 integrity 都是 ok 且 call_logs 行数相等（0 也算过，只要"相等 + 库文件在"）。
+```
+
+部署后**可达性**（能不能出去）另见 §5c —— 两节别混：§7 验镜像与宿主，§5c 验网络与出口。
+

@@ -1,10 +1,10 @@
-# sub-gateway 生产镜像。
+# sub-gateway 生产镜像（multi-stage）。
 #
 # （曾有 `# syntax=docker/dockerfile:1` 行：它会要求 BuildKit 拉取外部 frontend
 # 镜像，而那条拉取**不走 daemon 的 HTTP_PROXY**，在 DNS 污染网络上直接超时。
 # 本文件只用内置语法，去掉后全缓存可构建，故不保留。）
 #
-# 三个决定，每条都有一个具体的失败形状，不是风格偏好：
+# 四个决定，每条都有一个具体的失败形状，不是风格偏好：
 #
 # 1. **base image 钉 `node:22-bookworm-slim`，不用 `latest` / `22-alpine`**
 #    - 不钉大版本：`better-sqlite3` 是**原生模块**，按 Node ABI 编译。Node 24 上跑会
@@ -18,21 +18,36 @@
 #    - 手抄一份 `pnpm@10.34.6` 到 Dockerfile 里就是第二个事实源，`package.json`
 #      改了这里不跟着改，症状是"本地能装、容器里装的不是同一套"。
 #
-# 3. **native 模块在构建期编译进镜像，不是运行期**
-#    - 运行期没有 python3/make/g++。若 `pnpm install` 时跳过了原生编译
-#      （例如靠 --ignore-scripts 提速），容器会在**第一次打开数据库**时才炸 ——
-#      那已经是服务"启动成功"之后，`health` 还可能是绿的。
+# 3. **两个阶段，工具链只活在 build 阶段（2026-11-03 multi-stage 化）**
+#    - build 阶段装 python3/make/g++：better-sqlite3 没有现成 prebuild 时从这里
+#      源码编译兜底；dist/ 也在这里产出。
+#    - 运行期阶段**不装工具链**，靠 better-sqlite3 的 prebuild（锁定的
+#      v11.10.0 有 node-v127-linux-x64，即 Node 22 / glibc 的预编译产物）。
+#      代价：**GitHub 不可达的构建机会在这一层显式失败**（prebuild 下载不走
+#      任何回退 —— 没有编译器，装不出来就是装不出来）。旧单阶段在那种网络上
+#      会静默退回源码编译；multi-stage 后这类机器直接走 §5b 三包搬运，构建
+#      放在能联网的机器上。换来的是运行期镜像少 ~120MB 工具链 + ~25MB devDeps。
+#    - 为什么运行期阶段自己 `pnpm install --prod` 而不是 `COPY --from=build
+#      /app/node_modules`：后者曾因"搬漏原生 `.node`/符号表"被否（构建不报错、
+#      运行才炸是最隐蔽的失败形状）。现在依赖树由**同一份 lockfile** 决定，
+#      两个阶段各装各的，树内容一致由 lockfile 保证，不靠搬运完整性。
+#    - `pnpm-workspace.yaml` 必须随清单一起拷：pnpm 10 默认拦截依赖构建脚本，
+#      better-sqlite3 的 prebuild-install 在 `onlyBuiltDependencies` 白名单里 ——
+#      少了它，运行期阶段装出来的 better-sqlite3 **没有原生绑定**，且只在
+#      第一次打开数据库时才炸（进程"启动成功"、health 还可能是绿的）。
 #
-# 镜像里**不含**：`web/dist` 由 `pnpm web:build` 在**调用方**那一步产出后拷入
-# （见 docker-compose.yml 的注释）—— 不在这里构建前端，是因为后端镜像的消费者
-# 可能只想跑 API；把前端烧进来会让"只想更新前端"也触发一次后端重构建。
+# 4. **镜像里不含**：`web/dist` 由 `pnpm web:build` 在**调用方**那一步产出后
+#    bind 进容器（见 docker-compose.yml 的注释）—— 不在这里构建前端，是因为
+#    后端镜像的消费者可能只想跑 API；把前端烧进来会让"只想更新前端"也触发
+#    一次后端重构建。`devDependencies` 同理不进运行期（tsc/tsx/vitest 只属于
+#    build 阶段；运行期缺它们不是缺陷，`pnpm install --prod` 保证这一点）。
 
-FROM node:22-bookworm-slim
+# ---------- build 阶段：工具链 + 全量依赖 + tsc 产物 ----------
 
-# 构建期工具链：只为 better-sqlite3 从源码编译而生，最终镜像里**留着一份**
-# —— 删掉要一个 multi-stage 的 `COPY --from` 搬运 node_modules，而那个搬运
-# 会把原生模块的 `.node` 与符号表一起搬漏的风险引进来。一个自用镜像不为
-# 这 ~120MB 增加一次"搬漏了但测试没发现"的概率。
+FROM node:22-bookworm-slim AS build
+
+# 构建期工具链：只为 better-sqlite3 从源码编译兜底（有 prebuild 时用不上，
+# 没有 prebuild 的 ABI/平台靠它），以及 devDependencies 的正常安装。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates python3 make g++ \
     && rm -rf /var/lib/apt/lists/*
@@ -52,6 +67,26 @@ RUN pnpm install --frozen-lockfile
 COPY tsconfig.json tsconfig.build.json ./
 COPY src ./src
 RUN pnpm build
+
+# ---------- 运行期阶段：slim 基座 + 生产依赖 + dist，不带工具链 ----------
+
+FROM node:22-bookworm-slim
+
+# 与 build 阶段同一份 lockfile 装**生产依赖**：devDeps（typescript/tsx/vitest/
+# esbuild 等）与构建工具链都不进这一层。better-sqlite3 的原生绑定来自
+# prebuild（见头注释第 3 条的代价说明）。
+RUN corepack enable
+
+WORKDIR /app
+
+# 三份清单一起拷：package.json（"type": "module" 决定 dist 是 ESM，缺它
+# `node dist/server.js` 直接 SyntaxError）+ lockfile（树与 build 阶段同源）+
+# pnpm-workspace.yaml（onlyBuiltDependencies 白名单，见第 3 条）。
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile --prod
+
+# 只搬 tsc 产物。不搬 node_modules、不搬 src/：运行期不读它们。
+COPY --from=build /app/dist ./dist
 
 # 数据目录：SQLite 文件的家。声明成 VOLUME 只是为了在 `docker run` 不给 -v 时
 # 给一个明确位置，**持久化请用 compose 的命名卷**（见 docker-compose.yml）。

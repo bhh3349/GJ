@@ -7,12 +7,14 @@
 
 | 要干的事 | 读 `deploy/docker-deploy.md` 哪节 |
 |---|---|
-| 首次构建 / 镜像为什么这么写 | §0 前置 + 根 `Dockerfile` 头注释 |
+| 首次构建 / 镜像为什么这么写 | §0 前置 + 根 `Dockerfile` 头注释（四条决定，含 multi-stage 代价） |
 | compose 字段为什么这么定 | 根 `docker-compose.yml` 注释（逐条写了失败形状） |
 | 旧库迁进容器 | §3b（**三个坑**：卷名前缀 / `PORT_*` 注入 / `daemon.json` DNS） |
 | 改后端后换容器 | §5（镜像先验再换、重建前快照、打日期标签） |
 | **国内网 + 裸 IP 全新部署** | §5b（三包搬运：`docker save` / `git archive` / `web dist`） |
+| **部署后可达性自检（域名拼错 vs 被墙分界）** | §5c（容器内 G1 / `getent` / 直连 fetch / 出口回显） |
 | 备份 / cron | §4 + 装箱脚本 `deploy/backup.sh` + `deploy/snapshot.cjs` |
+| 生产 `.env` 填什么 | `deploy/env.production.example`（只含必改项；键位全集在根 `.env.example`） |
 
 ## 现场事实（本地推断不出来的）
 
@@ -23,6 +25,11 @@
   「已创建管理组」。核对：`docker inspect <容器> --format '{{range .Mounts}}{{.Name}}{{"\n"}}{{end}}'`。
 - **健康探针是 WS 101 握手**（`/api/stats/live`），不是 HTTP 200：`/api/*` 除 `auth/login`
   全量鉴权，HTTP 探针恒 401 → 好容器被反复重启。镜像里没 curl，探针用 Node 内置 `net` 裸 socket。
+- **镜像 multi-stage（2026-11-03）**：运行期 = slim + `pnpm install --prod` + dist，无编译器、
+  无 devDeps；better-sqlite3 原生绑定靠 prebuild（GitHub releases），**GitHub 不可达的机器
+  构建会在 `pnpm install --prod` 显式失败** —— 那类网络走三包搬运，别回去翻旧单阶段 Dockerfile。
+- **"上游全挂"先跑 §5c 四步自检**：域名拼错（② `getent` 空）与被墙（③ connect timeout）症状
+  相同、修法反向。
 - **备份不能用 `cp`**：源库有未 checkpoint 的 WAL（本地实测 -wal 有 4MB），`cp` 拿到撕裂的库。
   用 `deploy/snapshot.cjs`（只读连接 + `VACUUM INTO`）。
 - **`node -e` 别塞进 `sh -c` 里**：引号在 sh → docker → node 三层之间必炸

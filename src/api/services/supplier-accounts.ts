@@ -784,7 +784,19 @@ async function refreshAccount(
     };
   }
 
-  replaceSupplierSubscriptions(ctx.db, active.id, mapSubscriptions(subsCall.result.data, self.quotaPerUnit));
+  const subs = mapSubscriptions(subsCall.result.data, self.quotaPerUnit);
+  replaceSupplierSubscriptions(ctx.db, active.id, subs);
+  // v1.22.0 / ADR-0046：刷新**顺手把套餐余量回填给池里那把 key**。
+  //
+  // 此前只有 `keys/sync` 调 `backfillSubscriptionTokenPlan`，于是业主看到的形状是：
+  // 「账号池台账已经是新的（¥29.90 / 800 万 / 到期都出来了），Key 管理还是旧值或「未同步」」
+  // —— 因为刷新只写了台账，没写 key 列。人被逼着去 Key 管理点一次「同步套餐余量」，
+  // 又打一遍上游，而数据本来就在手上。回填函数自己的注释早就写着"由 keys/sync /
+  // **余额刷新**回填"，这半句一直没接线，这次补上。
+  //
+  // 落点顺序：先台账、再回填（回填按 `key_masked` 认领池内 key，台账行必须已就位）。
+  // 失败不该让整次刷新失败 —— 回填是尽力而为，它只是让那把 key 少留一轮「未知」。
+  backfillSubscriptionTokenPlan(ctx.db, active.id, subs as readonly SupplierSubscriptionBackfill[]);
   patch.statusMessage = null;
   updateSupplierAccount(ctx.db, active.id, patch);
   latchAccountIfDepleted(ctx, active.id, self);
@@ -2139,6 +2151,20 @@ async function rotateOne(
     hasKey: true,
     keyMasked: call.result.data.maskedKey,
   });
+
+  // ④b v1.22.0 / ADR-0046：新 key 刚入池，`token_plan_remaining` 还是 NULL（ADR-0022 的"不猜"），
+  // 而这次上游响应刚把这份套餐的额度告诉我们 —— 就地回填。否则 Key 管理显示「未同步」，
+  // 又被逼去点一次「同步套餐余量」打一遍上游，而数据本来就在手上。
+  // `plan` 为 null（套餐列表里没有这个 sub）时三格都取不到值，回填按"宁缺勿假"整行跳过。
+  backfillSubscriptionTokenPlan(ctx.db, ref.id, [
+    {
+      subNo: targetSubNo,
+      basicTokenTotal: plan?.basicTokenTotal ?? null,
+      basicTokenUsed: plan?.basicTokenUsed ?? null,
+      endAt: plan?.endAt ?? null,
+      keyMasked: call.result.data.maskedKey,
+    },
+  ]);
 
   // ⑤ 旧 key 退场（规则 1 的后半段：后失效）。锚点是**重置前**取到的旧掩码 `oldMasked`
   //    （实测重置换尾；拿新掩码永远认领不到 —— 见 `pickSupersededTokenRow`）。

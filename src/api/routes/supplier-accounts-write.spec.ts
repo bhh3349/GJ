@@ -725,6 +725,66 @@ describe('POST /refresh 的账号透支锁存与级联（§20.4 / §20.6）', ()
     expect(keyLatch(h, balKey).reason).toBe('account');
   });
 
+  /**
+   * 业主现场（2026-11-03）：「账号池台账明明已经有 ¥29.90 / 800 万 / 到期，
+   * 为什么 key 管理还是旧值，还得再点一次『同步套餐余量』再打一遍上游？」
+   *
+   * 根因：`refresh` 写台账却**没调** `backfillSubscriptionTokenPlan`（只有 `keys/sync` 调），
+   * 于是 `upstream_keys.token_plan_remaining/expires_at` 停在旧值或 NULL。v1.22.0 补上这一腿。
+   */
+  it('refresh 顺带回填 key 的套餐余量与到期 —— Key 管理不必再打一遍上游（v1.22.0 / ADR-0046）', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    const planKey = seedBoundKey(h, id, accountId, { category: 'token-plan' });
+
+    // 回填靠**掩码**认领池里那把 key（`maskFromUpstream` 归一成 `****后4位`）。
+    const masked = (h.db.prepare('SELECT masked_key AS m FROM upstream_keys WHERE id = ?').get(planKey) as { m: string }).m;
+    const tail = masked.slice(-4);
+
+    h.upstream.on('/api/user/self', () => ok({ quota: 300_000, id: '42' }));
+    h.upstream.on('/api/subscription/self', () =>
+      ok({
+        all_subscriptions: [
+          {
+            sub_no: 'SB-FILL-1',
+            end_at: '2026-12-03 06:06:41',
+            auto_renew: false,
+            has_key: true,
+            key: 'sk-probe-' + 'F'.repeat(16) + tail,
+            basic_token_total: 8_000_000,
+            basic_token_used: 6_000_000,
+          },
+        ],
+      }),
+    );
+
+    const { result } = await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id });
+    expect(result.items[0]).toMatchObject({ action: 'refresh', ok: true });
+
+    // 台账那一行（本次刷新写进去的）与 key 那两列**同源**，不是两次查询各说各话。
+    const sub = h.db
+      .prepare(
+        'SELECT basic_token_total AS total, basic_token_used AS used, end_at AS endAt FROM supplier_account_subscriptions WHERE account_id = ?',
+      )
+      .get(accountId) as { total: number; used: number; endAt: string };
+    const stored = h.db
+      .prepare('SELECT token_plan_remaining AS remaining, token_plan_expires_at AS expiresAt FROM upstream_keys WHERE id = ?')
+      .get(planKey) as { remaining: number | null; expiresAt: string | null };
+    expect(stored.remaining).toBe(sub.total - sub.used);
+    expect(stored.expiresAt).toBe(sub.endAt);
+
+    // 读面（Key 管理那一格吃的东西）：余量 / 总量 / 到期三样齐全，且**没有**任何上游动作。
+    const callsBefore = h.upstream.calls.length;
+    const res = await h.app.inject({ method: 'GET', url: `/api/keys/${planKey}`, headers: { cookie: h.cookie } });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({
+      category: 'token-plan',
+      tokenPlan: { remainingTokens: 2_000_000, totalTokens: 8_000_000, expiresAt: sub.endAt },
+    });
+    expect(h.upstream.calls.length).toBe(callsBefore);
+  });
+
   it('`unlimited_quota` 的账号不锁（余额是 `null` —— "未知 ≠ 没钱"，ADR-0003）', async () => {
     const h = await setup();
     const { id } = tierflowUpstream(h.db);
@@ -1436,12 +1496,22 @@ describe('POST /rotate-key', () => {
     const body = JSON.parse(rotateCalls[0]?.body ?? '{}') as Record<string, unknown>;
     expect(body['sub_no']).toBe('SB1261003742775');
 
-    // 新 key 落库：token-plan、启用、余量 NULL（不猜一个 0）。
+    // 新 key 落库：token-plan、启用；余量与到期**由本次响应就地回填**（v1.22.0 / ADR-0046）：
+    // 8,000,000 − 2,666,169 = 5,333,831。旧版这里是 NULL（ADR-0022「不猜」），代价是
+    // Key 管理显示「未同步」、逼人再打一遍上游 —— 而数字就在这次响应里。
+    // 「不猜」本身没变：响应缺这两格时回填整行跳过（repo 侧三条取值纪律），仍是 NULL。
     const newKey = h.db.prepare('SELECT * FROM upstream_keys WHERE id = ?').get(item?.keyId) as Record<string, unknown>;
     expect(newKey['category']).toBe('token-plan');
     expect(newKey['enabled']).toBe(1);
     expect(newKey['deleted_at']).toBeNull();
-    expect(newKey['token_plan_remaining']).toBeNull();
+    expect(newKey['token_plan_remaining']).toBe(5_333_831);
+    // 到期与台账行同一来源（`end_time` 转 ISO），不在这里重算一遍 —— 只核两边相等。
+    const subEndAt = (
+      h.db
+        .prepare('SELECT end_at AS endAt FROM supplier_account_subscriptions WHERE account_id = ?')
+        .get(String(result.items[0]?.accountId ?? '')) as { endAt: string | null } | undefined
+    )?.endAt;
+    expect(newKey['token_plan_expires_at']).toBe(subEndAt);
     // 新 key 的密文里搜不到明文（aes-256-gcm）。
     expect((newKey['secret'] as Buffer).includes(Buffer.from(probeKey('rotate-new-000000NEWT')))).toBe(false);
 

@@ -148,6 +148,16 @@ export interface TokenPlanDto {
    * 前端据此渲染「剩余 / 总量」（如 `6.2M / 8M`）。
    */
   totalTokens: number | null;
+  /**
+   * 契约 §3（v1.22.0 / ADR-0046 新增）：归属账号当前套餐的**高级额度**（钱，分）。
+   * 与 `totalTokens` 同一行、同一唯一匹配条件（`key_masked` 唯一命中）——
+   * 台账里 ¥ 与 token 是同一份套餐的两个额度面，只给 token 会让人以为"套餐只有 token"，
+   * 于是"台账有 ¥29.90、Key 管理什么都没有"读起来像数据没同步。
+   * `null` = 无归属 / 撞号 / 上游没给这个数（未知 ≠ 0）。
+   */
+  amountTotalCents: number | null;
+  /** 契约 §3（v1.22.0 新增）：同一份套餐的**已用**高级额度（分）；`null` = 上游没说。 */
+  amountUsedCents: number | null;
   expiresAt: string | null;
 }
 

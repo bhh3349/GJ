@@ -389,8 +389,8 @@ describe('v1.18.0 读路径：归属账号 / 套餐总量 / remainingTokens 的 
        VALUES ('sak_1', ?, '****' || substr(?, -4), ?, '2026-11-02T00:00:00.000Z', '2026-11-02T00:00:00.000Z')`,
     ).run(accId, '****CCCC', created.id);
     db.prepare(
-      `INSERT INTO supplier_account_subscriptions (id, account_id, sub_no, basic_token_total, basic_token_used, status, has_key, key_masked, updated_at)
-       VALUES ('sub_1', ?, 'SB1', 8000000, 1800000, 'active', 1, '****CCCC', '2026-11-02T00:00:00.000Z')`,
+      `INSERT INTO supplier_account_subscriptions (id, account_id, sub_no, basic_token_total, basic_token_used, amount_total_cents, amount_used_cents, status, has_key, key_masked, updated_at)
+       VALUES ('sub_1', ?, 'SB1', 8000000, 1800000, 2990, 0, 'active', 1, '****CCCC', '2026-11-02T00:00:00.000Z')`,
     ).run(accId);
 
     const dto = getKey(db, created.id, false);
@@ -402,6 +402,35 @@ describe('v1.18.0 读路径：归属账号 / 套餐总量 / remainingTokens 的 
       balanceUpdatedAt: null,
     });
     expect(dto?.tokenPlan?.totalTokens).toBe(8_000_000);
+    // v1.22.0 / ADR-0046：同一份套餐的**钱**额度也要带出来（分）—— 只给 token 会让人
+    // 以为"台账有 ¥29.90、Key 管理什么都没有"是没同步。
+    expect(dto?.tokenPlan?.amountTotalCents).toBe(2990);
+    expect(dto?.tokenPlan?.amountUsedCents).toBe(0);
+  });
+
+  it('三格各自透传：token 总量未知时**不拖累**套餐金额（v1.22.0 / ADR-0046）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'tf', baseUrl: 'https://tierflow.cn', supplier: 'tierflow' });
+    const created = createKey(db, { upstreamId: up.id, key: probeSecret(), category: 'token-plan' }, MASTER_KEY);
+
+    db.prepare(
+      `INSERT INTO supplier_accounts (id, upstream_id, supplier, identifier, identifier_hash, status, encrypted_password, created_at, updated_at)
+       VALUES ('acc_amt', ?, 'tierflow', '138****1111', 'hash_amt', 'active', X'00', '2026-11-02T00:00:00.000Z', '2026-11-02T00:00:00.000Z')`,
+    ).run(up.id);
+    db.prepare(
+      `INSERT INTO supplier_account_keys (id, account_id, masked_key, pooled_key_id, created_at, updated_at)
+       VALUES ('sak_amt', 'acc_amt', '****' || substr(?, -4), ?, '2026-11-02T00:00:00.000Z', '2026-11-02T00:00:00.000Z')`,
+    ).run('****CCCC', created.id);
+    // 上游这次没给 token 额度，只给了钱额度 —— 这一格必须给出来，而不是被 token 的 null 带走。
+    db.prepare(
+      `INSERT INTO supplier_account_subscriptions (id, account_id, sub_no, amount_total_cents, amount_used_cents, status, has_key, key_masked, updated_at)
+       VALUES ('sub_amt', 'acc_amt', 'SB2', 2990, 990, 'active', 1, '****CCCC', '2026-11-02T00:00:00.000Z')`,
+    ).run();
+
+    const dto = getKey(db, created.id, false);
+    expect(dto?.tokenPlan?.totalTokens).toBeNull();
+    expect(dto?.tokenPlan?.amountTotalCents).toBe(2990);
+    expect(dto?.tokenPlan?.amountUsedCents).toBe(990);
   });
 
   it('v1.18.1 账号余额只读镜像：Key 对象带出账号行的 balanceCents / balanceUpdatedAt', () => {

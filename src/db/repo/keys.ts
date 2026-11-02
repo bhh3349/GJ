@@ -79,6 +79,9 @@ LEFT JOIN key_runtime r ON r.key_id = k.id
 interface KeyLink {
   account: KeyAccountDto | null;
   totalTokens: number | null;
+  /** v1.22.0 / ADR-0046：同一份套餐台账的**钱**额度（分）。与 `totalTokens` 同一唯一匹配条件。 */
+  amountTotalCents: number | null;
+  amountUsedCents: number | null;
 }
 
 function linksByKeys(db: Db, keyIds: readonly string[]): Map<string, KeyLink> {
@@ -120,6 +123,8 @@ function linksByKeys(db: Db, keyIds: readonly string[]): Map<string, KeyLink> {
         balanceUpdatedAt: r.balanceUpdatedAt,
       },
       totalTokens: null,
+      amountTotalCents: null,
+      amountUsedCents: null,
     });
   }
 
@@ -128,8 +133,10 @@ function linksByKeys(db: Db, keyIds: readonly string[]): Map<string, KeyLink> {
   const totals = db
     .prepare(
       `SELECT k.id AS keyId,
-              MIN(s.basic_token_total) AS totalTokens,
-              COUNT(*)                 AS n
+              MIN(s.basic_token_total)  AS totalTokens,
+              MIN(s.amount_total_cents) AS amountTotalCents,
+              MIN(s.amount_used_cents)  AS amountUsedCents,
+              COUNT(*)                  AS n
          FROM upstream_keys k
          JOIN supplier_account_keys t ON t.pooled_key_id = k.id
          JOIN supplier_account_subscriptions s
@@ -137,12 +144,25 @@ function linksByKeys(db: Db, keyIds: readonly string[]): Map<string, KeyLink> {
         WHERE k.id IN (${marks})
         GROUP BY k.id`,
     )
-    .all(...keyIds) as { keyId: string; totalTokens: number | null; n: number }[];
+    .all(...keyIds) as {
+    keyId: string;
+    totalTokens: number | null;
+    amountTotalCents: number | null;
+    amountUsedCents: number | null;
+    n: number;
+  }[];
   for (const r of totals) {
-    if (r.n !== 1 || r.totalTokens === null) continue; // 多套餐同掩码 / 上游没给：不猜
+    if (r.n !== 1) continue; // 多套餐同掩码：三格一起不猜（与回填腿同一取向）
+    // v1.22.0：三格**各自**按"上游没给就是 null"透传 —— 套餐的钱额度与 token 额度是同一行的
+    // 两个面，一边缺不该拖累另一边（早先只带 totalTokens，前端于是只能看见 token 那一半）。
     const link = map.get(r.keyId);
-    if (link !== undefined) link.totalTokens = r.totalTokens;
-    else map.set(r.keyId, { account: null, totalTokens: r.totalTokens });
+    const filled = {
+      totalTokens: r.totalTokens,
+      amountTotalCents: r.amountTotalCents,
+      amountUsedCents: r.amountUsedCents,
+    };
+    if (link !== undefined) Object.assign(link, filled);
+    else map.set(r.keyId, { account: null, ...filled });
   }
   return map;
 }
@@ -186,6 +206,9 @@ function toDto(row: KeyRow, nowMs: number, nowDay: string, link?: KeyLink | unde
           // 而网关选路对 NULL 按未知哨兵排在余额 key 之前（ADR-0030）—— 两个消费面语义分裂。
           remainingTokens: row.token_plan_remaining,
           totalTokens: link?.totalTokens ?? null,
+          // v1.22.0 / ADR-0046：套餐的**钱**额度（分），与 `totalTokens` 同一行、同一唯一匹配。
+          amountTotalCents: link?.amountTotalCents ?? null,
+          amountUsedCents: link?.amountUsedCents ?? null,
           expiresAt: row.token_plan_expires_at,
         },
     // 透支锁存（§20.8）：非空即锁存。`depletedAt` / `depletedReason` 原样透出 ——

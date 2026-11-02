@@ -394,8 +394,39 @@ describe('v1.18.0 读路径：归属账号 / 套餐总量 / remainingTokens 的 
     ).run(accId);
 
     const dto = getKey(db, created.id, false);
-    expect(dto?.account).toEqual({ id: accId, identifier: '138****0000' });
+    expect(dto?.account).toEqual({
+      id: accId,
+      identifier: '138****0000',
+      // v1.18.1：账号余额只读镜像，账号行没查过 → null（未知 ≠ 0）
+      balanceCents: null,
+      balanceUpdatedAt: null,
+    });
     expect(dto?.tokenPlan?.totalTokens).toBe(8_000_000);
+  });
+
+  it('v1.18.1 账号余额只读镜像：Key 对象带出账号行的 balanceCents / balanceUpdatedAt', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'tf', baseUrl: 'https://tierflow.cn', supplier: 'tierflow' });
+    const created = createKey(db, { upstreamId: up.id, key: probeSecret(), category: 'token-plan' }, MASTER_KEY);
+
+    db.prepare(
+      `INSERT INTO supplier_accounts (id, upstream_id, supplier, identifier, identifier_hash, status, encrypted_password, balance_cents, balance_currency, balance_updated_at, created_at, updated_at)
+       VALUES ('acc_bal', ?, 'tierflow', '138****3333', 'hash_b', 'active', X'00', 12800, 'CNY', '2026-11-02T01:00:00.000Z', '2026-11-02T00:00:00.000Z', '2026-11-02T00:00:00.000Z')`,
+    ).run(up.id);
+    db.prepare(
+      `INSERT INTO supplier_account_keys (id, account_id, masked_key, pooled_key_id, created_at, updated_at)
+       VALUES ('sak_bal', 'acc_bal', '****CCCC', ?, '2026-11-02T00:00:00.000Z', '2026-11-02T00:00:00.000Z')`,
+    ).run(created.id);
+
+    const dto = getKey(db, created.id, false);
+    expect(dto?.account?.balanceCents).toBe(12800);
+    expect(dto?.account?.balanceUpdatedAt).toBe('2026-11-02T01:00:00.000Z');
+    // 只读镜像：key 自己的 balance 仍是 null（账号型 key 的余额不写进 upstream_keys）
+    expect(dto?.balance).toBeNull();
+    const stored = db.prepare('SELECT balance_cents AS b FROM upstream_keys WHERE id = ?').get(created.id) as {
+      b: number | null;
+    };
+    expect(stored.b).toBeNull();
   });
 
   it('同账号多套餐同掩码 → totalTokens 不猜（null）；归属账号仍是唯一', () => {
@@ -464,19 +495,22 @@ describe('v1.18.0 读路径：归属账号 / 套餐总量 / remainingTokens 的 
        VALUES ('sub_p', ?, 'SB9', 8000000, 2666169, 'active', 1, '****CCCC', '2026-11-02T00:00:00.000Z')`,
     ).run(accId);
 
-    const page = listKeys(db, { includeDeleted: false, page: 1, pageSize: 1 });
-    expect(page.total).toBe(2);
-    expect(page.items).toHaveLength(1);
-    const first = page.items[0]!;
-    expect(first.id).toBe(k1.id);
-    expect(first.account?.identifier).toBe('138****2222');
-    expect(first.tokenPlan?.totalTokens).toBe(8_000_000);
-    expect(first.tokenPlan?.remainingTokens).toBeNull();
-    // 第二页那把 balance key 无归属、无 tokenPlan。
+    const page1 = listKeys(db, { includeDeleted: false, page: 1, pageSize: 1 });
     const page2 = listKeys(db, { includeDeleted: false, page: 2, pageSize: 1 });
-    const second = page2.items[0]!;
-    expect(second.id).toBe(k2.id);
-    expect(second.account).toBeNull();
-    expect(second.tokenPlan).toBeNull();
+    expect(page1.total).toBe(2);
+    expect(page1.items).toHaveLength(1);
+    expect(page2.items).toHaveLength(1);
+    // 排序是 `ORDER BY created_at, id`，同毫秒创建时 id 定序 —— 不假设 k1 落在哪一页，按 id 取断言。
+    const both = [...page1.items, ...page2.items];
+    expect(new Set(both.map((it) => it.id))).toEqual(new Set([k1.id, k2.id]));
+    const byId = new Map(both.map((it) => [it.id, it]));
+    const tokenPlanRow = byId.get(k1.id)!;
+    expect(tokenPlanRow.account?.identifier).toBe('138****2222');
+    expect(tokenPlanRow.tokenPlan?.totalTokens).toBe(8_000_000);
+    expect(tokenPlanRow.tokenPlan?.remainingTokens).toBeNull();
+    // 另一把 balance key 无归属、无 tokenPlan。
+    const balanceRow = byId.get(k2.id)!;
+    expect(balanceRow.account).toBeNull();
+    expect(balanceRow.tokenPlan).toBeNull();
   });
 });

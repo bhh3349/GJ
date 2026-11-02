@@ -152,12 +152,21 @@ export interface TokenPlanDto {
 }
 
 /**
- * 契约 §3（v1.18.0 新增）：key 的归属供应商账号。
+ * 契约 §3（v1.18.0 新增 / v1.18.1 扩容）：key 的归属供应商账号。
  * `identifier` 与 §15.1 `SupplierAccount.identifier` 同源同形（**掩码**手机号 / 邮箱，真值不出后端）。
+ *
+ * `balanceCents` / `balanceUpdatedAt`（v1.18.1）是账号余额的**只读镜像** ——
+ * 与 §15.1 账号行同源同值，不是第二个真相源：**不写进 `upstream_keys.balance_cents`**。
+ * 账号型上游的 key 余额本质是"账号级资金的镜像"（§2 v1.18.1 订正），
+ * 前端「余额」列对这类 key 渲染这一对字段；§14.2「查失败不动时间戳」纪律照抄账号侧。
  */
 export interface KeyAccountDto {
   id: string;
   identifier: string;
+  /** 分；`null` = 未知 ≠ 0（ADR-0003）。账号型 key 的余额列渲染这个，不渲染 key 自己的 `balance` */
+  balanceCents: number | null;
+  /** 最近一次**真的查到**账号余额的时刻；查失败不动（§14.2 / §15.1 同纪律） */
+  balanceUpdatedAt: string | null;
 }
 
 export interface KeyDto {

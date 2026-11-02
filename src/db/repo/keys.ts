@@ -88,21 +88,39 @@ function linksByKeys(db: Db, keyIds: readonly string[]): Map<string, KeyLink> {
 
   // 归属账号：台账 pooled_key_id 反查。COUNT(DISTINCT account_id) = 1 才算唯一归属；
   // JOIN supplier_accounts 同时挡掉硬删账号留下的孤儿台账行（账号无软删，行没就是没了）。
+  // v1.18.1：顺带把账号余额两列带出（只读镜像，不写 key 行 —— §2 订正与 §3 表格）。
   const accounts = db
     .prepare(
       `SELECT t.pooled_key_id AS keyId,
               a.id            AS accountId,
               a.identifier    AS identifier,
+              a.balance_cents AS balanceCents,
+              a.balance_updated_at AS balanceUpdatedAt,
               COUNT(DISTINCT t.account_id) AS n
          FROM supplier_account_keys t
          JOIN supplier_accounts a ON a.id = t.account_id
         WHERE t.pooled_key_id IN (${marks})
         GROUP BY t.pooled_key_id`,
     )
-    .all(...keyIds) as { keyId: string; accountId: string; identifier: string; n: number }[];
+    .all(...keyIds) as {
+    keyId: string;
+    accountId: string;
+    identifier: string;
+    balanceCents: number | null;
+    balanceUpdatedAt: string | null;
+    n: number;
+  }[];
   for (const r of accounts) {
     if (r.n !== 1) continue; // 撞号：归属歧义，不猜
-    map.set(r.keyId, { account: { id: r.accountId, identifier: r.identifier }, totalTokens: null });
+    map.set(r.keyId, {
+      account: {
+        id: r.accountId,
+        identifier: r.identifier,
+        balanceCents: r.balanceCents,
+        balanceUpdatedAt: r.balanceUpdatedAt,
+      },
+      totalTokens: null,
+    });
   }
 
   // 套餐总量：按 key_masked 匹配本 key 掩码的订阅行。COUNT(*) = 1 才算唯一匹配；

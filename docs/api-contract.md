@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.18.0**　｜
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.18.1**　｜
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -561,24 +561,33 @@
 ```
 ① 用户模板 enabled=true   → 现有模板引擎（上文 balanceQuery，本版零改动）
 ② host 命中内置 preset     → 内置执行器（见 balancePreset）
-③ 账号型驱动（★v1.4.0 新增；★v1.16.0 扩为在册供应商）→ 上游 supplier 是 §15 在册账号型
-                             （`"tierflow"` / `"tokenrhythm"`）时按账号逐个查（§15），
-                             结果汇总成该上游的余额；本档只看 supplier，不看 baseUrl host
+③ 【v1.18.1 订正：本档不存在】账号型上游（supplier 非 null）的 key 级余额查询**不支持**——
+                             恒 422 UNPROCESSABLE，引导到账号池（见下）
 ④ 都没有                   → 不发请求，计入 skipped，并带 hintCode=BALANCE_QUERY_UNSUPPORTED
 ```
 
-- **③ 是尾插一档，前两档的判定逻辑与优先级逐字不变**：`supplier=null` 的上游永远走不到 ③，
-  通用上游的行为**零变更**。③ 与 ② 的区别是判据不同（② 看 host、③ 看声明字段），
-  不是新增一条猜测路径 —— **不猜，只看 `supplier`**（§15.6）。
-- tierflow.cn 不命中任何 preset、用户也没配模板，于是自然落 ③。
-- **S1 冻结（v1.5.1）：通用模板不加换算字段**（`scale` / `quota_per_unit` 之类）。TierFlow 的
-  `quota → 分` 换算是个例，落在 ③ 账号型驱动里（§15.1 金额口径），**不往通用 `balanceQuery`
-  模板里加字段** —— 与 ADR-0018 决策 0「个例不外溢」同一条理由：给通用模板开一个只有一家上游
-  用得上的口子，等于让所有上游的模板契约为一家的单位问题扩容。`parse.unit` **保持既有三值
-  （`yuan` / `cents` / `dollar`）不变、不新增枚举值**；换算式 `Math.round(quota / quota_per_unit
-  * 100)` 是 §15 的**实现细节**，不是模板能力。
-- **解析顺序四段是 v1.4.0 已冻结的现状**（尾插 ③），**不是 S1 待办**；本段即它的正文，**它不在 §14**
-  （§14 是自动同步 / 快照 / 漂移，余额口径零改动，见 §15.6 末行）。
+- **v1.18.1 订正（实情勘误，业主使用反馈触发的真接口取证）**：v1.4.0 曾把 ③「账号型驱动」写成
+  「已冻结的现状」，**但实现从未存在**（`git log -S "账号型驱动" -- src/` 零命中；
+  `resolveQueryPlan` 只有 template → preset → none 三支）。现状行为是：账号型上游不配模板时，
+  key 级刷新/自测恒 `422 UNPROCESSABLE`（「该上游没有可用的余额查询方式」）。
+  **本版按事实订正，不补 ③ 的实现**，理由：
+  1. 账号型上游的 key 余额本质是**账号级资金的镜像**，不是独立事实。上游只对账号发钱，
+     `/api/user/self` 回的是账号余额 —— 把它写进 `upstream_keys.balance_cents` 等于造出
+     第二个真相源（违反 §5 单写者 / §14.2 写库纪律），且同一账号下 N 把 key 的余额列
+     会重复 N 份，谁先写谁后写都是错的。
+  2. 余额的**唯一真相源**在账号维度：`POST /api/supplier-accounts/refresh` 写
+     `supplier_accounts.balance_cents`（§15.2），透支锁存按 §20.6 级联到其名下 key。
+     套餐余量的真相源在 `POST /api/supplier-accounts/keys/sync`（回填 `upstream_keys.token_plan_remaining`，§15.2）。
+  3. 因此 Key 对象对账号型 key **只读镜像**账号余额（§3 `account.balanceCents` / `account.balanceUpdatedAt`，
+     v1.18.1 新增），前端「余额」列对账号型 key 渲染这一对字段 —— **不写 key 自己的 `balance`**。
+- ③ 与 ② 的区别（历史表述）保留在这里只为对齐旧版本：② 看 host、③ 看声明字段 `supplier`；
+  现在 ③ 不再是查询路径，只是**分流判据**（见 §3 的渲染规则与 §15 的账号刷新入口）。
+- **S1 冻结（v1.5.1）不变：通用模板不加换算字段**（`scale` / `quota_per_unit` 之类）。TierFlow 的
+  `quota → 分` 换算落在 §15 账号型驱动的账号刷新链路里（§15.1 金额口径），**不往通用 `balanceQuery`
+  模板里加字段** —— 与 ADR-0018 决策 0「个例不外溢」同一条理由。`parse.unit` **保持既有三值
+  （`yuan` / `cents` / `dollar`）不变、不新增枚举值**。
+- **解析顺序是两档 + 一个分流**（v1.18.1 起）：模板 → preset →（都不命中且 `supplier` 非 null）
+  引导到账号池 /（都不命中且通用上游）skipped + `BALANCE_QUERY_UNSUPPORTED`。
 
 **内置 preset 永不覆盖用户模板、永不落库**：库里只有用户自己的 `balanceQuery`，preset 是每次查询时现算的判定。
 本版注册表只有 `openai`（host = `api.openai.com`；`subscription − usage` 双请求相减，USD→分）。
@@ -692,7 +701,7 @@
 {
   "id": "key_9c21",
   "upstreamId": "up_7f3a",
-  "account": { "id": "acc_5d10", "identifier": "138****0000" },
+  "account": { "id": "acc_5d10", "identifier": "138****0000", "balanceCents": 12800, "balanceUpdatedAt": "2026-10-06T09:12:00.000Z" },
   "label": "my88-主号-1",
   "maskedKey": "****a1b2",
   "category": "balance",
@@ -723,7 +732,7 @@
 
 | 字段 | 取值 | 说明 |
 |---|---|---|
-| `account` | `{id, identifier}` \| `null` | **v1.18.0 新增**。该 key 的**归属供应商账号**（经 `supplier_account_keys.pooled_key_id` 反查，§15.1 台账）。`identifier` 与 §15.1 `SupplierAccount.identifier` 同源同形（**掩码**手机号 / 邮箱，真值不出后端）。`null` = 非账号池来源（手工建的 key），**不是"未知"**。**唯一归属才算**：同一把 key 被多条台账行指向（掩码撞号）时回 `null` —— 宁可少一次归属展示，也不把 A 账号的套餐挂到 B 账号的 key 上（与回填腿 `backfillSubscriptionTokenPlan` 同取向） |
+| `account` | `{id, identifier, balanceCents, balanceUpdatedAt}` \| `null` | **v1.18.0 新增 / v1.18.1 扩容**。该 key 的**归属供应商账号**（经 `supplier_account_keys.pooled_key_id` 反查，§15.1 台账）。`identifier` 与 §15.1 `SupplierAccount.identifier` 同源同形（**掩码**手机号 / 邮箱，真值不出后端）。`balanceCents` / `balanceUpdatedAt` = 账号余额的**只读镜像**（同 §15.1 账号行同源同值，含 §14.2「查失败不动时间戳」纪律；分；`null` = 未知 ≠ 0）。**账号型 key 的「余额」列渲染这一对，不渲染 key 自己的 `balance`**（token-plan key 的 `balance` 恒 `null`；账号型上游 key 级余额查询不支持，§2 v1.18.1）。`null` = 非账号池来源（手工建的 key），**不是"未知"**。**唯一归属才算**：同一把 key 被多条台账行指向（掩码撞号）时回 `null` —— 宁可少一次归属展示，也不把 A 账号的套餐挂到 B 账号的 key 上（与回填腿 `backfillSubscriptionTokenPlan` 同取向） |
 | `maskedKey` | `"****a1b2"` | **后端唯一出口**。明文只在 `POST` 请求体里进，之后**任何**响应/日志/导出都不出现 |
 | `category` | `"balance"` \| `"token-plan"` | `token-plan` 时 `balance` 恒为 `null`，看 `tokenPlan` |
 | `unlimited` | `bool` | **v1.4.0 新增**。`true` = 上游侧无限额度（`unlimited_quota`），此时 `balance` 恒为 `null` 但**语义不是"未知"** —— 前端必须渲染「无限额度」徽标，不得渲染 `—` / "未知" / 任何负值。老 key 恒为 `false` |
@@ -3954,6 +3963,26 @@ spec 三条判据：新库自带、老库真被 ALTER 到、重复跑不抛 dupl
 | ⑨ | 容量口径 | 所有容量数字（`capacity` / `reserveForData` / 每轮 token 数 / §15.5 的 ≈14 min 与重开门槛）都是**「单出口」口径**：出口 > 1 时**逐出口各自成立，不得跨出口加总** |
 
 > **§15.5 连带（v1.8.0 已同批落）**：「27 个账号一轮刷新 ≈ 1 分钟」按 ⑥ 重算为 **≈14 min**（`ceil(54/4)×60s`，单出口口径），0.6s 降为账号级内层纪律，重开门槛（ADR-0017 补遗 6）登记为 §15.5 脚注。本表是那三处改动的唯一口径源。
+>
+> **v1.18.1（2026-11-02，契约 §2 ③ 档实情订正 + account 余额只读镜像 —— 「账号型上游的 key 余额查不了」的真接口取证）**：
+> **触发**：业主使用反馈「TierFlow 这类上游的 key 在 Key 管理页余额/套餐都不体现」；
+> 画师按「补前端 ③ 判据」的指派先行取证，用真接口**推翻前提** —— 后端 `resolveQueryPlan`
+> 只有 template → preset → none 三支，`assertQueryable` 无 supplier 分支，三条 key 级刷新路由
+> 全部前置 `assertQueryable`（`routes/keys.ts` 单/批量、`routes/upstreams.ts`），账号型上游不配模板时
+> key 级刷新/自测**恒 422 UNPROCESSABLE**。`git log -S "账号型驱动" -- src/` 零命中 ⇒ v1.4.0 的
+> ③「已冻结的现状」是**契约漂移**（实现从未存在）。补前端判据只会造出注定 422 的按钮。
+> **订正（两处）**：
+> ① **§2 删去 ③ 查询路径**，改写为分流判据：账号型上游（`supplier` 非 null）的 key 级余额查询**不支持**，
+> 恒 422 引导到账号池；余额真相源 = `POST /api/supplier-accounts/refresh`（写账号行），
+> 套餐余量真相源 = `POST /api/supplier-accounts/keys/sync`（回填 key 余量）。**不补 ③ 的实现**：
+> key 余额是账号级资金的镜像，写进 `upstream_keys.balance_cents` 会造第二个真相源（违反 §5 单写者
+> / §14.2 写库纪律），同账号 N 把 key 重复 N 份。
+> ② **§3 `account` 扩容只读镜像**：`balanceCents: int | null` + `balanceUpdatedAt: ISO8601 | null`
+> （同 §15.1 账号行同源同值；分；null = 未知 ≠ 0；§14.2「查失败不动时间戳」纪律照抄）。
+> 前端「余额」列对**账号型 key** 渲染这一对，对通用 key 仍渲染 `balance`；**绝不写 key 自己的 `balance`**。
+> **落库 / `/v1/*` / 两套错误体 / 其余 §3 字段零变更**；零 DDL（`SCHEMA_VERSION` 保持 2），
+> 读路径照 v1.18.0 的当页批量 lookup 注入（`linksByKeys` 多带两列）。
+> 消费方：Key 管理页「余额」列 + 「查余额」按钮改为引导文案（画师，`dev/web-m2`）。
 >
 > **v1.18.0（2026-11-02，Key 对象补归属账号与套餐总量 + `remainingTokens` 的 null 语义修订 —— 「key 管理页看不到套餐额度」的信息架构缺口）**：
 > **动机是业主原话**「前端就是没体现好，key 池分了两个但是 key 管理的余额没体现出来……key 不是和账号绑定的吗？为什么 key 管理的余额和套餐额度都没体现。还有赠送的 8M 基础额度也没体现在外面，藏的很深」。

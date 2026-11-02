@@ -34,7 +34,7 @@
  * - **重置套餐 key**（§15.13）：同样是「打上游」的确认动作；上游侧旧套餐 key **立即失效**，
    确认文案必须写明这条代价。批量入口与详情抽屉的单账号入口共用同一结果浮层。
  * - **批量删除**（2026-10-11 Bo）：账号删除没有批量端点，前端按选择顺序逐把单删
- *   （`force=true`，名下 key 只解绑不删），结尾汇总 {ok, failed} —— 不造批量端点。
+ *   （`force=true`；v1.19.0 起名下池内 key 一并软删，不再是解绑保留），结尾汇总 {ok, failed} —— 不造批量端点。
  * - **同上游单飞**：上一轮没结束时本轮由服务端跳过（§14.1）⇒ 连点不等于多刷一遍，
  *   所以这里**不做队列** —— 前端排队就是把一条已经定死的服务端行为再实现一遍。
  *
@@ -122,6 +122,7 @@ import {
   buildPoolFilters,
   healthTint,
   matchesPoolFilter,
+  SCRAP_REASON_TEXT,
   type PoolFilterKey,
 } from '@/utils/supplierHealth';
 import {
@@ -275,6 +276,12 @@ export default function SupplierAccountsPage() {
   const [tab, setTab] = useState('accounts');
   const [q, setQ] = useState('');
   const [status, setStatus] = useState<SupplierAccountStatus | undefined>(undefined);
+  /**
+   * 废号池筛选（§21.4 v1.19.0）：`undefined` = 全部、`true` = 仅废号、`false` = 排除废号。
+   * 三态是**服务端**筛选（`?scrapped=`），与「资金池清单」那种本地筛不同层 —— 所以本地筛
+   * 激活时照旧禁用（同一套互斥纪律）。
+   */
+  const [scrapped, setScrapped] = useState<boolean | undefined>(undefined);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(PAGE_SIZE_DEFAULT);
   /** 勾选的账号 id。**空数组与"未选"在这里是两件事**，所以用 `null` 表示未选（见 `scopeOf`）。 */
@@ -316,10 +323,11 @@ export default function SupplierAccountsPage() {
             page,
             pageSize,
             ...(status ? { status } : {}),
+            ...(scrapped === undefined ? {} : { scrapped }),
             ...(q ? { q } : {}),
           })
         : Promise.resolve(null),
-    [upstreamId, q, status, page, pageSize],
+    [upstreamId, q, status, scrapped, page, pageSize],
   );
 
   /**
@@ -390,6 +398,7 @@ export default function SupplierAccountsPage() {
     setPoolFilter(key);
     setQ('');
     setStatus(undefined);
+    setScrapped(undefined);
     setPage(1);
   };
 
@@ -440,20 +449,31 @@ export default function SupplierAccountsPage() {
 
   /**
    * 批量删除（2026-10-11 Bo）：账号删除没有批量端点，前端按选择顺序逐把
-   * `DELETE /api/supplier-accounts/:id?force=true`（名下 key 解除归属并保留）。
+   * `DELETE /api/supplier-accounts/:id?force=true`。**v1.19.0 语义**：名下池内 key **一并软删**
+   * （不再解绑保留）—— 所以确认框必须把"会删掉几把 key"说出来，那是这个按钮的真实代价。
    * 单把失败即时汇总进结尾提示并继续，结尾汇总 {ok, failed} —— 不造批量端点。
    */
   const batchRemove = (): void => {
     const ids = [...selected];
     if (ids.length === 0) return;
-    const masked = new Map((accounts.data?.items ?? []).map((row) => [row.id, row.identifier] as const));
+    const rowsOf = new Map((accounts.data?.items ?? []).map((row) => [row.id, row] as const));
+    const masked = new Map([...rowsOf.values()].map((row) => [row.id, row.identifier] as const));
+    const keyCount = [...rowsOf.values()]
+      .filter((row) => ids.includes(row.id))
+      .reduce((n, row) => n + row.keyCount, 0);
     const preview = ids
       .slice(0, 5)
       .map((id) => masked.get(id) ?? id)
       .join('、');
     modal.confirm({
       title: `删除 ${ids.length} 个账号？`,
-      content: preview + (ids.length > 5 ? ' 等' : '') + '；名下的 key 会解除归属并保留。',
+      content:
+        preview +
+        (ids.length > 5 ? ' 等' : '') +
+        // 删 key 是 v1.19.0 的真代价：这句如果说成"解绑保留"，操作员会以为 key 还能用 —— 而它已经软删。
+        (keyCount > 0
+          ? `；将一并删除名下的 ${formatCount(keyCount)} 把 key（软删，不是解绑）。`
+          : '；名下没有已入池的 key。'),
       okText: '删除',
       okButtonProps: { danger: true },
       cancelText: '取消',
@@ -554,7 +574,7 @@ export default function SupplierAccountsPage() {
       title: '解除这个账号的透支锁？',
       content: (
         <span>
-          解除后该账号与其名下被级联锁住（原因「账号欠费」）的 key 会<strong>回到选路池</strong>。
+          解除后该账号与其名下被级联锁住（原因「账号欠费」或「已进废号池」）的 key 会<strong>回到选路池</strong>。
           如果下一次余额刷新显示它仍然透支，会<strong>再次自动锁上</strong> —— 那是预期行为，不是故障。
         </span>
       ),
@@ -683,6 +703,45 @@ export default function SupplierAccountsPage() {
           </Space>
         );
       },
+    },
+    {
+      /**
+       * §21.4（v1.19.0）废号池。**独立一列**，不折进「健康」：健康答"能不能登录 / 余额够不够"，
+       * 废号池答"这个号还有没有残值"—— 一个余额未知、登录正常的号可以正好在池里，
+       * 折进去就会把它画成"正常"（与 §20.1 把透支折进健康是同一类错误）。
+       * 进池显示原因徽标；不在池中显示「—」（不是"未知"：这列本来就只有两种状态）。
+       */
+      title: (
+        <Tooltip title="废号池：套餐余量与账号余额同时见底（或套餐已过期且余额见底）的账号会被锁进这里，名下 key 一并停用。只有人工「移出废号池」能出池。它与左边的「健康」「透支」是彼此独立的轴。">
+          <span>废号</span>
+        </Tooltip>
+      ),
+      key: 'scrapped',
+      width: 118,
+      render: (_: unknown, row) =>
+        row.scrapped ? (
+          <Tooltip
+            title={
+              `进废号池${row.scrappedAt ? `于 ${formatIso(row.scrappedAt)}（${formatRelative(row.scrappedAt)}）` : ''}；` +
+              '该账号名下 key 已全部停用。出池只能人工操作，且出池后下一轮刷新若判据仍成立会再次进池。'
+            }
+          >
+            <Tag
+              bordered={false}
+              style={{
+                marginInlineEnd: 0,
+                background: tokens.tint.error,
+                color: tokens.color.error,
+              }}
+            >
+              {row.scrapReason === null ? '已进池' : SCRAP_REASON_TEXT[row.scrapReason]}
+            </Tag>
+          </Tooltip>
+        ) : (
+          <Tooltip title="不在废号池 —— 这不是「未知」，是这一列只有两个状态。">
+            <Text type="secondary">—</Text>
+          </Tooltip>
+        ),
     },
     {
       title: (
@@ -872,7 +931,7 @@ export default function SupplierAccountsPage() {
         <Space size={tokens.space.sm}>
           {/* 只在真锁着的时候画：一个恒在的「解除透支」会变成噪声，也会让人以为它是常规维护动作。 */}
           {row.depleted ? (
-            <Tooltip title="清账号锁 + 清名下被级联锁住的 key（原因「账号欠费」），并把它们重新启用。余额回升不会自动解锁，只有这个动作能解。">
+            <Tooltip title="清账号锁 + 清名下被级联锁住的 key（原因「账号欠费」或「已进废号池」），并把它们重新启用。余额回升不会自动解锁，只有这个动作能解。">
               <Button
                 size="small"
                 type="link"
@@ -1042,10 +1101,26 @@ export default function SupplierAccountsPage() {
                         setPage(1);
                       }}
                     />
+                    {/* 废号池三态（§21.4 v1.19.0）：与左边状态、本地筛都是正交的筛选轴。 */}
+                    <Tooltip title="废号池 = 套餐余量与账号余额同时见底的号（或套餐已过期且余额见底），名下 key 已全部停用。进池是粘性标记，只有人工移出才出池。">
+                      <Segmented
+                        size="small"
+                        disabled={localRows !== null}
+                        value={scrapped === undefined ? 'all' : scrapped ? 'in' : 'out'}
+                        options={[
+                          { label: '全部', value: 'all' },
+                          { label: '仅废号', value: 'in' },
+                          { label: '排除废号', value: 'out' },
+                        ]}
+                        onChange={(value) => {
+                          setScrapped(value === 'all' ? undefined : value === 'in');
+                          setPage(1);
+                        }}
+                      />
+                    </Tooltip>
                     <Text type="secondary" style={{ fontSize: 12 }}>
                       {selected.length > 0 ? `已勾选 ${formatCount(selected.length)} 个` : `共 ${formatCount(accounts.data?.total ?? 0)} 个`}
-                    </Text>
-                  </div>
+                    </Text>                  </div>
 
                   <Space wrap size={tokens.space.sm}>
                     <Tooltip
@@ -1145,7 +1220,7 @@ export default function SupplierAccountsPage() {
                       columns={visibleColumns}
                       dataSource={localRows ?? accounts.data?.items ?? []}
                       loading={accounts.refreshing}
-                      scroll={{ x: 1776 }}
+                      scroll={{ x: 1894 }}
                       rowSelection={{
                         selectedRowKeys: selected,
                         onChange: (keys) => {
@@ -1168,9 +1243,17 @@ export default function SupplierAccountsPage() {
                                 ? `（其中无限额度 ${formatCount(row.unlimitedKeyCount)}）`
                                 : ''}
                               {row.maskedKeyCount > 0
-                                ? ` · 仅掩码 ${formatCount(row.maskedKeyCount)}`
-                                : ''}
+                              ? ` · 仅掩码 ${formatCount(row.maskedKeyCount)}`
+                              : ''}
                             </Text>
+                            {/* §21.4：废号池的两条事实（何时进的、为什么）在展开行里给全 —— 列表那一列只有徽标，容不下时刻。 */}
+                            {row.scrapped ? (
+                              <Text style={{ fontSize: 12, color: tokens.color.error }}>
+                                {`已进废号池${row.scrappedAt ? `（${formatIso(row.scrappedAt)}，${formatRelative(row.scrappedAt)}）` : ''}`}
+                                {row.scrapReason === null ? '' : ` · 原因：${SCRAP_REASON_TEXT[row.scrapReason]}`}
+                                {' · 名下 key 已全部停用，出池需人工操作'}
+                              </Text>
+                            ) : null}
                             {/*
                               第二级 key 明细**读不到**：GET /api/keys 没有 accountId 过滤，
                               KeyDto 也不带 accountId ⇒ 从这一页没法把某账号的 key 列出来。

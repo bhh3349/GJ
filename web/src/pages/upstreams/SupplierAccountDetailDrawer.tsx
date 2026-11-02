@@ -19,13 +19,17 @@
  * - **重登**是**同步**端点（200），无存档密码时**当场 422**。会话型账号因此**必然** 422，
  *   而这一事实**来自 `credentialSource` 字段**（不是猜的），所以那种号码直接禁用按钮并把原因写在旁边 ——
  *   让用户点一次必然失败的动作不叫"如实"，那叫把契约已知的事实用一次报错广告一遍。
- * - **删账号一把 key 都不删，只解绑**（§15.2）：账号删了名下 key 仍可用。真删 key 会让网关下一轮快照
- *   少一批可用 key —— 也就是"删个账号把流量打穿"。所以 409 的二次确认必须说清这一点，
- *   它是与"删上游（ADR-0016 物理删子树）"**语义相反**的一个删除。
+ * - **删账号会连同名下池内 key 一起软删**（§21.5，v1.19.0 推翻旧的"只解绑"取向）：账号型 key 的
+ *   额度 / 套餐 / 余额全在账号那边，账号没了这把 key 打出去只有 402/404 —— 留着比删掉更坏。
+ *   所以 409 `ACCOUNT_HAS_KEYS` 的二次确认必须把"会删掉几把 key"写明白，它是与删上游
+ *   （ADR-0016 物理删子树）**方向相同**的一个删除（旧版本这里是反的）。
+ * - **废号池**（§21.4，v1.19.0）：`scrapped=true` 时抽屉顶部给一条醒目提示 + 「移出废号池」。
+ *   出池是**同步**端点（200 回改完的那一行）、**不收 `revision`**，一次恢复名下 key 的启用与锁；
+ *   确认文案必须预告「判据仍成立下一轮刷新会再次进池」—— 不预告会被读成按钮失灵。
  * - **重置套餐 key**（§15.13）是任务型端点（`202 {taskId}`）：本抽屉只提交并打开父层结果浮层，
  *   不在抽屉里自建轮询；`ids` 只带本账号，`subNo` 省略 = 该账号最新到期的套餐。
  */
-import { App, Button, Drawer, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { Alert, App, Button, Drawer, Space, Table, Tag, Tooltip, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useState } from 'react';
 import type { ReactNode } from 'react';
@@ -48,6 +52,7 @@ import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { tokens } from '@/theme/tokens';
 import { formatCents, formatCount, formatIso, formatRelative } from '@/utils/format';
 import { subscriptionRemainingCents, subscriptionRemainingTail } from '@/utils/poolFunds';
+import { SCRAP_REASON_TEXT } from '@/utils/supplierHealth';
 
 const { Text, Paragraph } = Typography;
 
@@ -184,6 +189,7 @@ export function SupplierAccountDetailDrawer({
    * 标记，不是替换一个编辑值（对照「绑出口」那条要 `revision`）。一个动作做三件事：
    * 清账号锁 + 清名下 `reason="account"` 的 key 锁（同样 `enabled=1`）+ 广播快照重建。
    * 确认文案必须预告「下次刷新仍透支会再次锁上」—— 不预告的话它会被读成故障。
+   * 注意：它**不**出废号池 —— 那是 §21.4 的另一个粘性标记，两者正交，各自的入口各管各的。
    */
   const undeplete = (): void => {
     if (!account) return;
@@ -191,7 +197,7 @@ export function SupplierAccountDetailDrawer({
       title: '解除这个账号的透支锁？',
       content: (
         <span>
-          解除后该账号与其名下被级联锁住（原因「账号欠费」）的 key 会<strong>回到选路池</strong>。
+          解除后该账号与其名下被级联锁住（原因「账号欠费」或「已进废号池」）的 key 会<strong>回到选路池</strong>。
           如果下一次余额刷新显示它仍然透支，会<strong>再次自动锁上</strong> —— 那是预期行为，不是故障。
         </span>
       ),
@@ -206,13 +212,49 @@ export function SupplierAccountDetailDrawer({
     });
   };
 
-  /** 删账号。与删上游（ADR-0016）**语义相反**：这里一把 key 都不删，只解绑。 */
+  /**
+   * 出废号池（§21.4 v1.19.0）。同步端点、200 回改完的那一行、**不要 `revision`** ——
+   * 与「解除透支」同一条理由：解除的是系统自动置位的粘性标记。一次动作三件事：
+   * 清账号两列 + 名下 key 恢复启用 + 清它们的级联锁。
+   *
+   * 确认文案的第三句是整件事的钩子：判据（§21.2）没有变，出池不是"修好了"，
+   * 下一轮 refresh / keys/sync 判据仍成立就**再次进池**。不预告的话，用户会把它当
+   * "我点了移出怎么又进去了"的故障报上来。
+   */
+  const unscrap = (): void => {
+    if (!account) return;
+    modal.confirm({
+      title: `把 ${account.identifier} 移出废号池？`,
+      content: (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <span>
+            移出后该账号名下被停用的 key 会<strong>恢复启用并解锁</strong>。
+          </span>
+          <span style={{ color: tokens.color.warning }}>
+            但判据没有变：若下一次余额刷新 / 套餐同步时它<strong>仍同时满足「套餐余量见底 + 余额不足 1 元」</strong>，
+            会<strong>再次自动进池</strong> —— 那是判据在工作，不是按钮失灵。要让一个号留在池子外，
+            先给它充上余额或换上有效套餐。
+          </span>
+        </div>
+      ),
+      okText: '移出并启用',
+      cancelText: '取消',
+      onOk: async () => {
+        const result = await run('unscrap', () => supplierAccountsApi.unscrap(accountId), '已移出废号池');
+        if (result === null) return;
+        detail.reload();
+        onChanged();
+      },
+    });
+  };
+
+  /** 删账号。v1.19.0 起**连同名下池内 key 一并软删**（§21.5），不再是"只解绑"。 */
   const remove = (force: boolean): void => {
     setRemoving(true);
     supplierAccountsApi
       .remove(accountId, force)
       .then(() => {
-        message.success('账号已删除（名下 key 未被删除，已解除归属）');
+        message.success('账号已删除（名下池内 key 已一并软删，不再参与路由）');
         onChanged();
         onClose();
       })
@@ -226,12 +268,16 @@ export function SupplierAccountDetailDrawer({
               <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
                 <Text>
                   {keyCount === null
-                    ? '删除后这些 key 会解除归属，但不会消失。'
-                    : `删除后名下 ${formatCount(keyCount)} 把 key 会解除归属，但不会消失。`}
+                    ? '删除账号会一并删除名下的 key（软删，不可恢复参与路由）。'
+                    : `删除账号会一并删除名下的 ${formatCount(keyCount)} 把 key（软删，之后不再参与路由）。`}
+                </Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  账号型 key 的额度、套餐、余额都在账号这一侧 —— 账号没了，key 打出去只会失败，
+                  所以它们跟着走。这是刻意的强绑定，不是顺手删除。
                 </Text>
               </div>
             ),
-            okText: '仍然删除账号（保留 key）',
+            okText: '仍然删除（连 key 一起删）',
             okButtonProps: { danger: true },
             cancelText: '取消',
             onOk: () => {
@@ -370,6 +416,17 @@ export function SupplierAccountDetailDrawer({
               depletedReason={account.depletedReason}
             />
           ) : null}
+          {/* 废号池是第三根粘性轴（§21.4）：与透支也正交，同样并排画。 */}
+          {account?.scrapped ? (
+            <Tooltip title="已进废号池：套餐与余额同时见底（或套餐已过期且余额见底），名下 key 已全部停用。出池只有人工操作。">
+              <Tag
+                bordered={false}
+                style={{ marginInlineEnd: 0, background: tokens.tint.error, color: tokens.color.error }}
+              >
+                {account.scrapReason === null ? '废号池' : `废号池 · ${SCRAP_REASON_TEXT[account.scrapReason]}`}
+              </Tag>
+            </Tooltip>
+          ) : null}
         </Space>
       }
       footer={
@@ -429,7 +486,7 @@ export function SupplierAccountDetailDrawer({
               重置套餐 key
             </Button>
           ) : null}
-          <Tooltip title="删账号不删 key：名下的 key 会解除归属并继续可用。">
+          <Tooltip title="删账号会连同名下池内的 key 一起软删（不再参与路由）—— 账号型 key 的额度 / 套餐 / 余额都在账号这一侧，离开账号没有独立价值。">
             <Button size="small" danger loading={removing} onClick={() => remove(false)}>
               删除账号
             </Button>
@@ -449,6 +506,40 @@ export function SupplierAccountDetailDrawer({
 
       {account ? (
         <>
+          {/*
+            废号池横幅放在四行**之前**：它解释的是"这个号现在整体是什么状态"，
+            后面的身份 / 凭据 / 余额都是它的证据。放在中间或末尾会让人先读一堆细节再发现结论。
+          */}
+          {account.scrapped ? (
+            <Alert
+              type="error"
+              showIcon
+              style={{ marginBottom: tokens.space.md, background: tokens.tint.error, border: 'none' }}
+              message={`这个账号在废号池里${account.scrappedAt ? `（${formatIso(account.scrappedAt)} 进池，${formatRelative(account.scrappedAt)}）` : ''}`}
+              description={
+                <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.xs }}>
+                  <span style={{ fontSize: 12 }}>
+                    原因：{account.scrapReason === null ? '未记录' : SCRAP_REASON_TEXT[account.scrapReason]}。
+                    该账号名下 key 已<strong>全部停用</strong>并被级联锁存，网关不会再选它们。
+                  </span>
+                  <span style={{ fontSize: 12 }}>
+                    出池只有人工操作；出池后下一轮刷新若判据仍成立会<strong>再次进池</strong> ——
+                    先充余额或换上有效套餐才留得住它。
+                  </span>
+                  <Button
+                    size="small"
+                    style={{ alignSelf: 'flex-start', marginTop: tokens.space.xs }}
+                    loading={isPending('unscrap')}
+                    onClick={() => {
+                      unscrap();
+                    }}
+                  >
+                    移出废号池
+                  </Button>
+                </div>
+              }
+            />
+          ) : null}
           <DetailRow
             index={0}
             label="身份"

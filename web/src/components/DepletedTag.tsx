@@ -23,10 +23,14 @@ import { formatIso, formatRelative } from '@/utils/format';
 /**
  * `reason` 决定"是谁的钱包空了"，这是操作员下一步动作的分岔点：
  * 前者去充这把 key（或换一把），后者去充那个**账号**（充 key 没用）。
+ *
+ * v1.19.0 起 `'account'` 有**两种来源**（§21.3 把废号池的级联腿复用在这一格上）：
+ * 账号欠费、账号进废号池。这一格分不出是哪一种，所以文案把两条都写上去 ——
+ * 只说「欠费」会让一个因套餐耗尽进池的账号被读成"充钱就好"。
  */
 const REASON_HINT: Record<DepletedReason, string> = {
   balance: '它自己的余额 / 套餐余量已耗尽',
-  account: '它所属的账号欠费（账号级联标记）',
+  account: '它所属的账号停了它（账号欠费，或该账号已进废号池）',
 };
 
 export interface DepletedTagProps {

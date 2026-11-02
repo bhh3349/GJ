@@ -29,6 +29,7 @@ import { tokens } from '@/theme/tokens';
 import { formatCents, formatCount } from '@/utils/format';
 import {
   HEALTH_SEVERITY_ORDER,
+  SCRAP_REASON_TEXT,
   accountHealthOf,
   healthTint,
   type HealthKey,
@@ -79,8 +80,14 @@ function Dot({
           {account.depleted ? (
             <Text style={{ fontSize: 11, color: tokens.color.orange }}>
               {account.depletedReason === 'account'
-                ? '透支锁存：账号欠费，名下 key 一并锁在池外'
+                ? '透支锁存：账号欠费或已进废号池，名下 key 一并锁在池外'
                 : '透支锁存：余额 / 套餐余量低于阈值，已排除出选路'}
+            </Text>
+          ) : null}
+          {/* 废号池是另一根粘性轴（§21.4）：同样额外一行，不改点的颜色 —— 点的颜色只答"能不能干活"。 */}
+          {account.scrapped ? (
+            <Text style={{ fontSize: 11, color: tokens.color.error }}>
+              {`已进废号池${account.scrapReason === null ? '' : `（${SCRAP_REASON_TEXT[account.scrapReason]}）`}，名下 key 全部停用`}
             </Text>
           ) : null}
           <Text style={{ fontSize: 11, opacity: 0.75 }}>{health.hint}</Text>
@@ -89,7 +96,7 @@ function Dot({
     >
       <button
         type="button"
-        aria-label={`账号 ${account.identifier} · ${health.label}${account.depleted ? ' · 透支' : ''}`}
+        aria-label={`账号 ${account.identifier} · ${health.label}${account.depleted ? ' · 透支' : ''}${account.scrapped ? ' · 废号池' : ''}`}
         onClick={() => {
           onSelect(account.id);
         }}

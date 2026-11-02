@@ -49,7 +49,7 @@ export type ApiErrorCode =
   | 'CONFLICT'
   | 'REVISION_MISMATCH'
   | 'UPSTREAM_HAS_KEYS'
-  /** v1.4.0 首次新增的错误码（409）：删账号时名下还有已入池 key。**只解绑、不删 key**。 */
+  /** v1.4.0 首次新增的错误码（409）：删账号时名下还有已入池 key。v1.19.0 起确认后**连同名下 key 一并软删**。 */
   | 'ACCOUNT_HAS_KEYS'
   | 'UNPROCESSABLE'
   | 'TOO_MANY_ATTEMPTS'
@@ -378,7 +378,10 @@ export type KeyHealth = 'healthy' | 'cooling' | 'disabled';
 /**
  * 透支锁存的解除原因（契约 §20.2）。
  *
- * `'balance'` = 自己的余额 / 套餐余量耗尽；`'account'` = 其所属账号欠费级联（§20.6）。
+/**
+ * `'balance'` = 自己的余额 / 套餐余量耗尽；`'account'` = 其所属账号级联（§20.6）。
+ * **v1.19.0 起 `'account'` 承载两种来源**：账号欠费级联、账号进废号池（§21.3 把进池的
+ * 级联腿复用在这一格上）—— 这格本身**分不出**是哪一种，要看账号行的 `scrapped`。
  * **没有 `'token_plan'`**：套餐余量耗尽与余额不足是同一句话的事实，要区分看 `category`。
  */
 export type DepletedReason = 'balance' | 'account';
@@ -1517,6 +1520,17 @@ export type SupplierCredentialSource = 'password' | 'session';
 export type SupplierAccountStatus = 'active' | 'login_failed' | 'session_expired' | 'unknown';
 
 /**
+ * §21.4（v1.19.0）废号池原因。`null`（在 `SupplierAccount.scrapReason` 上）= 不在池中。
+ *
+ * - `plan_exhausted`：套餐未过期、有效余量 < 1（token 为整数，即 0）**且**账号余额 < 1 元；
+ * - `plan_expired`：套餐已过期（余量按 0 计，**不管台账还剩多少**）**且**余额 < 1 元。
+ *
+ * 判据是「且」不是「或」：套餐还剩 800 万、只是余额不足 1 元的号现在还能干活（§21.2）。
+ * 前端只做展示，**不自算判据** —— 阈值与外键谓词都在 `src/db/scrap.ts` 一处。
+ */
+export type ScrapReason = 'plan_exhausted' | 'plan_expired';
+
+/**
  * §15.1 `SupplierAccount`。列表项与详情**共用同一形状**。
  *
  * 金额一律 int **分**；上游给的是 quota 或**浮点元**，换算**全在后端**，前端不做任何除法。
@@ -1564,6 +1578,16 @@ export interface SupplierAccount {
   depletedAt: Iso8601 | null;
   /** 账号只可能是 `'balance'` / `null` —— 没有「所属账号欠费」这种东西（§20.6）。 */
   depletedReason: DepletedReason | null;
+  /**
+   * §21.4（v1.19.0）**废号池**：`true` = 这个号没残值了（粘性，只有人工 `unscrap` 能出池）。
+   * 与 `depleted` **正交**：一个号可以只被透支锁住、也可以只进废号池、也可以两者同时为真。
+   * 进池时名下 key 会被级联锁存（`depletedReason='account'`）**并** `enabled=0`（§21.3）。
+   */
+  scrapped: boolean;
+  /** 进池时刻（`scrapped=false` 时恒 `null`）。粘性：反复刷新**不推**时间戳。 */
+  scrappedAt: Iso8601 | null;
+  /** 进池原因；`null` = 不在池中（与 `scrapped=false` 同义，两者不会互相矛盾）。 */
+  scrapReason: ScrapReason | null;
   revision: number;
   createdAt: Iso8601;
   updatedAt: Iso8601;
@@ -1617,6 +1641,11 @@ export interface SupplierAccountListQuery extends PageQuery {
   status?: SupplierAccountStatus;
   /** §20.8：透支锁存筛选（与 `status` 正交，可并用）。 */
   depleted?: boolean;
+  /**
+   * §21.4（v1.19.0）废号池筛选：`true` = 只看池里的、`false` = 排除池里的、省略 = 全部。
+   * 与 `status` / `depleted` / `q` 可并用（三根正交的轴，服务端取交集）。
+   */
+  scrapped?: boolean;
   q?: string;
 }
 

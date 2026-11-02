@@ -13,7 +13,7 @@
  * 3. **额度封顶用橙不用红**。实测上游的"透支"只是超出 ¥0.01–0.16 的封顶特征，不是欠费；
  *    红色留给「登录失败 / 会话过期」这种真出事的两档。
  */
-import type { SupplierAccount } from '@/api/types';
+import type { ScrapReason, SupplierAccount } from '@/api/types';
 import { tokens } from '@/theme/tokens';
 
 /** 余额低于此值（分）算「余额偏低」。¥0.50。 */
@@ -21,6 +21,18 @@ export const LOW_BALANCE_CENTS = 50;
 
 /** 到期时刻落在此天数内算「即将到期」。 */
 export const EXPIRING_WITHIN_DAYS = 14;
+
+/**
+ * §21.4（v1.19.0）废号池原因 → 人话。**唯一一份**：账号池的「废号」列与详情抽屉都用它，
+ * 不在两处各写一套（同一族原因的两种叫法会在两张界面上打架）。
+ *
+ * 两种原因的下一步动作不同：套餐耗尽 = 额度用光了；套餐过期 = 时间到了 —— 后者台账里可能
+ * 还挂着余量，但判据按过期归零（§21.2 第 3 行），所以别拿"还剩 XX 万"反推它不该进池。
+ */
+export const SCRAP_REASON_TEXT: Record<ScrapReason, string> = {
+  plan_exhausted: '套餐耗尽',
+  plan_expired: '套餐过期',
+};
 
 export type HealthTone = 'success' | 'warning' | 'orange' | 'error' | 'muted';
 

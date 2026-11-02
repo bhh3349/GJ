@@ -359,12 +359,24 @@ export const supplierAccountsApi = {
   setEgress: (id: string, body: SupplierAccountSetEgressRequest) =>
     api.patch<SupplierAccount>(`/supplier-accounts/${id}`, body),
   /**
-   * 删账号。名下还有已入池 key 且 `force !== true` → `409 ACCOUNT_HAS_KEYS`。
-   * 与删上游（ADR-0016 物理删子树）关键差别：**这里一把 key 都不删，只解绑** ——
-   * 账号删了它名下的 key 仍可用，真删 key 会让网关下一轮快照少一批可用 key（删账号打穿流量）。
+   * 删账号。名下还有已入池 key 且 `force !== true` → `409 ACCOUNT_HAS_KEYS`（**零副作用**，
+   * 这道闸把"你会掉一批 key"变成显式确认）。
+   *
+   * **v1.19.0 语义变了**：`force=true` 现在**软删名下全部池内 key**（`enabled=0` + `deleted_at`，
+   * 逐把发 `delete` change_log），不再是旧版的"只解绑、key 保留"。推翻旧取向的理由见 §21.5：
+   * 账号型 key 的额度 / 套餐 / 余额全在账号那边，账号没了这把 key 打出去只有 402/404。
    */
   remove: (id: string, force = false) =>
     api.del<void>(`/supplier-accounts/${id}`, { query: { force: force ? true : undefined } }),
+  /**
+   * §21.4 出池（v1.19.0，同步、200 回改完的那一行）。**不要 `revision`** —— 同 `undeplete`，
+   * 它解除的是系统自动置位的粘性标记，不是覆盖一次人工编辑。
+   *
+   * 一次动作三件事：清账号两列 + 名下 key 全量恢复（`enabled=1` 并清 `reason='account'` 的锁）。
+   * **全量恢复**是契约写死的：`enabled` 只有 0/1 两态，没有"谁停的"可回放。
+   * 出池后下一轮刷新若判据仍成立会**再次进池** —— 那是判据在工作，不是按钮失灵。
+   */
+  unscrap: (id: string) => api.post<SupplierAccount>(`/supplier-accounts/${id}/unscrap`),
   /**
    * §15.2 对账 CSV（`text/csv`，UTF-8 BOM + CRLF，文件名由服务端给）。
    *

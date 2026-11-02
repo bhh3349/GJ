@@ -421,10 +421,37 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
     // 与「现在用不了」的冷却/饱和（429 + Retry-After）分型；全部候选都死 ⇒ 503 NO_AVAILABLE_EGRESS。
     let skippedEgressDead = 0;
 
+    // ADR-0044 决策 3（B1 单请求滑池）：类目预算。
+    // 候选已按「类目 → 到期 → …」排序 ⇒ 套餐段在前、余额段在后；这里只给余额段保证**至少一次**
+    // 真实尝试的机会，其余一律沿用同一个 `attempts` 计数器（套餐段未用完的预算自然滚入余额段）。
+    //
+    //   · `reserve = 存在余额类候选 且 maxAttempts ≥ 2 ? 1 : 0` —— 只保证「至少一次」：
+    //     `maxAttempts` 是对外成本上限（§13.4 同源 / env `MAX_ATTEMPTS`），预留 k>1 会把单请求
+    //     最坏耗时翻 k 倍，而「要能继续尝试」只需要一次机会；`maxAttempts=3` 的最坏形状
+    //     = 2 次套餐失败 + 1 次余额尝试。
+    //   · `maxAttempts = 1` ⇒ reserve=0 ⇒ planCap=1：一个预算塞不进两个类，行为与修订前
+    //     **逐字节相同**（诚实降级，ADR-0044 已登记）。
+    //   · reserve=0 时 planCap=maxAttempts，而 planAttempts ≤ attempts ≤ maxAttempts 且
+    //     循环顶上的 `attempts >= maxAttempts` break 先到 ⇒ 预算分支永不触发（本地预算拒绝
+    //     那条腿会 `attempts -= 1` 但它随即 `break`，planAttempts 不再被读）。
+    const hasBalanceCandidate = candidates.some((c) => c.category === 'balance');
+    const reserve = hasBalanceCandidate && maxAttempts >= 2 ? 1 : 0;
+    const planCap = maxAttempts - reserve;
+    let planAttempts = 0; // 只数**套餐类**的真实尝试（跳过不耗预算——见循环内的预算分支）
+
     for (const candidate of candidates) {
       if (attempts >= maxAttempts) break;
       // 上一把已经试过别的上游且不允许跨上游 → 停
       if (!crossUpstreamRetry && previousUpstreamId !== null && candidate.upstreamId !== previousUpstreamId) break;
+      // 类目预算（ADR-0044 决策 3）：套餐段真实尝试到帽 ⇒ 剩余套餐候选**整段跳过**——
+      // `skipped` 事件照发、不耗 `attempts`、不进任何 skipped 计数器（它不是冷却/饱和/密文，
+      // `attempts===0` 分型也不可达：本分支成立意味着至少发生过一次套餐真实尝试）。
+      // 排序保证余额候选全部排在套餐之后，所以用 `continue` 而不是 `break`。
+      // 位置在 `attemptableCandidates` 之前：预算剪掉的候选与本请求的 0 尝试分型无关。
+      if (candidate.category === 'token-plan' && planAttempts >= planCap) {
+        emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'skipped' });
+        continue;
+      }
       attemptableCandidates += 1;
 
       // 满并发的 key 直接跳过：不算失败、不进冷却，换下一把
@@ -479,6 +506,7 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
       }
 
       attempts += 1;
+      if (candidate.category === 'token-plan') planAttempts += 1; // ADR-0044：套餐段的类目预算计数
       previousUpstreamId = candidate.upstreamId;
 
       const link = linkedAbort(req.signal, upstreamTimeoutMs);
@@ -727,6 +755,35 @@ export function createGatewayEngine(options: EngineOptions): GatewayEngine {
       pool.endAttempt(candidate.keyId);
 
       const payload = parseJsonOr(raw, response.status);
+
+      // §16.2 pre-first-chunk 识别窗（ADR-0044 附带件）：上游业务错误常带 **HTTP 200** 回
+      // `{success:false}`（TierFlow 文档 §1.2 / §8.2），而 `classifyUpstreamStatus` 是纯状态码
+      // 驱动 —— 不在这里拦，余额耗尽 / 令牌失效会被判成"成功调用"：不计失败、不进冷却、
+      // 还 `reportSuccess`，死 key 永远被选中（§16.2 点名的「打穿单 key 故障 100ms 切换」）。
+      //
+      //   · 判据与 `src/supplier/tierflow.ts` 账号面 `decodeEnvelope().success` **同源**：只认
+      //     **显式的 `false`**（缺省 / 非布尔 / 非对象一律不动）—— 防御性窗宁漏判不误杀；
+      //   · 只作用于 **200**：非 2xx 走上面既有的状态码分类，一行不改（classify.ts 零改动）；
+      //   · 落点在 `response.text()` 之后仍算 pre-first-chunk：非流式此刻**一个字节都没回给
+      //     客户端**（整包读完才构造响应），改判成既有 Terminating 语义（换 key / 收尾 502）
+      //     不会出现"客户端先收到 200、随后断流"的有感知形状；
+      //   · 流式侧不在本窗内：SSE 首帧是 `data:` 文本、信封判据天然不命中，且 §16.1.2 实测
+      //     数据面错误全为非 2xx —— 流式保持防御性缺省（ADR-0044「已知边界」登记）；
+      //   · 失败因由落 5 值枚举内的 `UPSTREAM_ERROR`（短冷却 10–30s）：§12.1 的
+      //     `attemptTrail[].reason` 是 `failureReason` 枚举、单项 ≤20 字符，
+      //     「UPSTREAM_BODY_FAILURE」超界且 §10 零新增，故只作本段语义名、不落 trail。
+      if (response.status === 200 && looksLikeFailureBody(payload)) {
+        pool.reportFailure(candidate.keyId, 'UPSTREAM_ERROR');
+        lastReason = 'UPSTREAM_ERROR';
+        lastStatus = 200;
+        lastTimedOut = false;
+        attemptTrail.push({ keyId: candidate.keyId, reason: 'UPSTREAM_ERROR', status: 200 });
+        lastAttemptKey = candidate.keyId;
+        lastAttemptUpstream = candidate.upstreamId;
+        emit({ keyId: candidate.keyId, upstreamId: candidate.upstreamId, attempt: attempts, outcome: 'failure', reason: 'UPSTREAM_ERROR', status: 200, ttfbMs });
+        continue;
+      }
+
       const usage = resolveUsage(upstreamBody, payload);
       pool.reportSuccess(candidate.keyId, usage, ttfbMs);
       emitUsage(req.group.groupId, candidate.keyId, usage, ttfbMs);
@@ -1092,6 +1149,18 @@ function parseJsonOr(raw: string, status: number): unknown {
   } catch {
     return { error: { message: raw.slice(0, 512), type: 'api_error', code: `UPSTREAM_${status}` } };
   }
+}
+
+/**
+ * §16.2 pre-first-chunk 识别窗判据：上游用 **HTTP 200 + `success:false`** 表达业务错误
+ * （TierFlow 文档 §1.2 / §8.2）。
+ *
+ * 与账号面 `src/supplier/tierflow.ts` 的 `decodeEnvelope().success` **同源** —— 只认**显式
+ * `false`**：缺省 / 非布尔 / 非对象一律不动。这是**防御性窗**：漏判只是防线失效（回到修订前
+ * 行为），误判会把正常响应判死，两个方向的代价不对称。
+ */
+function looksLikeFailureBody(payload: unknown): boolean {
+  return typeof payload === 'object' && payload !== null && (payload as { success?: unknown }).success === false;
 }
 
 function zeroUsage(): TokenUsage {

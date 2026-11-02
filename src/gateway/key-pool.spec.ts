@@ -468,3 +468,101 @@ describe('applySnapshot', () => {
     assert.equal((await pool.getAvailableKeys('gpt-4o')).length, 0, '冷却跨越快照刷新仍生效');
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * ADR-0044 选路顺序：①类目 → ②到期升序 → ③weight → ④余量 → ⑤失败时效 → ⑥LRU
+ * ------------------------------------------------------------------ */
+
+describe('ADR-0044 选路顺序（类目第一、到期优先）', () => {
+  it('类目是键 0：weight=2 的余额 key 仍排在所有套餐 key 之后（B2）', async () => {
+    clock = 1_700_000_000_000;
+    const pool = createKeyPool({ now });
+    pool.applySnapshot(
+      snapshot([
+        balanceKey('bal-strong', { weight: 2 }),
+        balanceKey('plan-plain', { category: 'token-plan', tokenPlanRemainingTokens: 100 }),
+        balanceKey('bal-plain', { weight: 1 }),
+      ]),
+    );
+
+    assert.deepEqual(
+      (await pool.getAvailableKeys('gpt-4o')).map((c) => c.keyId),
+      ['plan-plain', 'bal-strong', 'bal-plain'],
+      'weight 再也压不过类目：一把 weight=2 的余额 key 不得插到套餐 key 前面（ADR-0030 的套餐优先升级为**无条件**不变式）',
+    );
+  });
+
+  it('到期压过 weight（拍板④）：快到期的先烧；null 与不可解析排最后、且仍在候选里', async () => {
+    clock = 1_700_000_000_000; // 2023-11-14：下列到期都在未来（过滤面不会摘掉它们）
+    const pool = createKeyPool({ now });
+    pool.applySnapshot(
+      snapshot([
+        balanceKey('plan-late', { category: 'token-plan', weight: 5, tokenPlanRemainingTokens: 100, tokenPlanExpiresAt: '2026-01-01T00:00:00Z' }),
+        balanceKey('plan-soon', { category: 'token-plan', weight: 1, tokenPlanRemainingTokens: 100, tokenPlanExpiresAt: '2025-01-01T00:00:00Z' }),
+        balanceKey('plan-unknown', { category: 'token-plan', weight: 1, tokenPlanRemainingTokens: 100, tokenPlanExpiresAt: null }),
+        balanceKey('plan-badstamp', { category: 'token-plan', weight: 1, tokenPlanRemainingTokens: 100, tokenPlanExpiresAt: 'tomorrow' }),
+      ]),
+    );
+
+    assert.deepEqual(
+      (await pool.getAvailableKeys('gpt-4o')).map((c) => c.keyId),
+      ['plan-soon', 'plan-late', 'plan-unknown', 'plan-badstamp'],
+      'plan-soon 只有 weight=1 也排在 weight=5 前面（时间硬约束压软偏好）；未知/不可解析到期归 +∞ 排最后，' +
+        '且**都仍在候选里**——排序不参与过滤（与 isUsable 的 NaN 不判过期同向）',
+    );
+  });
+
+  it('同类目同到期：weight 降序 → 余量降序 → 失败时效 → LRU 逐层兜底', async () => {
+    clock = 1_700_000_000_000;
+    const expires = '2025-01-01T00:00:00Z';
+    const plan = (keyId: string, over: Partial<KeyConfig> = {}): KeyConfig => balanceKey(keyId, { category: 'token-plan', tokenPlanExpiresAt: expires, ...over });
+
+    const pool = createKeyPool({ now });
+    pool.applySnapshot(
+      snapshot([
+        plan('a', { weight: 2, tokenPlanRemainingTokens: 10 }),
+        plan('b', { weight: 2, tokenPlanRemainingTokens: 10 }),
+        plan('d', { weight: 2, tokenPlanRemainingTokens: 5 }),
+        plan('c', { weight: 1, tokenPlanRemainingTokens: 999 }),
+      ]),
+    );
+    assert.deepEqual(
+      (await pool.getAvailableKeys('gpt-4o')).map((c) => c.keyId),
+      ['a', 'b', 'd', 'c'],
+      '同到期 ⇒ 键 2 weight；a/b 同 weight 同余量 ⇒ 键 4 前仍并列（快照序）；d 余量更低沉到 a/b 之后；c weight 低但在余量之前就被判掉',
+    );
+
+    pool.reportFailure('a', 'NETWORK');
+    clock += NETWORK_BASE_MS + 1; // 冷却已过、仍在时效窗内
+    assert.deepEqual(
+      (await pool.getAvailableKeys('gpt-4o')).map((c) => c.keyId),
+      ['b', 'a', 'd', 'c'],
+      '同 weight 同余量档内，新鲜失败者沉到从未失败者之后（键 4 失败时效）',
+    );
+
+    // LRU 腿：两把完全同配置的 key，用过的那把让位（键 5）
+    const lru = createKeyPool({ now });
+    lru.applySnapshot(snapshot([plan('x1', { weight: 2, tokenPlanRemainingTokens: 10 }), plan('x2', { weight: 2, tokenPlanRemainingTokens: 10 })]));
+    assert.deepEqual((await lru.getAvailableKeys('gpt-4o')).map((c) => c.keyId), ['x1', 'x2'], '全并列 ⇒ 快照序');
+    lru.beginAttempt('x1');
+    lru.endAttempt('x1');
+    assert.deepEqual((await lru.getAvailableKeys('gpt-4o')).map((c) => c.keyId), ['x2', 'x1'], '用过 x1 ⇒ x2 顶上（键 5 LRU）');
+  });
+
+  it('余额类内到期键恒等：balance 的 tokenPlanExpiresAt 不参与排序，weight 类内直接起序', async () => {
+    clock = 1_700_000_000_000;
+    const pool = createKeyPool({ now });
+    pool.applySnapshot(
+      snapshot([
+        balanceKey('bal-early', { weight: 1, tokenPlanExpiresAt: '2025-01-01T00:00:00Z' }),
+        balanceKey('bal-strong', { weight: 2, tokenPlanExpiresAt: null }),
+      ]),
+    );
+
+    assert.deepEqual(
+      (await pool.getAvailableKeys('gpt-4o')).map((c) => c.keyId),
+      ['bal-strong', 'bal-early'],
+      '到期键只对套餐类有值：一把带早期到期值的余额 key 抢不走 weight=2 的余额 key（ADR-0011 的余额轮转面不动）',
+    );
+  });
+});

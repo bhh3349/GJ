@@ -16,6 +16,10 @@
  *   · 2026-10-16 ADR-0011 追认：套餐余量未知的哨兵从 `-1` 改 `1`，
  *     实现「套餐 key 一律排在余额 key 之前」（套餐 30 天有效期，不用即作废）。
  *     签名、过滤、冷却、单写者全部未动 —— 变的只有排序键 2 的一个常量。
+ *   · 2026-11-03 **ADR-0044**：类目升为键 0（套餐→余额，**无条件**不变式，weight 再也压不过它）、
+ *     到期升序插键 1（业主拍板④：**到期压 weight**）、weight 降为类内键 2。
+ *     过滤、冷却、单写者、`KeyCandidate` 形状照旧未动 —— 到期值取自快照配置（键 1 的解析缓存在
+ *     `getAvailableKeys` 内做一次，比较器里零 `Date.parse`）。同批的「单请求滑池」在 `engine.ts`。
  */
 
 import { MAX_COOLDOWN_MS, nextCooldownMs } from './cooldown.js';
@@ -136,6 +140,24 @@ function remainingQuotaOf(key: KeyConfig, rt: RuntimeExtras): number {
   return 0;
 }
 
+/**
+ * ADR-0044 键 1 的排序纪元：`tokenPlanExpiresAt` 升序（**快到期的先烧**，业主拍板④）。
+ *
+ *   · 只对 token-plan 类有值；balance 类恒 `+∞`（键 1 恒等，直接落到键 2 weight ——
+ *     类内语义与修订前等价，ADR-0011 的余额轮转验收不受影响）。
+ *   · **`null` 与不可解析（NaN）一律 `+∞` 排在所有已知到期之后**，与 `isUsable` 的到期判定
+ *     （NaN 不判过期）同向：「未知到期」≠「已过期」，只参与排序、**不参与过滤**。
+ *   · 返回 `Number.POSITIVE_INFINITY` 而非一个大数：`Infinity === Infinity` → 比较器落 0，
+ *     两个未知到期之间自然回落键 2；比较用 `<` 而非减法（`∞ − ∞ = NaN` 会污染 sort）。
+ *
+ * 在 `getAvailableKeys` 里对快照**逐 key 解析一次**（缓存进 Map），比较器内零 `Date.parse`。
+ */
+function expirySortEpochOf(key: KeyConfig): number {
+  if (key.category !== 'token-plan' || key.tokenPlanExpiresAt === null) return Number.POSITIVE_INFINITY;
+  const exp = Date.parse(key.tokenPlanExpiresAt);
+  return Number.isFinite(exp) ? exp : Number.POSITIVE_INFINITY;
+}
+
 function isUsable(key: KeyConfig, rt: KeyRuntimeState & RuntimeExtras, now: number, fallbackMaxConcurrency: number): boolean {
   if (key.status !== 'enabled') return false;
   // 透支锁存（契约 §20.7 / ADR-0041）：紧接着 status 判，**在冷却/并发之前**。
@@ -209,18 +231,30 @@ export function createKeyPool(options: PoolOptions = {}): KeyPoolInternal {
       }
 
       const order = new Map(snapshot.keys.map((k, i) => [k.keyId, i]));
+      // ADR-0044 键 1 的解析缓存：每个候选的到期纪元在排序前算一次，比较器内零 Date.parse。
+      const expiryEpoch = new Map(snapshot.keys.map((k) => [k.keyId, expirySortEpochOf(k)]));
       ready.sort((a, b) => {
-        if (b.weight !== a.weight) return b.weight - a.weight; // 1. 权重降序
+        // 0. 类目升序（ADR-0044 / B2）：套餐(0)→余额(1)，**无条件不变式** —— weight 从此
+        //    表达不了跨类目优先级（ADR-0030 的「套餐优先」从"weight 相同时的排序结果"升级成文）。
+        //    按字典序比较：'balance' < 'token-plan'，取反即套餐在前。
+        if (a.category !== b.category) return a.category === 'token-plan' ? -1 : 1;
+        // 1. 到期升序（ADR-0044 / C，业主拍板④）：快到期的先烧，**压过 weight**（业务硬约束
+        //    「不用就作废」不被管理员的软偏好覆盖）；null/NaN = 未知到期 = +∞ 排最后。
+        const ea = expiryEpoch.get(a.keyId) ?? Number.POSITIVE_INFINITY;
+        const eb = expiryEpoch.get(b.keyId) ?? Number.POSITIVE_INFINITY;
+        if (ea !== eb) return ea < eb ? -1 : 1; // 用 < 比较：∞ − ∞ = NaN，不能走减法
+        // 2. 权重降序（ADR-0044 降位：只在类目内生效；balance 类键 1 恒等 ⇒ 类内直接由本键起序）
+        if (b.weight !== a.weight) return b.weight - a.weight;
         const ra = remainingQuotaOf(configOf(a), runtimeOf(a));
         const rb = remainingQuotaOf(configOf(b), runtimeOf(b));
-        if (rb !== ra) return rb - ra; // 2. 剩余额度降序（token-plan；balance 类恒 0 故总排在套餐 key 后，见 ADR-0011 + UNKNOWN_PLAN_QUOTA）
+        if (rb !== ra) return rb - ra; // 3. 剩余额度降序（token-plan；balance 类恒 0 故总排在套餐 key 后，见 ADR-0011 + UNKNOWN_PLAN_QUOTA）
         const la = freshFailureAt(a);
         const lb = freshFailureAt(b);
-        if (la !== lb) return la - lb; // 3. 上次失败时间升序（从未失败优先；超窗归从未失败）
+        if (la !== lb) return la - lb; // 4. 上次失败时间升序（从未失败优先；超窗归从未失败）
         const ua = runtimeOf(a).lastUsedSeq;
         const ub = runtimeOf(b).lastUsedSeq;
-        if (ua !== ub) return ua - ub; // 4. LRU：最久未用优先（从未使用 = 0 = 最早）
-        // 5. 快照顺序兜底：序号全异的场景到不了这里，纯防御。
+        if (ua !== ub) return ua - ub; // 5. LRU：最久未用优先（从未使用 = 0 = 最早）
+        // 6. 快照顺序兜底：序号全异的场景到不了这里，纯防御。
         return (order.get(a.keyId) ?? 0) - (order.get(b.keyId) ?? 0);
       });
       return ready;

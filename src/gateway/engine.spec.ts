@@ -14,10 +14,10 @@ import { describe, it, vi } from 'vitest';
 
 import { egressIdOfUrl } from '../egress/port.js';
 import { createGatewayEngine } from './engine.js';
-import type { FetchLike, ForwardResult } from './engine.js';
+import type { AttemptEvent, FetchLike, ForwardResult } from './engine.js';
 import { createKeyPool } from './key-pool.js';
 import type { KeyPoolInternal } from './key-pool.js';
-import type { GroupContext, ModelCatalog, SecretResolver, UsageLogEntry, UpstreamTarget } from './ports.js';
+import type { ErrorEventEntry, GroupContext, ModelCatalog, SecretResolver, UsageLogEntry, UpstreamTarget } from './ports.js';
 import type { KeyConfig, PoolSnapshot } from './types.js';
 
 /* ------------------------------ 测试台 ------------------------------ */
@@ -153,6 +153,10 @@ function makeHarness(options: {
   resolveSecret?: (keyId: string) => UpstreamTarget | null;
   /** 首字节超时（默认 120s）；测「长流不能被它掐断」时压到很小 */
   upstreamTimeoutMs?: number;
+  /** v1.20.0 / ADR-0044：抓引擎尝试事件（判 B1 的预算跳过与真实尝试序列） */
+  captureAttempts?: boolean;
+  /** 抓错误事件（判 502 的 attemptTrail / keyId 归因） */
+  captureEvents?: boolean;
 }) {
   clock = 1_700_000_000_000;
   const pool: KeyPoolInternal = createKeyPool({ now });
@@ -179,6 +183,8 @@ function makeHarness(options: {
 
   const logs: UsageLogEntry[] = [];
   const usages: Array<{ groupId: string; keyId: string; total: number }> = [];
+  const attemptEvents: AttemptEvent[] = [];
+  const errorEvents: ErrorEventEntry[] = [];
   const { fetchImpl, calls } = scriptedFetch(options.steps);
 
   const engine = createGatewayEngine({
@@ -189,12 +195,14 @@ function makeHarness(options: {
     fetchImpl,
     now,
     onUsage: (e) => usages.push({ groupId: e.groupId, keyId: e.keyId, total: e.usage.total }),
+    ...(options.captureAttempts === true ? { onAttempt: (e: AttemptEvent) => { attemptEvents.push(e); } } : {}),
+    ...(options.captureEvents === true ? { errors: { record: (e: ErrorEventEntry) => { errorEvents.push(e); } } } : {}),
     ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),
     ...(options.crossUpstreamRetry === undefined ? {} : { crossUpstreamRetry: options.crossUpstreamRetry }),
     ...(options.upstreamTimeoutMs === undefined ? {} : { upstreamTimeoutMs: options.upstreamTimeoutMs }),
   });
 
-  return { pool, engine, calls, logs, usages };
+  return { pool, engine, calls, logs, usages, attemptEvents, errorEvents };
 }
 
 function chatBody(model = 'gpt-4o-mini', stream = false): Record<string, unknown> {
@@ -919,5 +927,196 @@ describe('并发与运行态', () => {
     assert.equal(snap.keys.length, 1);
     assert.equal(snap.keys[0]?.keyId, 'k1');
     assert.ok(Number.isFinite(Date.parse(snap.at)), 'at 必须是可解析的 ISO8601');
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * ADR-0044 决策 3（B1）：单请求滑池 —— 套餐段到帽 ⇒ 本请求继续试余额段
+ * ------------------------------------------------------------------ */
+
+describe('ADR-0044 决策 3：单请求滑池（套餐段 → 余额段，共享 maxAttempts）', () => {
+  const planKey = (keyId: string, upstreamId = 'up1', over: Partial<KeyConfig> = {}): KeyConfig =>
+    keyConfig(keyId, upstreamId, { category: 'token-plan', tokenPlanRemainingTokens: 100, ...over });
+  const fail500 = (): Response => jsonResponse({ error: { message: 'boom' } }, 500);
+  const okJson = (): Response =>
+    jsonResponse({ id: 'ok', choices: [{ message: { content: 'hi' } }], usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 } });
+  const failures = (events: AttemptEvent[]): string[] => events.filter((e) => e.outcome === 'failure').map((e) => e.keyId);
+  const skips = (events: AttemptEvent[]): string[] => events.filter((e) => e.outcome === 'skipped').map((e) => e.keyId);
+
+  it('5 把套餐全挂 + 2 把余额、maxAttempts=3：attempts=3，先烧 2 套餐再滑 1 余额（B1 正向）', async () => {
+    const h = makeHarness({
+      keys: [planKey('p1'), planKey('p2'), planKey('p3'), planKey('p4'), planKey('p5'), keyConfig('b1'), keyConfig('b2')],
+      steps: [fail500, fail500, fail500],
+      captureAttempts: true,
+    });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
+
+    assert.equal(result.kind, 'error');
+    if (result.kind !== 'error') return;
+    assert.equal(result.error.httpStatus, 502);
+    assert.equal(result.attempts, 3, '总真实尝试仍受 maxAttempts=3 约束');
+    assert.equal(h.calls.length, 3);
+    assert.deepEqual(failures(h.attemptEvents), ['p1', 'p2', 'b1'], '套餐段到帽（planCap=2）后本请求滑到余额段 —— 修订前第 3 把套餐失败即收尾 502');
+    assert.deepEqual(skips(h.attemptEvents), ['p3', 'p4', 'p5'], '剩余套餐候选整段跳过：skipped 事件照发、不耗 attempts');
+  });
+
+  it('1 把套餐失败 + 2 把余额：未用预算滚入余额段，余额消耗 2 次', async () => {
+    const h = makeHarness({
+      keys: [planKey('p1'), keyConfig('b1'), keyConfig('b2')],
+      steps: [fail500, fail500, okJson],
+      captureAttempts: true,
+    });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
+
+    assert.equal(result.kind, 'json');
+    assert.equal(result.attempts, 3, '套餐段未用完的 1 次预算自然滚入余额段');
+    assert.deepEqual(failures(h.attemptEvents), ['p1', 'b1']);
+    assert.equal(h.attemptEvents.filter((e) => e.outcome === 'success').map((e) => e.keyId).join(), 'b2');
+  });
+
+  it('套餐候选全被跳过（密文缺失，0 真实尝试）：跳过不耗预算，余额段拿满 3 次', async () => {
+    const h = makeHarness({
+      keys: [planKey('p1'), planKey('p2'), planKey('p3'), keyConfig('b1'), keyConfig('b2'), keyConfig('b3')],
+      steps: [fail500, fail500, fail500],
+      resolveSecret: (keyId) => (keyId.startsWith('p') ? null : upstreamTarget('up1', `cred_${keyId}`)),
+      captureAttempts: true,
+    });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
+
+    assert.equal(result.kind, 'error');
+    if (result.kind !== 'error') return;
+    assert.equal(result.attempts, 3, '套餐段的 0 真实尝试不吃掉任何预算');
+    assert.deepEqual(failures(h.attemptEvents), ['b1', 'b2', 'b3']);
+    assert.deepEqual(skips(h.attemptEvents), ['p1', 'p2', 'p3']);
+  });
+
+  it('maxAttempts=1：不预留、不滑池，与修订前逐字节同形（诚实降级）', async () => {
+    const h = makeHarness({
+      keys: [planKey('p1'), planKey('p2'), planKey('p3'), keyConfig('b1'), keyConfig('b2')],
+      steps: [fail500],
+      maxAttempts: 1,
+      captureAttempts: true,
+    });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
+
+    assert.equal(result.kind, 'error');
+    if (result.kind !== 'error') return;
+    assert.equal(result.attempts, 1);
+    assert.equal(h.calls.length, 1);
+    assert.deepEqual(failures(h.attemptEvents), ['p1']);
+    assert.deepEqual(skips(h.attemptEvents), [], '一个预算塞不进两个类：到帽即收尾，不产生预算跳过');
+  });
+
+  it('crossUpstreamRetry=false 且余额在别的上游：跨上游边界照旧 break，不因滑池绕过该开关', async () => {
+    const h = makeHarness({
+      keys: [planKey('p1', 'up1'), planKey('p2', 'up1'), planKey('p3', 'up1'), keyConfig('b1', 'up2'), keyConfig('b2', 'up2')],
+      upstreams: [
+        { upstreamId: 'up1', enabled: true, models: null },
+        { upstreamId: 'up2', enabled: true, models: null },
+      ],
+      steps: [fail500, fail500],
+      crossUpstreamRetry: false,
+      captureAttempts: true,
+    });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
+
+    assert.equal(result.kind, 'error');
+    if (result.kind !== 'error') return;
+    assert.equal(result.attempts, 2);
+    assert.equal(h.calls.length, 2, '余额在 up2：跨上游边界 break，b1 一个字节都没发出去');
+    assert.deepEqual(failures(h.attemptEvents), ['p1', 'p2']);
+    assert.deepEqual(skips(h.attemptEvents), ['p3'], 'p3 先被预算跳过，随后 b1 触发跨上游 break');
+  });
+
+  it('纯套餐池（无余额候选）：不预留，套餐段拿满 3 次（reserve 的余额前提）', async () => {
+    const h = makeHarness({
+      keys: [planKey('p1'), planKey('p2'), planKey('p3'), planKey('p4')],
+      steps: [fail500, fail500, fail500],
+      captureAttempts: true,
+    });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
+
+    assert.equal(result.kind, 'error');
+    if (result.kind !== 'error') return;
+    assert.equal(result.attempts, 3, '没有余额候选就没有预留对象：引擎可用的总预算应全额给套餐段');
+    assert.deepEqual(failures(h.attemptEvents), ['p1', 'p2', 'p3']);
+    assert.deepEqual(skips(h.attemptEvents), [], '套餐段不被自己的预算帽剪掉（planCap=maxAttempts）');
+  });
+
+  it('两类全挂 → 502：attemptTrail 同时含两类 key，keyId = 最后摸过的那把（ADR-0042 语义不变）', async () => {
+    const h = makeHarness({
+      keys: [planKey('p1'), planKey('p2'), keyConfig('b1'), keyConfig('b2')],
+      steps: [fail500, fail500, fail500],
+      captureEvents: true,
+    });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
+
+    assert.equal(result.kind, 'error');
+    if (result.kind !== 'error') return;
+    assert.equal(result.error.httpStatus, 502);
+    assert.equal(result.attempts, 3);
+    const entry = h.errorEvents.at(-1);
+    assert.ok(entry !== undefined, '502 必须产出一条错误事件');
+    assert.equal(entry.keyId, 'b1', 'keyId 是「最后摸过的那把」（不判罪，配 trail 一起读）');
+    assert.deepEqual(entry.attemptTrail?.map((t) => t.keyId), ['p1', 'p2', 'b1'], 'trail 跨类目：套餐 2 把 + 余额 1 把');
+    assert.ok(entry.attemptTrail?.every((t) => t.reason === 'UPSTREAM_ERROR' && t.status === 500));
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * §16.2 pre-first-chunk 识别窗：200 + success:false（ADR-0044 附带件）
+ * ------------------------------------------------------------------ */
+
+describe('§16.2 pre-first-chunk 识别窗（200 + success:false）', () => {
+  const failureEnvelope = (): Response => jsonResponse({ success: false, message: 'quota exhausted' }, 200);
+  const okBody = (): Response =>
+    jsonResponse({ id: 'ok', choices: [{ message: { content: 'hi' } }], usage: { prompt_tokens: 1, completion_tokens: 2, total_tokens: 3 } });
+
+  it('200 + success:false 判失败：换下一把，不 reportSuccess、不进用量（判据与账号面同源）', async () => {
+    const h = makeHarness({ keys: [keyConfig('k1'), keyConfig('k2')], steps: [failureEnvelope, okBody], captureAttempts: true });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
+
+    assert.equal(result.kind, 'json');
+    assert.equal(h.calls.length, 2, '命中识别窗必须换 key —— 修复前这里只敲 1 次，客户端拿走一个 success:false 的 200');
+    assert.deepEqual(
+      h.attemptEvents.filter((e) => e.outcome === 'failure').map((e) => e.keyId),
+      ['k1'],
+      '200 的业务失败按上游失败处置（short 冷却），不是"成功调用"',
+    );
+    assert.notEqual(runtimeOf(h.pool, 'k1').cooldownUntil, null, '必须进冷却，否则死 key 永远被选中');
+    assert.equal(h.usages.length, 1, '失败的 200 不得 reportSuccess / 记用量');
+    assert.equal(h.usages[0]?.keyId, 'k2');
+  });
+
+  it('200 + success:true 不被误杀（判据只认显式 false）', async () => {
+    const h = makeHarness({ keys: [keyConfig('k1')], steps: [() => jsonResponse({ success: true, id: 'ok', choices: [] })] });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
+
+    assert.equal(result.kind, 'json');
+    if (result.kind !== 'json') return;
+    assert.equal(result.status, 200);
+    assert.equal(h.calls.length, 1);
+    assert.equal(runtimeOf(h.pool, 'k1').cooldownUntil, null);
+  });
+
+  it('无 success 字段的正常 OpenAI 响应原样成功（未知 ≠ 失败）', async () => {
+    const h = makeHarness({ keys: [keyConfig('k1')], steps: [okBody] });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
+
+    assert.equal(result.kind, 'json');
+    if (result.kind !== 'json') return;
+    assert.equal(result.status, 200);
+    assert.equal(h.calls.length, 1);
+  });
+
+  it('全部候选都回 200 + success:false → 既有 Terminating 语义：502，客户端不会先收 200 再断流', async () => {
+    const h = makeHarness({ keys: [keyConfig('k1'), keyConfig('k2')], steps: [failureEnvelope, failureEnvelope] });
+    const result = await h.engine.chatCompletions({ group: GROUP, model: 'gpt-4o', body: chatBody('gpt-4o'), stream: false, requestId: REQUEST_ID });
+
+    assert.equal(result.kind, 'error');
+    if (result.kind !== 'error') return;
+    assert.equal(result.error.httpStatus, 502);
+    assert.equal(result.error.body.error.code, 'UPSTREAM_ERROR');
+    assert.equal(result.attempts, 2);
   });
 });

@@ -134,13 +134,41 @@ export type FailureReasonCode =
   | 'NETWORK';
 
 export interface TokenPlanDto {
-  remainingTokens: number;
+  /**
+   * 契约 §3（v1.18.0 修订）：`null` = **未同步**（余量未知 ≠ 0）。
+   * v1.17.2 及之前在 repo 层用 `?? 0` 把未知塌成 0 —— 管理面显示"烧干"，
+   * 而网关选路对 NULL 按「未知」哨兵排在余额 key 之前（ADR-0030），两个消费面语义分裂。
+   * 前端必须把 `null` 渲染成「未同步」，**不得**渲染成 0。
+   */
+  remainingTokens: number | null;
+  /**
+   * 契约 §3（v1.18.0 新增）：归属账号**当前套餐**的基础 Token 总量
+   * （`supplier_account_subscriptions.basic_token_total`，按 `key_masked` 唯一匹配）。
+   * `null` = 无归属 / 撞号 / 多套餐同掩码 / 上游没给 —— **宁缺勿假**。
+   * 前端据此渲染「剩余 / 总量」（如 `6.2M / 8M`）。
+   */
+  totalTokens: number | null;
   expiresAt: string | null;
+}
+
+/**
+ * 契约 §3（v1.18.0 新增）：key 的归属供应商账号。
+ * `identifier` 与 §15.1 `SupplierAccount.identifier` 同源同形（**掩码**手机号 / 邮箱，真值不出后端）。
+ */
+export interface KeyAccountDto {
+  id: string;
+  identifier: string;
 }
 
 export interface KeyDto {
   id: string;
   upstreamId: string;
+  /**
+   * 契约 §3（v1.18.0 新增）：归属供应商账号（经 `supplier_account_keys.pooled_key_id` 反查）。
+   * `null` = 非账号池来源（手工建的 key），不是"未知"。
+   * **唯一归属才算**：同一把 key 被多条台账行指向时回 `null`（撞号不猜归属）。
+   */
+  account: KeyAccountDto | null;
   label: string;
   maskedKey: string;
   category: KeyCategory;

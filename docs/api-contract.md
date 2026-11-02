@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.17.2**　｜
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.18.0**　｜
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -692,6 +692,7 @@
 {
   "id": "key_9c21",
   "upstreamId": "up_7f3a",
+  "account": { "id": "acc_5d10", "identifier": "138****0000" },
   "label": "my88-主号-1",
   "maskedKey": "****a1b2",
   "category": "balance",
@@ -722,13 +723,14 @@
 
 | 字段 | 取值 | 说明 |
 |---|---|---|
+| `account` | `{id, identifier}` \| `null` | **v1.18.0 新增**。该 key 的**归属供应商账号**（经 `supplier_account_keys.pooled_key_id` 反查，§15.1 台账）。`identifier` 与 §15.1 `SupplierAccount.identifier` 同源同形（**掩码**手机号 / 邮箱，真值不出后端）。`null` = 非账号池来源（手工建的 key），**不是"未知"**。**唯一归属才算**：同一把 key 被多条台账行指向（掩码撞号）时回 `null` —— 宁可少一次归属展示，也不把 A 账号的套餐挂到 B 账号的 key 上（与回填腿 `backfillSubscriptionTokenPlan` 同取向） |
 | `maskedKey` | `"****a1b2"` | **后端唯一出口**。明文只在 `POST` 请求体里进，之后**任何**响应/日志/导出都不出现 |
 | `category` | `"balance"` \| `"token-plan"` | `token-plan` 时 `balance` 恒为 `null`，看 `tokenPlan` |
 | `unlimited` | `bool` | **v1.4.0 新增**。`true` = 上游侧无限额度（`unlimited_quota`），此时 `balance` 恒为 `null` 但**语义不是"未知"** —— 前端必须渲染「无限额度」徽标，不得渲染 `—` / "未知" / 任何负值。老 key 恒为 `false` |
 | `models` | `string[]` \| `null` | **v1.4.2 新增**。该 key 的**模型白名单**，取自上游 `model_limits` CSV（TierFlow `model_limits_enabled=true` 时）。`null` = **无白名单、不限模型**（老 key 恒为 `null`，行为与 v1.4.1 逐字相同）。**`[]` 与 `null` 同义**：网关冻结件 `matchesModel()` 对二者同判为"不限"（`src/gateway/key-pool.ts`，v1.1 口径"留空即按 upstream 继承"），本契约**不制造一个实现不了的三态** —— 空 CSV 在落库时归一化为 `NULL`，库里不会出现空串。**只读**：`PATCH /api/keys/:id` 不收该字段。生效范围见 §5「白名单口径」 |
 | `balance` | `int`(分) \| `null` | `null` = **未知**（查不到或从未录入）。前端显示"未知"，不得显示 0。`unlimited=true` 时 `null` 表示"无限"，要看 `unlimited` 才分得清（§15.6） |
 | `balanceSource` | `"manual"` \| `"template"` \| `null` | 数据来源，用于 UI 标注可信度 |
-| `tokenPlan` | 对象 \| `null` | `{ "remainingTokens": int, "expiresAt": ISO8601\|null }` |
+| `tokenPlan` | 对象 \| `null` | **v1.18.0 修订**：`{ "remainingTokens": int\|null, "totalTokens": int\|null, "expiresAt": ISO8601\|null }`。**`remainingTokens: null` = 未同步**（余量未知 ≠ 0；网关按「未知」哨兵排序，ADR-0030），**v1.18.0 起不再塌成 0** —— §3 与 `balance` 同一条纪律：**0 和 null 是两个值，前端不得渲染成同一个东西**（0 = 查到过且烧干；null = 从未同步过）。`totalTokens` = 归属账号**当前套餐**的基础 Token 总量（`supplier_account_subscriptions.basic_token_total`，按 `key_masked` 匹配本 key 掩码取**唯一**行，撞号/无归属/多套餐同掩码 → `null`，宁缺勿假）；前端据此渲染「剩余 / 总量」（如 `6.2M / 8M`），两个都 null 只渲染「未同步」 |
 | `health` | `"healthy"` \| `"cooling"` \| `"disabled"` | **网关运行态**，管理端只读。`disabled` 优先于 `cooling` |
 | `cooldownUntil` | ISO8601 \| `null` | `health=cooling` 时非空 |
 | `consecutiveFailures` | int | 连续失败次数，决定冷却档位 |
@@ -2153,7 +2155,7 @@ data: {"seq":4,"code":"RATE_LIMITED","message":"池中候选 key 并发已满，
 
 - **绝不写 `0`**：`0` 是合法余额，与"未知"严格区分（§0.2）。
 - **绝不用旧值刷新时间戳**：查失败时 `balanceUpdatedAt` 保持不动 —— 它是"最近一次**真的查到**的时刻"；把它推到"现在"等于把陈旧读数伪装成实时读数，比不显示更坏。
-- `category="token-plan"` 的 key 同理（`tokenPlan.remainingTokens` 与其 `expiresAt`）。
+- `category="token-plan"` 的 key 同理（`tokenPlan.remainingTokens` 与其 `expiresAt`）。**v1.18.0 补充**：未同步时库里该列保持 `NULL`、§3 响应透传 `null`（渲染「未同步」），**不写 0** —— 与上一行「0 是合法值」同一条纪律；套餐余量的真相源是 §15.2 `keys/sync` 的回填腿，模板腿只是辅助。
 - **刷新任务 `result.retryAfterSeconds` 与本表无关（v1.8.1）**：它是任务 `result` 的解释字段（非破坏新增，见 §3），429 仍落在"不可达 / 超时 / 非 2xx"这一行的**处置**里 —— 一个字都不写；本表零改动。
 - `balanceSource` 枚举**不变**（仍只有 `"manual"` / `"template"`）；`hintCode` **四值 → 五值**（v1.7.0，枚举新增，非破坏）—— 五值口径见 §2「失败引导字段」。
 - **本表是"写库纪律"表，不是"触发条件"表**（v1.7.0 明写）：429（**上游的与本地合成的同属一类**）落在"不可达 / 超时 / 非 2xx"这一行的**处置**里 —— **一个字都不写**，
@@ -3952,6 +3954,25 @@ spec 三条判据：新库自带、老库真被 ALTER 到、重复跑不抛 dupl
 | ⑨ | 容量口径 | 所有容量数字（`capacity` / `reserveForData` / 每轮 token 数 / §15.5 的 ≈14 min 与重开门槛）都是**「单出口」口径**：出口 > 1 时**逐出口各自成立，不得跨出口加总** |
 
 > **§15.5 连带（v1.8.0 已同批落）**：「27 个账号一轮刷新 ≈ 1 分钟」按 ⑥ 重算为 **≈14 min**（`ceil(54/4)×60s`，单出口口径），0.6s 降为账号级内层纪律，重开门槛（ADR-0017 补遗 6）登记为 §15.5 脚注。本表是那三处改动的唯一口径源。
+>
+> **v1.18.0（2026-11-02，Key 对象补归属账号与套餐总量 + `remainingTokens` 的 null 语义修订 —— 「key 管理页看不到套餐额度」的信息架构缺口）**：
+> **动机是业主原话**「前端就是没体现好，key 池分了两个但是 key 管理的余额没体现出来……key 不是和账号绑定的吗？为什么 key 管理的余额和套餐额度都没体现。还有赠送的 8M 基础额度也没体现在外面，藏的很深」。
+> 实查结论：数据后端全有（`supplier_account_keys` 台账 + `supplier_account_subscriptions` 套餐），缺的是
+> **读路径没带出来** + **NULL 塌 0**。三处改动，全在 §3 Key 对象：
+> ① **新增 `account: {id, identifier} | null`**（归属供应商账号，经 `supplier_account_keys.pooled_key_id` 反查；
+> `identifier` 与 §15.1 `SupplierAccount.identifier` 同源同形（掩码手机号/邮箱）；
+> 唯一归属才算，撞号 → `null`，与回填腿同取向）。
+> ② **`tokenPlan` 新增 `totalTokens: int | null`**（归属账号当前套餐的 `basic_token_total`，
+> 按 `key_masked` 匹配本 key 掩码取唯一行；无归属 / 撞号 / 多行 → `null`，宁缺勿假）。
+> ③ **`remainingTokens` 语义修订为 `int | null`**：v1.17.2 及之前 `repo/keys.ts` 的 `?? 0` 把
+> 「未同步」塌成 0 —— 管理面显示 0 像烧干，而网关选路对 NULL 按「未知」哨兵（UNKNOWN_PLAN_QUOTA）
+> 排在余额 key **之前**（ADR-0030），两个消费面语义分裂。**v1.18.0 起读路径透传 null**，
+> 前端渲染「未同步」，与 §3 `balance` 的「0 和 null 是两个值」纪律对齐。
+> **落库语义零变更**：写路径（`keys/sync` 回填 / 模板腿 / 手工编辑）一个字不动；
+> **零 DDL**（`SCHEMA_VERSION` 仍为 2），列表/详情在分页后按当页 key ids 批量 lookup 注入
+> （`SELECT_BASE` 不加 join，COUNT 与筛选不受影响）。消费方：Key 管理页「所属账号」列、
+> 「剩余 / 总量」展示、「未同步」徽标、按归属账号分组的「同步套餐余量」入口。
+> 其余章节与 `/v1/*` 零变更。
 >
 > **v1.17.2（2026-10-20，错误事件的 key 标识三腿补全 —— 「裸 `****` 看不出是谁」的观测缺口）**：
 > **动机是业主原话**「为什么有的错误 key 会带掩码和字母，有的错误只有 `****` 都没办法查是哪个 key 的问题」。

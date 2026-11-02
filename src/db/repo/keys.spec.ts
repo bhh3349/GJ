@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { openDatabase, type Db } from '../database.js';
-import { applyTemplateBalance, applyTemplateTokenPlan, createKey, getKey, setKeyBalance } from './keys.js';
+import { applyTemplateBalance, applyTemplateTokenPlan, createKey, getKey, listKeys, setKeyBalance } from './keys.js';
 import { createUpstream } from './upstreams.js';
 
 const dirs: string[] = [];
@@ -332,5 +332,151 @@ describe('§20.4 判定腿挂在 keys.ts 的三个落库点上', () => {
     // 触发一次判定腿：余额照旧健康（1280），若误判 token_plan 那列会当场锁上。
     setKeyBalance(db, created.id, { balance: 1280 });
     expect(latchOf(db, created.id).at).toBeNull();
+  });
+});
+
+// v1.18.0：Key 对象补归属账号 + 套餐总量 + remainingTokens 的 null 语义。
+// 数据后端全有（supplier_account_keys 台账 + supplier_account_subscriptions 套餐），
+// 这批判据钉的是**读路径**：批量 lookup 注入、撞号不猜、NULL 不塌 0。
+describe('v1.18.0 读路径：归属账号 / 套餐总量 / remainingTokens 的 null', () => {
+  it('未同步的套餐余量透传 null（不再是 ?? 0 塌成的 0）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'tf', baseUrl: 'https://tierflow.cn', supplier: 'tierflow' });
+    const created = createKey(db, { upstreamId: up.id, key: probeSecret(), category: 'token-plan' }, MASTER_KEY);
+
+    const dto = getKey(db, created.id, false);
+    expect(dto?.tokenPlan?.remainingTokens).toBeNull();
+    expect(dto?.tokenPlan?.totalTokens).toBeNull();
+    // 库里那列也确实是 NULL，不是 0 —— 判据钉的是「读路径不改写落库事实」。
+    const stored = db.prepare('SELECT token_plan_remaining AS r FROM upstream_keys WHERE id = ?').get(created.id) as {
+      r: number | null;
+    };
+    expect(stored.r).toBeNull();
+  });
+
+  it('查到过且为 0 的 key：remainingTokens 是 0 不是 null（0 和 null 仍是两个值）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'tf', baseUrl: 'https://tierflow.cn', supplier: 'tierflow' });
+    const created = createKey(
+      db,
+      { upstreamId: up.id, key: probeSecret(), category: 'token-plan', tokenPlan: { remainingTokens: 900, expiresAt: null } },
+      MASTER_KEY,
+    );
+    applyTemplateTokenPlan(db, created.id, { remainingTokens: 0, expiresAt: null });
+
+    const dto = getKey(db, created.id, false);
+    expect(dto?.tokenPlan?.remainingTokens).toBe(0);
+  });
+
+  it('账号池来的 key：带唯一归属账号与当前套餐的 basic_token_total', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'tf', baseUrl: 'https://tierflow.cn', supplier: 'tierflow' });
+    const created = createKey(
+      db,
+      { upstreamId: up.id, key: probeSecret(), category: 'token-plan', label: 'my88-主号-1' },
+      MASTER_KEY,
+    );
+
+    // 手工造台账 + 账号 + 订阅行（形状与 repo/supplier-accounts.ts 写入方一致）。
+    // 账号行带一路假凭据 BLOB 是表的「至少持有一路凭据」CHECK 要求的；X'00' 不是可识别凭据。
+    const accId = 'acc_test1';
+    db.prepare(
+      `INSERT INTO supplier_accounts (id, upstream_id, supplier, identifier, identifier_hash, status, encrypted_password, created_at, updated_at)
+       VALUES (?, ?, 'tierflow', '138****0000', 'hash1', 'active', X'00', '2026-11-02T00:00:00.000Z', '2026-11-02T00:00:00.000Z')`,
+    ).run(accId, up.id);
+    db.prepare(
+      `INSERT INTO supplier_account_keys (id, account_id, masked_key, pooled_key_id, created_at, updated_at)
+       VALUES ('sak_1', ?, '****' || substr(?, -4), ?, '2026-11-02T00:00:00.000Z', '2026-11-02T00:00:00.000Z')`,
+    ).run(accId, '****CCCC', created.id);
+    db.prepare(
+      `INSERT INTO supplier_account_subscriptions (id, account_id, sub_no, basic_token_total, basic_token_used, status, has_key, key_masked, updated_at)
+       VALUES ('sub_1', ?, 'SB1', 8000000, 1800000, 'active', 1, '****CCCC', '2026-11-02T00:00:00.000Z')`,
+    ).run(accId);
+
+    const dto = getKey(db, created.id, false);
+    expect(dto?.account).toEqual({ id: accId, identifier: '138****0000' });
+    expect(dto?.tokenPlan?.totalTokens).toBe(8_000_000);
+  });
+
+  it('同账号多套餐同掩码 → totalTokens 不猜（null）；归属账号仍是唯一', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'tf', baseUrl: 'https://tierflow.cn', supplier: 'tierflow' });
+    const created = createKey(
+      db,
+      { upstreamId: up.id, key: probeSecret(), category: 'token-plan' },
+      MASTER_KEY,
+    );
+
+    // 台账对 pooled_key_id 有部分唯一索引（ADR-0021 决策 5），「一 key 多账号」在库层不可达；
+    // 可达的歧义是**同账号**下两个订阅都挂着同一掩码（UNIQUE(account_id, sub_no) 不限 key_masked）。
+    db.prepare(
+      `INSERT INTO supplier_accounts (id, upstream_id, supplier, identifier, identifier_hash, status, encrypted_password, created_at, updated_at)
+       VALUES ('acc_x', ?, 'tierflow', '138****0000', 'hash_x', 'active', X'00', '2026-11-02T00:00:00.000Z', '2026-11-02T00:00:00.000Z')`,
+    ).run(up.id);
+    db.prepare(
+      `INSERT INTO supplier_account_keys (id, account_id, masked_key, pooled_key_id, created_at, updated_at)
+       VALUES ('sak_x', 'acc_x', '****CCCC', ?, '2026-11-02T00:00:00.000Z', '2026-11-02T00:00:00.000Z')`,
+    ).run(created.id);
+    const insertSub = db.prepare(
+      `INSERT INTO supplier_account_subscriptions (id, account_id, sub_no, basic_token_total, basic_token_used, status, has_key, key_masked, updated_at)
+       VALUES (?, 'acc_x', ?, 8000000, 0, 'active', 1, '****CCCC', '2026-11-02T00:00:00.000Z')`,
+    );
+    insertSub.run('sub_x1', 'SB1');
+    insertSub.run('sub_x2', 'SB2');
+
+    const dto = getKey(db, created.id, false);
+    expect(dto?.account?.id).toBe('acc_x');
+    expect(dto?.tokenPlan?.totalTokens).toBeNull();
+  });
+
+  it('手工建的 key（无台账行）→ account 为 null，且 totalTokens 不幻觉', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'plain', baseUrl: 'https://plain.example.com' });
+    const created = createKey(
+      db,
+      { upstreamId: up.id, key: probeSecret(), category: 'token-plan', tokenPlan: { remainingTokens: 123, expiresAt: null } },
+      MASTER_KEY,
+    );
+
+    const dto = getKey(db, created.id, false);
+    expect(dto?.account).toBeNull();
+    expect(dto?.tokenPlan?.totalTokens).toBeNull();
+    expect(dto?.tokenPlan?.remainingTokens).toBe(123);
+  });
+
+  it('listKeys 同样带出归属与总量（分页后批量注入，两页互不串行）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'tf', baseUrl: 'https://tierflow.cn', supplier: 'tierflow' });
+    const k1 = createKey(db, { upstreamId: up.id, key: probeSecret(), category: 'token-plan' }, MASTER_KEY);
+    const k2 = createKey(db, { upstreamId: up.id, key: probeSecret(), category: 'balance', balance: 1280 }, MASTER_KEY);
+
+    const accId = 'acc_page';
+    db.prepare(
+      `INSERT INTO supplier_accounts (id, upstream_id, supplier, identifier, identifier_hash, status, encrypted_password, created_at, updated_at)
+       VALUES (?, ?, 'tierflow', '138****2222', 'hash_p', 'active', X'00', '2026-11-02T00:00:00.000Z', '2026-11-02T00:00:00.000Z')`,
+    ).run(accId, up.id);
+    db.prepare(
+      `INSERT INTO supplier_account_keys (id, account_id, masked_key, pooled_key_id, created_at, updated_at)
+       VALUES ('sak_p', ?, '****CCCC', ?, '2026-11-02T00:00:00.000Z', '2026-11-02T00:00:00.000Z')`,
+    ).run(accId, k1.id);
+    db.prepare(
+      `INSERT INTO supplier_account_subscriptions (id, account_id, sub_no, basic_token_total, basic_token_used, status, has_key, key_masked, updated_at)
+       VALUES ('sub_p', ?, 'SB9', 8000000, 2666169, 'active', 1, '****CCCC', '2026-11-02T00:00:00.000Z')`,
+    ).run(accId);
+
+    const page = listKeys(db, { includeDeleted: false, page: 1, pageSize: 1 });
+    expect(page.total).toBe(2);
+    expect(page.items).toHaveLength(1);
+    const first = page.items[0]!;
+    expect(first.id).toBe(k1.id);
+    expect(first.account?.identifier).toBe('138****2222');
+    expect(first.tokenPlan?.totalTokens).toBe(8_000_000);
+    expect(first.tokenPlan?.remainingTokens).toBeNull();
+    // 第二页那把 balance key 无归属、无 tokenPlan。
+    const page2 = listKeys(db, { includeDeleted: false, page: 2, pageSize: 1 });
+    const second = page2.items[0]!;
+    expect(second.id).toBe(k2.id);
+    expect(second.account).toBeNull();
+    expect(second.tokenPlan).toBeNull();
   });
 });

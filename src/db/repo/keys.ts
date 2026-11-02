@@ -10,7 +10,7 @@
 // 调用方只有网关进程的运行态镜像（约 1s 一次批量刷写，见 ADR-0010）。
 
 import { ApiError } from '../../api/errors.js';
-import type { FailureReasonCode, KeyCategory, KeyDto, KeyHealth, Page } from '../../api/dto.js';
+import type { FailureReasonCode, KeyAccountDto, KeyCategory, KeyDto, KeyHealth, Page } from '../../api/dto.js';
 import { nowIso, utcDay } from '../../util/time.js';
 import { decryptSecret, encryptSecret, maskKey } from '../crypto.js';
 import type { Db } from '../database.js';
@@ -63,6 +63,72 @@ FROM upstream_keys k
 LEFT JOIN key_runtime r ON r.key_id = k.id
 `;
 
+/**
+ * 契约 §3（v1.18.0）：归属账号 + 套餐总量，批量 lookup 后注入 DTO。
+ *
+ * **不往 `SELECT_BASE` 加 join** —— 那张 SQL 同时服务 COUNT 与筛选（`listKeys` /
+ * `listKeyHealth` / `listKeyHealthDetail` / `listLiveKeyStates` 四处共用），
+ * 台账与订阅一对多会让 COUNT 翻倍。照 `repo/upstreams.ts` 的既有模式：
+ * 分页取完当页行，再按 key ids 做两条独立查询注入。
+ *
+ * 歧义取向与回填腿 `backfillSubscriptionTokenPlan` 逐字同构：**宁缺勿假** ——
+ * 套餐同掩码多行时回 `null`。归属侧另有 `pooled_key_id` 的**部分唯一索引**兜底
+ * （ADR-0021 决策 5：fan-out 会让同一把 key 在池里出现两遍），这里的 COUNT 判据是
+ * **防御性**的 —— 读路径不依赖写入方守约。
+ */
+interface KeyLink {
+  account: KeyAccountDto | null;
+  totalTokens: number | null;
+}
+
+function linksByKeys(db: Db, keyIds: readonly string[]): Map<string, KeyLink> {
+  const map = new Map<string, KeyLink>();
+  if (keyIds.length === 0) return map;
+  const marks = keyIds.map(() => '?').join(',');
+
+  // 归属账号：台账 pooled_key_id 反查。COUNT(DISTINCT account_id) = 1 才算唯一归属；
+  // JOIN supplier_accounts 同时挡掉硬删账号留下的孤儿台账行（账号无软删，行没就是没了）。
+  const accounts = db
+    .prepare(
+      `SELECT t.pooled_key_id AS keyId,
+              a.id            AS accountId,
+              a.identifier    AS identifier,
+              COUNT(DISTINCT t.account_id) AS n
+         FROM supplier_account_keys t
+         JOIN supplier_accounts a ON a.id = t.account_id
+        WHERE t.pooled_key_id IN (${marks})
+        GROUP BY t.pooled_key_id`,
+    )
+    .all(...keyIds) as { keyId: string; accountId: string; identifier: string; n: number }[];
+  for (const r of accounts) {
+    if (r.n !== 1) continue; // 撞号：归属歧义，不猜
+    map.set(r.keyId, { account: { id: r.accountId, identifier: r.identifier }, totalTokens: null });
+  }
+
+  // 套餐总量：按 key_masked 匹配本 key 掩码的订阅行。COUNT(*) = 1 才算唯一匹配；
+  // basic_token_total 为 NULL（上游没给）保持 null。
+  const totals = db
+    .prepare(
+      `SELECT k.id AS keyId,
+              MIN(s.basic_token_total) AS totalTokens,
+              COUNT(*)                 AS n
+         FROM upstream_keys k
+         JOIN supplier_account_keys t ON t.pooled_key_id = k.id
+         JOIN supplier_account_subscriptions s
+           ON s.account_id = t.account_id AND s.key_masked = k.masked_key
+        WHERE k.id IN (${marks})
+        GROUP BY k.id`,
+    )
+    .all(...keyIds) as { keyId: string; totalTokens: number | null; n: number }[];
+  for (const r of totals) {
+    if (r.n !== 1 || r.totalTokens === null) continue; // 多套餐同掩码 / 上游没给：不猜
+    const link = map.get(r.keyId);
+    if (link !== undefined) link.totalTokens = r.totalTokens;
+    else map.set(r.keyId, { account: null, totalTokens: r.totalTokens });
+  }
+  return map;
+}
+
 /** health 派生：disabled 优先于 cooling（契约 §3 明确指定了优先级）。 */
 function deriveHealth(row: KeyRow, nowMs: number): KeyHealth {
   if (row.enabled !== 1) return 'disabled';
@@ -70,11 +136,13 @@ function deriveHealth(row: KeyRow, nowMs: number): KeyHealth {
   return 'healthy';
 }
 
-function toDto(row: KeyRow, nowMs: number, nowDay: string): KeyDto {
+function toDto(row: KeyRow, nowMs: number, nowDay: string, link?: KeyLink | undefined): KeyDto {
   const isBalance = row.category === 'balance';
   return {
     id: row.id,
     upstreamId: row.upstream_id,
+    // v1.18.0：归属账号，`null` = 非账号池来源 / 撞号不猜（见 linksByKeys）。
+    account: link?.account ?? null,
     label: row.label,
     maskedKey: row.masked_key,
     category: row.category,
@@ -95,7 +163,13 @@ function toDto(row: KeyRow, nowMs: number, nowDay: string): KeyDto {
     balanceSource: isBalance ? row.balance_source : null,
     tokenPlan: isBalance
       ? null
-      : { remainingTokens: row.token_plan_remaining ?? 0, expiresAt: row.token_plan_expires_at },
+      : {
+          // v1.18.0：NULL **透传**（未同步 ≠ 0）。此前 `?? 0` 把"从未同步"渲染成"烧干"，
+          // 而网关选路对 NULL 按未知哨兵排在余额 key 之前（ADR-0030）—— 两个消费面语义分裂。
+          remainingTokens: row.token_plan_remaining,
+          totalTokens: link?.totalTokens ?? null,
+          expiresAt: row.token_plan_expires_at,
+        },
     // 透支锁存（§20.8）：非空即锁存。`depletedAt` / `depletedReason` 原样透出 ——
     // 前者是审计（"最早发现它付不起账的时刻"），后者告诉人"是它自己没钱还是账号欠费级联"。
     depleted: row.depleted_at !== null,
@@ -128,7 +202,7 @@ export function getKey(db: Db, id: string, includeDeleted: boolean): KeyDto | nu
   if (!row) return null;
   if (row.deleted_at !== null && !includeDeleted) return null;
   const ctx = nowContext();
-  return toDto(row, ctx.nowMs, ctx.nowDay);
+  return toDto(row, ctx.nowMs, ctx.nowDay, linksByKeys(db, [row.id]).get(row.id));
 }
 
 export interface ListKeysQuery {
@@ -202,8 +276,12 @@ export function listKeys(db: Db, query: ListKeysQuery): Page<KeyDto> {
     .all(...params, query.pageSize, (query.page - 1) * query.pageSize) as KeyRow[];
 
   const ctx = nowContext();
+  const links = linksByKeys(
+    db,
+    rows.map((r) => r.id),
+  );
   return {
-    items: rows.map((r) => toDto(r, ctx.nowMs, ctx.nowDay)),
+    items: rows.map((r) => toDto(r, ctx.nowMs, ctx.nowDay, links.get(r.id))),
     total,
     page: query.page,
     pageSize: query.pageSize,
@@ -426,7 +504,7 @@ export function updateKey(db: Db, id: string, patch: UpdateKeyInput): KeyDto {
 
   if (sets.length === 0) {
     const ctx = nowContext();
-    return toDto(current, ctx.nowMs, ctx.nowDay);
+    return toDto(current, ctx.nowMs, ctx.nowDay, linksByKeys(db, [current.id]).get(current.id));
   }
 
   sets.push('revision = revision + 1', 'updated_at = ?');
@@ -465,7 +543,7 @@ export function updateKey(db: Db, id: string, patch: UpdateKeyInput): KeyDto {
     after = reread;
   }
   const ctx = nowContext();
-  return toDto(after, ctx.nowMs, ctx.nowDay);
+  return toDto(after, ctx.nowMs, ctx.nowDay, linksByKeys(db, [after.id]).get(after.id));
 }
 
 /**

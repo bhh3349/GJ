@@ -160,6 +160,32 @@ reserve 条件不看 `maxAttempts≥2`（用例 8 红）。
 
 1. 本 ADR 提交（`dev/gateway-m3`，只提交 ADR，不写实现）——**已完成**。
 2. Chief 落契约 **v1.20.0**：变更条 + §16.3（决策 4 文本逐字）+ §3 `tokenPlan.expiresAt` 补参与排序句 +
-   `docs/dev-constraints.md` §三.6 + `adr-index.md` 0044 行 + `contract-index.md` 行号核对。
+   `docs/dev-constraints.md` §三.6 + `adr-index.md` 0044 行 + `contract-index.md` 行号核对——**已全部落地**。
 3. 路由者实现：`key-pool.ts` 六维键序 + `engine.ts` 类目预算 + 判据 1-10 + 变异验证，四闸 + `test:gateway`
    全绿后回执新 tip 与空 `git status --porcelain`。
+
+## 附记：§16.2 pre-first-chunk 识别窗（2026-11-03 实现批次，部署机产物）
+
+业主当天追加一件（**不属于契约面变更**）：`/v1/*` 数据面补齐 **§16.2 的 200 + `success:false` 识别窗**。
+契约 §16.2 早已写明该窗（`:3546` 段），实现它不算漂移；此前只在 `src/supplier/tierflow.ts`（账号面）实现，
+`/v1/*` 数据面零实现 —— 若上游真用 200 表达业务错误，死 key 会被判成"成功调用"并永久被选中。
+
+- **判据**（与账号面 `decodeEnvelope().success` 同源）：`status === 200 && payload.success === false`，
+  只认**显式 `false`**；缺省 / 非布尔 / 非对象一律不动（防御性窗：宁漏判，不误杀掉正常响应）。
+- **落点**：非流式路径 `response.text()` 之后、`reportSuccess` 之前 —— 此刻**一个字节都没回客户端**，
+  仍在 pre-first-chunk 窗内；判定失败按既有 Terminating 语义处置（`reportFailure('UPSTREAM_ERROR')` 短冷却
+  + 换 key，全灭则既有 502），绝不 `reportSuccess`、不记用量。
+- **未覆盖（诚实边界）**：流式路径不做首块 peek —— SSE 首帧是 `data:` 文本、信封判据天然不命中，
+  且 §16.1.2 实测数据面错误全为非 2xx；该窗在流式侧保持防御性缺省。
+- **枚举面零新增**：失败因由落 5 值枚举内的 `UPSTREAM_ERROR`（`classify.ts` 状态码分支一行未动）。
+  §12.1 的 `attemptTrail[].reason` 是 `failureReason` 枚举、单项 ≤20 字符，「UPSTREAM_BODY_FAILURE」
+  超界，故它只是本段的**语义名**，不落 trail —— 后人勿据此加第 6 个枚举值。
+- **判据**：`engine.spec.ts` 新增 `§16.2 pre-first-chunk 识别窗` 四例（命中换 key 且不记用量 /
+  `success:true` 不误杀 / 无 `success` 字段原样成功 / 全灭 502）；变异验证「关掉识别窗」两例变红。
+
+## 判据实现清单（与上节 1-10 对应；engine 侧实际 11 例）
+
+`key-pool.spec.ts` 4 例 + `engine.spec.ts` 11 例（判据 5-10 之外，补一例「纯套餐池不预留」守住
+`reserve` 的余额前提）。**变异验证 7 项全部按预期变红后还原**：删类目键 / 删到期键 / `reserve=0` /
+`reserve=2` / `reserve` 不看 `maxAttempts≥2` / `reserve` 不看余额候选存在 / 关闭 §16.2 窗。
+

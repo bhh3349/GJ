@@ -42,6 +42,19 @@
   用 `deploy/snapshot.cjs`（只读连接 + `VACUUM INTO`）。
 - **`node -e` 别塞进 `sh -c` 里**：引号在 sh → docker → node 三层之间必炸
   （实测 `SyntaxError: Invalid regular expression flags`）。落成 `.cjs` 文件挂进容器跑。
+- **生产部署已落地（2026-11-03）**：阿里云成都轻量应用服务器（SWAS）`47.108.194.235`，
+  main `75f3e61` → 镜像 `57076991e749`（432MB），部署目录 `/root/sub-gateway`（`.env` 600），
+  卷 `sub-gateway_sub-gateway-data`。暴露面 = 业主拍板 **C：4101 裸公网 + 强密码**
+  （`COOKIE_SECURE=false` 必配，设 true 会话 cookie 发不出去，登录假死）；网关面 4100 公网。
+- **外部可达性唯一闸是云控制台防火墙**（SWAS → 防火墙），别在服务器本机排查：
+  `ufw` inactive、iptables INPUT 全 ACCEPT，但控制台只放 22/80/443 —— 4100/4101 一律
+  DROP。判别法（外部探）：80/443 = **REFUSED**（放行但宿主无监听），4100/4101 与随机端口
+  = **TIMEOUT**（防火墙丢包）。加规则只能在控制台点，SSH 代不了。宿主自己 curl 自己的
+  公网 IP 也不通（云上 hairpin NAT 本来就不通），别拿这个当防火墙证据。
+- **首个网关 key 的一次性日志在容器启动日志里**（`docker logs` grep「仅此一次」）；
+  值不进任何回执/聊天/记忆，业主自行读取或丢弃后到管理面「用户组」重置。
+- **手发 curl 验管理面**：写请求必须带 `X-Requested-With`（CSRF 三层校验，ops-manual §2），
+  缺了回 403 `CSRF_REJECTED` —— 那是闸门在工作，别误判成鉴权坏。
 - **裸 IP 部署**：compose 缺省把管理面 `4101` 开到 `0.0.0.0` —— 那是带会话 cookie 的完整
   控制面。**启动前**就改成 `127.0.0.1:${PORT_ADMIN:-4101}:4001`，远程走 SSH 隧道
   （`ssh -N -L 4101:127.0.0.1:4101 root@<host>`）。裸 IP + http 时 `COOKIE_SECURE=false`。

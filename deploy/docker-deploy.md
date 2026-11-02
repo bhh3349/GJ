@@ -298,6 +298,15 @@ compose **原文件** `--no-build` 起实例（镜像预打 `sub-gateway:local` 
 残留的同名旧镜像不算数（见 §0 末条）—— 2026-11-03 那份验证镜像已从机上删除，只剩
 `node:22-bookworm-slim` 基座，下次部署重新 `build`。
 
+**生产部署实录（2026-11-03，同机）**：main `75f3e61` → `git archive` 上下文 + 宿主
+`pnpm web:build` → `docker build --build-arg NPM_BINARY_MIRROR=…` → 镜像 `57076991e749`
+（432MB）→ `docker compose up -d --no-build` **20s `(healthy)`**；§7 四项 + 管理面
+登录→会话→鉴权端点→登出**全回路实测过**（curl 写请求必须带 `X-Requested-With`，
+缺了 403 `CSRF_REJECTED`，见 references/ops-manual §2）。暴露面 = 业主拍板 **C**（4101
+裸公网 + 强密码，`COOKIE_SECURE=false`）。**外部可达性卡在云控制台防火墙**：只放
+22/80/443，4100/4101 是 DROP —— 加规则只能在 SWAS 控制台点（判别法与证据见
+references/deploy-ops.md 现场事实），服务器本机 ufw/iptables 都没拦，别在那排查。
+
 | # | 项 | 实测结果 |
 |---|---|---|
 | ① | 体积对比（同机同基座） | `docker images`：单阶段 **922MB → multi-stage 432MB**（基座 329MB；基座之上的部分 593MB → 103MB）。`docker save \| gzip`：**209MB → 94MB**（三包实际传输量）。旧文档的"235MB"是另一台机器的口径，**别跨机比绝对值** |

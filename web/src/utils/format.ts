@@ -111,6 +111,33 @@ export function formatRelative(value: string | null | undefined): string {
   return `${Math.floor(abs / 86_400_000)} 天前`;
 }
 
+/**
+ * **未来时刻**的相对时间，用于「到期 / 下次自动同步」这类**还没发生**的时间点。
+ *
+ * 为什么不复用 `formatRelative`：它是过去式专用（`Math.abs(now - t)` + 一律拼「前」），
+ * 喂一个未来的到期时刻会得到「29 天前」—— 2026-11-03 业主截的就是这一格：套餐明明还剩
+ * 29 天，台账读起来像 29 天前刚过期。`abs` 抹掉了方向，再拼死一个「前」，两处都对不上。
+ *
+ * 口径（与 `formatRelative` 同构，只是方向分开）：
+ * - 未来 >24h →「还剩 N 天」，≤24h →「还剩 N 小时」（向上取整，最小值 1）；
+ * - 过去同理 →「已过期 N 天 / N 小时」；
+ * - 非法 / 缺失 → `—`（不是「已过期」：没拿到时刻不等于过期了）。
+ *
+ * 精确时刻由调用方放进 tooltip（`formatIso`）—— 这一格只回答"还剩多久"。
+ */
+export function formatUntil(value: string | null | undefined): string {
+  if (!value) return '—';
+  const parsed = dayjs(value);
+  if (!parsed.isValid()) return '—';
+  const diffMs = parsed.valueOf() - Date.now();
+  const abs = Math.abs(diffMs);
+  const span =
+    abs >= 86_400_000
+      ? `${Math.floor(abs / 86_400_000)} 天`
+      : `${Math.max(1, Math.ceil(abs / 3_600_000))} 小时`;
+  return diffMs >= 0 ? `还剩 ${span}` : `已过期 ${span}`;
+}
+
 export function formatLatency(ms: number | null | undefined): string {
   if (ms === null || ms === undefined) return '—';
   return ms < 1000 ? `${ms} ms` : `${(ms / 1000).toFixed(2)} s`;

@@ -44,7 +44,7 @@ import { RemainingBar } from '@/components/RemainingBar';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { SubscriptionExpiryTimeline } from '@/pages/upstreams/SubscriptionExpiryTimeline';
 import { tokens } from '@/theme/tokens';
-import { formatCents, formatCount, formatIso, formatRelative, formatTokens } from '@/utils/format';
+import { formatCents, formatCount, formatIso, formatTokens, formatUntil } from '@/utils/format';
 import { subscriptionRemainingCents } from '@/utils/poolFunds';
 
 const { Text } = Typography;
@@ -278,9 +278,11 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
       dataIndex: 'endAt',
       width: COLUMN_WIDTHS.expiry,
       render: (value: string | null) => (
+        // 到期是**未来**时刻：`formatRelative` 是过去式专用（`Math.abs` + 一律拼「前」），
+        // 复用它会把「还剩 29 天」显示成「29 天前」—— 2026-11-03 业主截图抓到的就是这个。
         <Tooltip title={value ? formatIso(value) : '上游未给到期时间 —— 不按「永久」渲染，也不按「已过期」渲染。'}>
           <Text type="secondary" style={{ ...oneLine, fontSize: 12 }}>
-            {value ? formatRelative(value) : '未提供'}
+            {value ? formatUntil(value) : '未提供'}
           </Text>
         </Tooltip>
       ),

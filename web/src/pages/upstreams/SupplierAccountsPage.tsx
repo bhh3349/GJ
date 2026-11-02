@@ -125,7 +125,7 @@ import { SupplierBatchDrawer } from '@/pages/upstreams/SupplierBatchDrawer';
 import { SupplierCreateKeysModal, SupplierImportModal } from '@/pages/upstreams/SupplierModals';
 import { SupplierSubscriptionsTable } from '@/pages/upstreams/SupplierSubscriptionsTable';
 import { tokens } from '@/theme/tokens';
-import { formatCents, formatCount, formatIso, formatRelative } from '@/utils/format';
+import { formatCents, formatCount, formatIso, formatRelative, formatUntil } from '@/utils/format';
 import {
   accountHealthOf,
   buildPoolFilters,
@@ -273,9 +273,10 @@ const SUBSCRIPTION_COLUMNS: ColumnsType<SupplierSubscription> = [
     dataIndex: 'endAt',
     width: 110,
     render: (value: string | null) => (
+      // 未来时刻用 `formatUntil`（`formatRelative` 只答过去，会把「还剩 29 天」说成「29 天前」）。
       <Tooltip title={value ? formatIso(value) : '上游未给到期时间 —— 不按「永久」渲染'}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          {value ? formatRelative(value) : '未提供'}
+          {value ? formatUntil(value) : '未提供'}
         </Text>
       </Tooltip>
     ),

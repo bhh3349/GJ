@@ -61,7 +61,7 @@ import { BalanceModal, KeyFormModal } from '@/pages/keys/KeyModals';
 import { KeyBalanceSelfTest } from '@/pages/keys/KeyBalanceSelfTest';
 import { useLive } from '@/realtime/useLive';
 import { tokens } from '@/theme/tokens';
-import { formatCompact, formatIso, formatRelative, formatTokens, formatTokensShort } from '@/utils/format';
+import { formatCents, formatCompact, formatIso, formatRelative, formatTokens, formatTokensShort, formatUntil } from '@/utils/format';
 
 const { Text } = Typography;
 
@@ -87,16 +87,20 @@ const EMPTY_FILTERS: Filters = {
 };
 
 /**
- * 「余额 / 套餐」列的套餐侧（契约 §3 v1.18.0）。
+ * 「余额 / 套餐」列的套餐侧（契约 §3 v1.18.0 / v1.22.0）。
  *
  * 三个取值**必须长得不一样**（§0.2「未知 ≠ 0」在这张表上的落点）：
  * - `remainingTokens === null` → 「未同步」徽标：**从未查到过**，不是烧干。tooltip 顺手指明
- *   真相源（账号池「同步 key 与套餐余量」= 回填腿），让人找得到下一步。
+ *   真相源（账号池「同步 key 与套餐余量」「刷新余额」= 回填腿，v1.22.0 起刷新也回填），让人找得到下一步。
  * - `remainingTokens === 0` → 「0」并给烧干色：查到过、确实没了。与徽标同列出现时一眼可分。
  * - 有值 → `6.2M / 8M`；`totalTokens === null`（无归属 / 撞号 / 上游没给）只给 `6.2M / —`。
  *   两个都 null 时只画「未同步」，不画「— / —」的空壳 —— 那读起来像"两个字段都坏了"，
  *   而事实只是"还没同步"。
- * 到期行沿用旧口径；完整中文量级读数（`800 万（8.0M）`）放 tooltip，格子只留紧凑形。
+ *
+ * **第二行 = 钱额度面**（v1.22.0 / ADR-0046）：`¥29.90 · 已用 ¥6.42`。台账里有这一面，
+ * 本页此前只有 token 数，业主读成"数据没显示对"。两格**各自透传**（token 未知不拖累金额），
+ * 所以「未同步」的行只要台账给了钱额度也照画；两格都 null 才不画这一段。
+ * 格子最多两行：到期用 `formatUntil` 的短形（「还剩 29 天」）与钱面同行，精确时刻进 tooltip。
  */
 function TokenPlanCell({ row }: { row: UpstreamKey }) {
   const plan = row.tokenPlan;
@@ -108,10 +112,20 @@ function TokenPlanCell({ row }: { row: UpstreamKey }) {
   const remaining = plan.remainingTokens;
   const total = plan.totalTokens;
   const exhausted = remaining === 0;
+  // 钱额度面：`null` = 台账没给出（无归属 / 撞号 / 上游没给），照 §0.2 画「—」不是 0。
+  const moneyVisible = plan.amountTotalCents !== null || plan.amountUsedCents !== null;
+  const moneyShort = moneyVisible
+    ? `${formatCents(plan.amountTotalCents)} · 已用 ${formatCents(plan.amountUsedCents)}`
+    : null;
+  const moneyTip = moneyVisible
+    ? ` · 台账套餐额度 ${formatCents(plan.amountTotalCents)}、已用 ${formatCents(plan.amountUsedCents)}`
+    : '';
+  const expiryShort = plan.expiresAt ? formatUntil(plan.expiresAt) : '无到期时间';
+  const secondLine = [moneyShort, expiryShort].filter(Boolean).join(' · ');
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
       {remaining === null ? (
-        <Tooltip title="这把 key 的套餐余量还没同步过（余量未知 ≠ 0）。真相源是账号池的「同步 key 与套餐余量」，或本页行内的「同步套餐余量」">
+        <Tooltip title="这把 key 的套餐余量还没同步过（余量未知 ≠ 0）。账号池的「同步 key 与套餐余量」和「刷新余额」都会回填余量，本页行内的「同步套餐余量」也可以，不必专门手点">
           <Tag
             bordered={false}
             style={{
@@ -126,7 +140,7 @@ function TokenPlanCell({ row }: { row: UpstreamKey }) {
         </Tooltip>
       ) : (
         <Tooltip
-          title={`${formatTokens(remaining)}${total === null ? '' : ` / ${formatTokens(total)}`}${plan.expiresAt ? ` · 到期 ${formatIso(plan.expiresAt)}` : ''}`}
+          title={`${formatTokens(remaining)}${total === null ? '' : ` / ${formatTokens(total)}`}${moneyTip}${plan.expiresAt ? ` · 到期 ${formatIso(plan.expiresAt)}` : ''}`}
         >
           <Text
             style={{
@@ -141,7 +155,7 @@ function TokenPlanCell({ row }: { row: UpstreamKey }) {
         </Tooltip>
       )}
       <Text type="secondary" style={{ fontSize: 12 }}>
-        {plan.expiresAt ? `到期 ${formatIso(plan.expiresAt)}` : '无到期时间'}
+        {secondLine}
       </Text>
     </div>
   );

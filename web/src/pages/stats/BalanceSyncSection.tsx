@@ -25,7 +25,7 @@ import { BalanceDriftPanel } from '@/pages/stats/BalanceDriftPanel';
 import { Panel } from '@/components/Panel';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { tokens } from '@/theme/tokens';
-import { formatIso, formatPercent, formatRelative } from '@/utils/format';
+import { formatIso, formatPercent, formatRelative, formatUntil } from '@/utils/format';
 
 // echarts 只在需要时下载；`BalancePanel` 那类纯表格不受影响。
 const BalanceTrendChart = lazy(() => import('@/pages/stats/BalanceTrendChart'));
@@ -135,8 +135,9 @@ export function BalanceSyncSection({ upstreamId, showDrift = true }: BalanceSync
             <StatLine label="下次计划">
               {data.nextRunAt ? (
                 <Tooltip title={formatIso(data.nextRunAt)}>
-                  {/* 含抖动的计划时刻 —— 直接显示后端给的值，前端不自算。 */}
-                  <span>{formatRelative(data.nextRunAt)}</span>
+                  {/* 含抖动的计划时刻 —— 直接显示后端给的值，前端不自算。
+                      「下次计划」是**未来**时刻：formatRelative 是过去式专用，会把它读成「N 分钟前」。 */}
+                  <span>{formatUntil(data.nextRunAt)}</span>
                 </Tooltip>
               ) : (
                 <Tooltip title="自动同步已关闭（nextRunAt=null），不是「还没排到」。">

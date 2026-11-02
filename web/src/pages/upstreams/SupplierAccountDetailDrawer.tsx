@@ -50,7 +50,7 @@ import { RemainingBar } from '@/components/RemainingBar';
 import { confirmManualRefresh } from '@/components/ManualRefreshConfirm';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
 import { tokens } from '@/theme/tokens';
-import { formatCents, formatCount, formatIso, formatRelative } from '@/utils/format';
+import { formatCents, formatCount, formatIso, formatRelative, formatUntil } from '@/utils/format';
 import { subscriptionRemainingCents, subscriptionRemainingTail } from '@/utils/poolFunds';
 import { SCRAP_REASON_TEXT } from '@/utils/supplierHealth';
 
@@ -345,9 +345,11 @@ export function SupplierAccountDetailDrawer({
       dataIndex: 'endAt',
       width: 110,
       render: (value: string | null) => (
+        // 到期是**未来**时刻，必须用 `formatUntil`：`formatRelative` 是过去式专用，
+        // 会把「还剩 29 天」读成「29 天前」（业主 2026-11-03 截的就是这一格）。
         <Tooltip title={value ? formatIso(value) : '上游未给到期时间 —— 不按"永久"渲染'}>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            {value ? formatRelative(value) : '未提供'}
+            {value ? formatUntil(value) : '未提供'}
           </Text>
         </Tooltip>
       ),

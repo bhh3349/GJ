@@ -410,10 +410,19 @@ export type BalanceSource = 'manual' | 'template';
  *
  * `totalTokens` = 归属账号**当前套餐**的基础 Token 总量（`basic_token_total`）；无归属 /
  * 撞号 / 上游没给 → `null`，渲染「—」而不是 0。
+ *
+ * **v1.22.0（ADR-0046）加两格钱额度**：`amountTotalCents` / `amountUsedCents`（**分**），来自
+ * 同一份套餐台账的 `amount_total_cents` / `amount_used_cents`，与 `totalTokens` **同一唯一匹配条件**。
+ * 三格**各自透传**：token 未知不拖累金额、金额未知不拖累 token，`null` = 无归属 / 撞号 / 上游没给。
+ * 为什么要它们：台账里有「套餐 ¥29.90」，Key 管理页只有 token 数，业主读成"数据没显示对"。
  */
 export interface TokenPlan {
   remainingTokens: number | null;
   totalTokens: number | null;
+  /** v1.22.0：套餐**钱额度**总额（分）。`null` = 未知，不是 0。 */
+  amountTotalCents: number | null;
+  /** v1.22.0：套餐**钱额度**已用（分）。`null` = 未知，不是 0。 */
+  amountUsedCents: number | null;
   expiresAt: Iso8601 | null;
 }
 

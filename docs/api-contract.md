@@ -2414,7 +2414,7 @@ v1.14.0 起写侧同样走上游真值：比值由调用方给，建 key 腿**�
 | `PATCH` | `/api/supplier-accounts/:id` | 改账号（**本版只收 `egressId` + `revision`**，见下） → `200 SupplierAccount`（§16.7 Tier 2 / v1.13.0） |
 | `DELETE` | `/api/supplier-accounts/:id?force=false` | 删除账号（见下） |
 | **`POST`** | **`/api/supplier-accounts/:id/undeplete`** | **v1.17.0 新增**（§20.5）：**清账号透支锁 + 清其名下 `reason="account"` 的 key 锁**（同时 `enabled=1`） → `200 SupplierAccount`。**不带 `revision`**（它不是改写一个编辑值，是解除一个自动置位的标记）；未知 / 已删账号 → `404 NOT_FOUND`。审计 `supplier.account.undeplete` |
-| **`POST`** | **`/api/supplier-accounts/undeplete`** | **v1.21.0 新增**（§20.5 / ADR-0045）：**批量**解除透支，body `{upstreamId?, ids?}` → `202 {taskId}`，任务类型 `supplier_undeplete`，逐行结果复用 §15.3 `SupplierBatchResult`（`action` 新增第 8 个值 **`undeplete`**）。逐行语义 = 上面单账号版**逐字复用**（清账号锁 + 清名下 `reason="account"` 的 key 锁，不动 `"balance"` 锁）；`ids` 省略 = 该上游全部账号；单账号不存在落 `NOT_FOUND` 行、**不让整批失败**（v1.18.2 `oneOrItem` 同一条纪律）。审计 `supplier.undeplete`（`detail` 只放计数） |
+| **`POST`** | **`/api/supplier-accounts/undeplete`** | **v1.21.0 新增**（§20.5 / ADR-0045）：**批量**解除透支，body `{upstreamId, ids?}`（`upstreamId` **必填**；缺 / 类型错 → `422`，上游不存在 → `404 NOT_FOUND`）→ `202 {taskId}`，任务类型 `supplier_undeplete`，逐行结果复用 §15.3 `SupplierBatchResult`（`action` 新增第 8 个值 **`undeplete`**）。逐行语义 = 上面单账号版**逐字复用**（清账号锁 + 清名下 `reason="account"` 的 key 锁，不动 `"balance"` 锁）；`ids` 省略 = 该上游全部账号；**点名的 id 不存在则静默略过**（不进 `items`、不让整批失败 —— 与 `refresh` / `import` 的 `resolveTargets` 同口径，通常是刚被删掉）；`ids` 与 `upstreamId` 一起给时**只认 `upstreamId` 名下的账号**，归属对不上整批拒绝（地址来自该上游 baseUrl，不能拿 A 的会话打 B）。审计 `supplier.undeplete`（`detail` 只放计数） |
 
 > **上表是两家共用的端点集**（v1.16.0；v1.16.4 增加 `import-sessions`）。**逐端点对第二家
 > TokenRhythm 的差异**，判据全在 §15.14 能力表：① `keys` 拒收 `unlimited:false` / 非空
@@ -4055,6 +4055,8 @@ spec 三条判据：新库自带、老库真被 ALTER 到、重复跑不抛 dupl
 > 与 `totalTokens` 同一唯一匹配条件、三格各自透传。只给 token 会让「台账有 ¥29.90、Key 管理什么都没有」被读成没同步。
 > ③ **前端到期列的相对时间**必须换成到期专用格式化（`formatRelative` 只会说「N 天前」）：
 > 未来时间读作「还剩 N 天」，过去读作「已过期 N 天」，精确时刻进 tooltip —— 否则「还有 29 天」会显示成「29 天前」。
+> ④ **§15.2 批量解除行订正**（画师复核时发现，以**实现**为准）：`upstreamId` **必填**（缺 → `422`、上游不存在 → `404`），
+> 点名的 `id` 不存在**静默略过**（不落 `NOT_FOUND` 行、不进 `items`）。原文写的「可选」与「落 NOT_FOUND 行」都是笔误。
 > 零 DDL、零端点新增、零枚举变更。
 >
 > **v1.21.0（2026-11-03，§20.6 账号级连坐收窄 + 批量解除透支 —— 业主现场反馈「有套餐余额还是透支了，还禁止我全部 key」）**：

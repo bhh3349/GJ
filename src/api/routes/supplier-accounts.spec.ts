@@ -676,7 +676,7 @@ describe('删账号（§15.2：`force` 的语义与删上游**不同**）', () =
     expect(countOf(h, "SELECT COUNT(*) AS n FROM audit_log WHERE action = 'supplier.account.delete'")).toBe(0);
   });
 
-  it('force=true → 204：账号/套餐/台账行消失，**池内 key 一行不动**', async () => {
+  it('force=true → 204：账号/套餐/台账行消失，**名下池内 key 一并软删**（v1.19.0 强绑定）', async () => {
     const h = await setup();
     const up = createUpstream(h.db, { name: 'up-a', baseUrl: 'https://a.example.com' });
     const acc = seedAccount(h.db, up.id);
@@ -686,7 +686,7 @@ describe('删账号（§15.2：`force` 的语义与删上游**不同**）', () =
     // 种数据本身就会写 change_log（建上游、建 key 各一条），所以判据是**差值**而不是绝对值：
     // 断言 0 等于在断言"库里从没建过任何东西"，那是另一件事，且会随 fixture 变化而误报。
     const before = countOf(h, 'SELECT COUNT(*) AS n FROM change_log');
-    // 「这把 key 的归属变更」同样按**差值**判：bindKey 自己就发过一条，绝对值会跟着 fixture 漂。
+    // 「这把 key 的删除」同样按**差值**判：bindKey 自己就发过一条，绝对值会跟着 fixture 漂。
     const beforeKeyChanges = countOf(
       h,
       "SELECT COUNT(*) AS n FROM change_log WHERE entity = 'key' AND entity_id = ?",
@@ -699,17 +699,28 @@ describe('删账号（§15.2：`force` 的语义与删上游**不同**）', () =
     expect(countOf(h, 'SELECT COUNT(*) AS n FROM supplier_accounts')).toBe(0);
     expect(countOf(h, 'SELECT COUNT(*) AS n FROM supplier_account_subscriptions')).toBe(0);
     expect(countOf(h, 'SELECT COUNT(*) AS n FROM supplier_account_keys')).toBe(0);
-    // 这条是本节的判据：key 还在池里、还没软删。删了它，网关下一轮快照就少一把可用 key，
-    // 客户端开始报"没有可用 key"——**删除账号的动作打穿了流量**。
-    expect(countOf(h, 'SELECT COUNT(*) AS n FROM upstream_keys WHERE id = ? AND deleted_at IS NULL', keyId)).toBe(1);
 
-    // 解绑要发 change_log（ADR-0021 决策 5）：解绑不改 upstream_keys 的列，但改的是网关快照里的
-    // **归属** —— 那把 key 从"账号代表其余额"变回"自己就是一份钱"，出口也从账号的变回宿主的。
-    // 快照只认 change_log，漏发不会报错，只会让网关那边这笔归属永远不更新。绑着一把 key ⇒ 多一条。
+    // v1.19.0（ADR-0043 决策 4）推翻了本节此前的「池内 key 一行不动」：
+    // 业主要的是**强绑定**（账号删了 key 也没意义 —— 额度/套餐/余额全在账号那边）。
+    // 但仍是**软删**：行留着给 usage_logs 的历史外键落点（同 deleteKey）。
+    expect(countOf(h, 'SELECT COUNT(*) AS n FROM upstream_keys WHERE id = ?', keyId)).toBe(1);
+    const key = h.db.prepare('SELECT enabled, deleted_at FROM upstream_keys WHERE id = ?').get(keyId) as {
+      enabled: number;
+      deleted_at: string | null;
+    };
+    expect(key.deleted_at).not.toBeNull();
+    expect(key.enabled).toBe(0);
+
+    // 软删要发 change_log，且**语义是 'delete'**（网关据此把候选里那几把摘掉）。
+    // 旧口径发的是 'update'（只改归属、key 还在）—— 发的种类错了，网关会以为它还在。
     expect(countOf(h, 'SELECT COUNT(*) AS n FROM change_log')).toBe(before + 1);
     expect(
       countOf(h, "SELECT COUNT(*) AS n FROM change_log WHERE entity = 'key' AND entity_id = ?", keyId),
     ).toBe(beforeKeyChanges + 1);
+    const lastChange = h.db
+      .prepare("SELECT op FROM change_log WHERE entity = 'key' AND entity_id = ? ORDER BY seq DESC LIMIT 1")
+      .get(keyId) as { op: string } | undefined;
+    expect(lastChange?.op).toBe('delete');
 
     const audit = h.db
       .prepare("SELECT target_id, detail FROM audit_log WHERE action = 'supplier.account.delete'")
@@ -757,7 +768,7 @@ describe('删账号（§15.2：`force` 的语义与删上游**不同**）', () =
     expect((await del(h, acc)).status).toBe(404);
   });
 
-  it('删完之后 key 回到"自己就是一份钱"那一格（解绑而不是删除的全部意义）', async () => {
+  it('删完之后那把 key 不再计入 `keysBalance`（软删即退出统计口径）', async () => {
     const h = await setup();
     const up = createUpstream(h.db, { name: 'up-a', baseUrl: 'https://a.example.com' });
     const acc = seedAccount(h.db, up.id);
@@ -796,9 +807,11 @@ describe('删账号（§15.2：`force` 的语义与删上游**不同**）', () =
 
     await del(h, acc, '?force=true');
 
-    // 解绑后它带着**已有的** balance 回到 keysBalance —— 钱没有消失，只是换了归属口径
-    expect((await upstreamOf()).keysBalance).toBe(5000);
-    expect((await upstreamOf()).totalBalance).toBe(5000);
+    // v1.19.0 起是**软删**（ADR-0043 决策 4），不再是解绑：那把 key 已退出候选与统计，
+    // 所以它的 5000 分**不会**回到 keysBalance。这正是业主"强绑定"的代价，写在这里当锚 ——
+    // 一旦有人把它改回"解绑保留"，这条会红，提醒他去看 ADR-0043。
+    expect((await upstreamOf()).keysBalance).toBeNull();
+    expect((await upstreamOf()).totalBalance).toBeNull();
   });
 });
 

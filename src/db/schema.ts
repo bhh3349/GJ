@@ -380,6 +380,17 @@ CREATE TABLE IF NOT EXISTS supplier_accounts (
   -- 同 upstream_keys：只由余额刷新落库时置位，只有人工 undeplete 能清（§20.5）。
   depleted_at        TEXT,
   depleted_reason    TEXT CHECK (depleted_reason IS NULL OR depleted_reason IN ('balance','account')),
+  -- 废号池（v1.19.0 / 契约 §21 / ADR-0043）。判据唯一实现在 src/db/scrap.ts：
+  --   有效套餐余量 < 1 **且** 账号余额 < 1 ⇒ 废；套餐已过期时套餐余量按 0 计（过期归零）。
+  -- 与上方 depleted 的关系（两者**不是**同一件事，别合并）：
+  --   depleted = "这钱包付不起账"，只锁存、绝不碰 enabled（§20.5 纪律 2）；
+  --   scrapped = "这个号没价值了"，除锁存之外**还要把名下 key 的 enabled 置 0**（业主原话
+  --   "该账号的 key 也全部停用"）。两条保险各管一面：锁存让网关不选它，enabled=0 让管理面
+  --   与批量启用也不把它放回来（批量 enable 不动 depleted_at，见 §20.5）。
+  -- 粘性同 §20.3：只置位、只由人工 POST /api/supplier-accounts/:id/unscrap 清。
+  -- （本段在模板串里，不许出现反引号。）
+  scrapped_at        TEXT,
+  scrap_reason       TEXT CHECK (scrap_reason IS NULL OR scrap_reason IN ('plan_exhausted','plan_expired')),
   -- 该账号站点自己的换算比（/api/user/self → data.quota_per_unit）与读到它的时刻。
   -- （本段不写反引号：它在模板字符串里，反引号会当场截断整段 DDL。）
   -- **审计项 D**：createToken 一度写死 DEFAULT_QUOTA_PER_UNIT（500000），而 §15.1
@@ -731,6 +742,26 @@ export function migrate(db: SqliteDatabase): void {
     ] as const) {
       if (!hasColumn(db, 'gateway_error_events', column)) {
         db.exec(`ALTER TABLE gateway_error_events ADD COLUMN ${column} ${decl}`);
+      }
+    }
+  })();
+
+  // v1.19.0 / ADR-0043：废号池两列（supplier_accounts）。**纯加列**，SCHEMA_VERSION 不递增。
+  //
+  // 同前几批：表在跑着的库里早已存在，只改上面 DDL 文本是空操作，必须真发 ALTER；
+  // 判据 `hasColumn()`（ADD COLUMN 不幂等，而这段跑在每次 openDatabase() 里）。
+  //
+  // 可空、无默认：老行 NULL = 不在废号池，与加列前逐字相同 —— 部署后不存在"一夜之间
+  // 全库进废池"的中间态，判定只在**下一轮余额刷新 / 套餐同步**读数时逐个发生。
+  // ALTER 加**裸 TEXT** 不带 CHECK（同 ADR-0041 已知边界 6）：枚举保证由写路径
+  // （src/db/scrap.ts 的 ScrapReason 类型）承担。
+  db.transaction(() => {
+    for (const [column, decl] of [
+      ['scrapped_at', 'TEXT'],
+      ['scrap_reason', 'TEXT'],
+    ] as const) {
+      if (!hasColumn(db, 'supplier_accounts', column)) {
+        db.exec(`ALTER TABLE supplier_accounts ADD COLUMN ${column} ${decl}`);
       }
     }
   })();

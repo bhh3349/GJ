@@ -875,6 +875,20 @@ export interface SupplierSubscriptionRowDto extends SupplierSubscriptionDto {
   depletedAt: string | null;
   /** 账号只可能是 `'balance'`（它自己就是源头，没有"所属账号欠费"这种级联）；null = 未锁存 */
   depletedReason: DepletedReason | null;
+  /**
+   * **废号池**（§21 / ADR-0043）。判据在 `src/db/scrap.ts`：有效套餐余量 < 1 **且**
+   * 账号余额 < 1 元；套餐已过期时余量按 0 计（`scrapReason = 'plan_expired'`）。
+   *
+   * 与 `depleted` **不是同一件事**，两个都可能为 `true`：
+   * `depleted` 只说"钱包付不起账"（只锁存、不碰 `enabled`）；`scrapped` 说"这个号没残值了"，
+   * 进池时**连同名下 key 的 `enabled` 一起置 0**（业主要求的"key 全部停用"）。
+   * 出池只有人工 `POST /api/supplier-accounts/:id/unscrap`（粘性，同 §20.3）。
+   */
+  scrapped: boolean;
+  /** ISO8601 UTC；null = 不在废号池。首次进池的那一刻，反复刷新不推新 */
+  scrappedAt: string | null;
+  /** `'plan_exhausted'` = 套餐烧完且余额不足；`'plan_expired'` = 套餐过期且余额不足。null = 未进池 */
+  scrapReason: 'plan_exhausted' | 'plan_expired' | null;
   revision: number;
   createdAt: string;
   updatedAt: string;

@@ -31,6 +31,7 @@
 import type { FastifyInstance } from 'fastify';
 import { appendAudit } from '../../db/repo/audit.js';
 import { clearAccountDepletedCascade } from '../../db/repo/depletion-latch.js';
+import { clearAccountScrapped } from '../../db/repo/scrap-latch.js';
 import {
   deleteSupplierAccount,
   listAllSupplierAccounts,
@@ -63,6 +64,7 @@ interface ListQuery {
   status?: string;
   /** §20.8：透支锁存筛选。与 `status` 正交（一个是会话健康，一个是资金事实） */
   depleted?: boolean;
+  scrapped?: boolean;
   q?: string;
   page: number;
   pageSize: number;
@@ -177,6 +179,7 @@ export function registerSupplierAccountRoutes(app: FastifyInstance, ctx: ApiCont
             upstreamId: { type: 'string', maxLength: 64 },
             status: { type: 'string', enum: [...SUPPLIER_ACCOUNT_STATUSES] },
             depleted: { type: 'boolean' },
+            scrapped: { type: 'boolean' },
             q: { type: 'string', maxLength: 200 },
           },
         },
@@ -187,6 +190,7 @@ export function registerSupplierAccountRoutes(app: FastifyInstance, ctx: ApiCont
         upstreamId: req.query.upstreamId,
         status: req.query.status,
         depleted: req.query.depleted,
+        scrapped: req.query.scrapped,
         q: req.query.q,
         page: req.query.page,
         pageSize: req.query.pageSize,
@@ -611,19 +615,50 @@ export function registerSupplierAccountRoutes(app: FastifyInstance, ctx: ApiCont
     },
   );
 
+  /**
+   * **出废号池**（契约 §21.4 / ADR-0043）。回 `200 SupplierAccount`。
+   *
+   * 与 `undeplete` 的形状逐条对齐（同样不要 `revision`：这不是改字段，是解除一个自动置位的标记）。
+   *
+   * 语义：清账号两列 + 把**为它停用的 key** 恢复（`enabled = 1` 并清 `depleted_at`）。
+   * 为什么这里比 `undeplete` 宽、连 `'balance'` 的锁也一起清：进废号池时我们动了 `enabled`，
+   * 而 `enabled` 只有 0/1 两态、没有"谁停的"这一列可回放 —— 能还原的只有整体还原。
+   * 一把**自己**余额不足的 key 会被下一轮刷新重新锁上（判据没变），那是正确行为。
+   *
+   * 出池后**不会自动再次进池**直到下一轮余额刷新/套餐同步重新判 —— 粘性只保证"不自动清"，
+   * 不保证"清完不再进"。人工充过值之后紧接着一轮刷新把它又打回来，说明判据仍然成立
+   * （充的钱还不够 1 元，或套餐仍空）—— 那时该看的是 `scrapReason`，不是怀疑按钮。
+   */
+  app.post<{ Params: { id: string } }>(
+    '/api/supplier-accounts/:id/unscrap',
+    { schema: { params: idParam } },
+    (req) => {
+      // 404 先行：同 undeplete，别把审计写成"解除成功 0 条"。
+      requireSupplierAccount(db, req.params.id);
+      const cleared = clearAccountScrapped(db, req.params.id);
+      auditWrite(db, req, config, {
+        action: 'supplier.account.unscrap',
+        targetType: 'supplier_account',
+        targetId: req.params.id,
+        // 计数口径同 undeplete（§15.7：detail 只放计数，不含凭据）
+        detail: `account=${cleared.account ? 1 : 0} keys=${cleared.keys}`,
+      });
+      return requireSupplierAccount(db, req.params.id);
+    },
+  );
+
   app.get<{ Params: { id: string } }>(
     '/api/supplier-accounts/:id',
     { schema: { params: idParam } },
     (req) => requireSupplierAccount(db, req.params.id),
   );
-
   /**
-   * 删账号（契约 §15.2）。`force != true` 且名下有已入池 key → `409 ACCOUNT_HAS_KEYS`。
+   * 删账号（契约 §15.2 / §21.5）。`force != true` 且名下有已入池 key → `409 ACCOUNT_HAS_KEYS`。
    *
-   * 与 `DELETE /api/upstreams/:id`（ADR-0016）关键差别：**这里一把 key 都不删，只解绑**。
-   * 账号删了，它名下的 key 仍然可用（密文与 `upstream_keys` 行都在，网关照常转发），
-   * 真删 key 会让网关在下一轮快照里少一批可用 key —— **删除账号的动作打穿了流量**。
-   * 解绑后那把 key 从"账号代表其余额"变回"自己就是一份钱"，带着已有余额回到 §2 的 keysBalance。
+   * v1.19.0 起是**强绑定**（业主 2026-11-03 拍板）：`force = true` 时名下池内 key **跟着软删**
+   * （`enabled = 0` + `deleted_at`，网关下一轮快照把它们摘掉）。理由与代价见
+   * `repo/supplier-accounts.ts` 的 `deleteSupplierAccount` 注释 —— 一句话：账号型 key 是
+   * 账号的附属物，账号没了它就是每轮都失败的空壳。409 那道闸就是把"你会掉流量"变成显式确认。
    */
   app.delete<{ Params: { id: string }; Querystring: { force?: boolean } }>(
     '/api/supplier-accounts/:id',

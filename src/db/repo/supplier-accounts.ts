@@ -31,6 +31,7 @@ import { decryptSecret } from '../crypto.js';
 import type { Db } from '../database.js';
 import { isTokenPlanDepleted } from '../depletion.js';
 import type { DepletedReason } from '../depletion.js';
+import type { ScrapReason } from '../scrap.js';
 import { newId } from '../ids.js';
 import { appendChange } from './change-log.js';
 import { latchKeyDepleted } from './depletion-latch.js';
@@ -60,6 +61,9 @@ interface AccountRow {
   /** 透支锁存（§20.6）；NULL = 未锁存 */
   depleted_at: string | null;
   depleted_reason: DepletedReason | null;
+  /** 废号池（§21 / ADR-0043）；NULL = 不在池中 */
+  scrapped_at: string | null;
+  scrap_reason: ScrapReason | null;
   revision: number;
   created_at: string;
   updated_at: string;
@@ -104,6 +108,7 @@ const ACCOUNT_COLS = `
   id, upstream_id, supplier, identifier, username, uid, status, status_message,
   balance_cents, balance_updated_at, session_expires_at, egress_id,
   depleted_at, depleted_reason, revision, created_at, updated_at,
+  scrapped_at, scrap_reason,
   (encrypted_password IS NOT NULL) AS has_password,
   (encrypted_session  IS NOT NULL) AS has_session
 `;
@@ -235,6 +240,9 @@ function toDto(
     depleted: row.depleted_at !== null,
     depletedAt: row.depleted_at,
     depletedReason: row.depleted_reason,
+    scrapped: row.scrapped_at !== null,
+    scrappedAt: row.scrapped_at,
+    scrapReason: row.scrap_reason,
     revision: row.revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -246,6 +254,8 @@ export interface ListSupplierAccountsQuery {
   status?: string | undefined;
   /** §20.8：透支锁存筛选。与 `status` **正交**，可与它并用 */
   depleted?: boolean | undefined;
+  /** §21.4：废号池筛选。同样与 `status` / `depleted` 正交，三者可并用 */
+  scrapped?: boolean | undefined;
   /** 模糊匹配**掩码后的** identifier / username / uid —— 真值不在库里，也没法拿它搜 */
   q?: string | undefined;
   page: number;
@@ -269,6 +279,9 @@ export function listSupplierAccounts(
   }
   if (query.depleted !== undefined) {
     where.push(query.depleted ? 'depleted_at IS NOT NULL' : 'depleted_at IS NULL');
+  }
+  if (query.scrapped !== undefined) {
+    where.push(query.scrapped ? 'scrapped_at IS NOT NULL' : 'scrapped_at IS NULL');
   }
   if (query.q !== undefined && query.q !== '') {
     // 转义 LIKE 的通配符：不转义的话，用户搜 `_` 会匹配到任意单字符 ——
@@ -512,22 +525,21 @@ export function countPooledKeys(db: Db, accountId: string): number {
  * 契约 §15.2 `DELETE /api/supplier-accounts/:id?force=`。
  *
  * `force != true` 且名下有已入池 key → `409 ACCOUNT_HAS_KEYS`，**拦下时零副作用**
- * （先判定、后开事务）。`force = true` → 删账号行、套餐行、台账行。
+ * （先判定、后开事务）。`force = true` → 删账号行、套餐行、台账行，**并把名下池内 key 软删**。
  *
- * **池内 key 一行都不动**：这是本节与 `deleteUpstream`（ADR-0016 物理删整棵子树）**取向相反**
- * 的一处，理由不是风格 —— 上游删了 key 必然不可达，而**账号删了 key 仍然可用**（key 的密文
- * 与 `upstream_keys` 行都在，网关照常转发）。所以这里只**解绑**：删掉 `supplier_account_keys`
- * 的台账行，`upstream_keys` 保持原样。解绑在第四口径（§15.6）里的效果正是我们要的 ——
- * 那把 key 从"账号代表其余额"变回"自己就是一份钱"，于是它带着**已有的 `balance_cents`**
- * 回到 §2 的 `keysBalance` 那一格。若这里顺手把 key 也删了，网关会在下一轮快照里少一把可用 key，
- * 客户端开始报"没有可用 key"——**删除账号的动作打穿了流量**。
+ * **key 跟着账号一起删**（v1.19.0 / 契约 §21.5 / ADR-0043 决策 4）：这是业主 2026-11-03
+ * 明确要求的强绑定（「账号删除 key 也跟着删除」），推翻了本节此前的"只解绑、key 保留"取向。
+ * 旧取向的理由是"账号删了 key 仍可转发，真删会让网关少一批可用 key"——那句话在技术上没错，
+ * 但它假设了一把账号型 key 离开账号还有独立价值，而事实相反：额度、套餐、余额全在账号那边，
+ * 账号没了这把 key 打出去就是 402/404。**留着它比删掉更坏**（网关照选、每轮都失败）。
  *
- * **要发 `change_log`（ADR-0021 决策 5 起改口）**：解绑确实不改 `upstream_keys` 的任何一列，
- * 但它改的是网关快照里的**归属** —— 那把 key 的 `accountId` / 出口从"账号的"变回"自己的"。
- * 本段注释早先写的是"网关侧没有任何变化可推"，那在快照只读 `upstreams` / `upstream_keys` / `models`
- * 时是对的；E 接缝把台账并进了快照输入，那个前提就没了。漏发的后果不是报错，
- * 是网关那边这笔归属**永远不更新**。
- * 仍然**不动池内 key**（密文与行都在，网关照常转发）—— 理由见上。
+ * 代价写在明处：删除账号会让网关在下一轮快照里**少一批 key**（客户端可能开始报
+ * `NO_AVAILABLE_KEY`）。所以 `force=false` 那道 409 闸必须留着 —— 它把"你会掉流量"
+ * 变成一次显式确认，而不是删完才发现。
+ *
+ * **要发 `change_log`**：软删每把 key 都发一条 `'delete'`（网关据此把候选里那几把摘掉）。
+ * 旧口径发的是 `'update'`（只改归属、key 还在），现在语义变了 —— 发 `'update'` 会让网关
+ * 以为它还在、只是换了归属。
  * 留痕仍由 `audit_log` 负责（同 ADR-0008 对网关 key 的处理）。
  */
 export function deleteSupplierAccount(db: Db, id: string, force: boolean): void {
@@ -543,17 +555,35 @@ export function deleteSupplierAccount(db: Db, id: string, force: boolean): void 
     );
   }
 
-  // 先记下"解绑了谁"：删完台账行就再也问不出受影响的是哪几把 key 了。
+  // 先记下"名下有哪些池内 key"：删完台账行就再也问不出受影响的是哪几把 key 了。
   const linked = listLinkedPooledKeyIds(db, id);
+  const at = nowIso();
 
   db.transaction(() => {
+    // v1.19.0（契约 §21.5 / ADR-0043 决策 4）：**key 跟着账号一起删**（软删）。
+    //
+    // 这条推翻了本节此前的取向 —— 旧口径是"只解绑、key 保留仍可用"，理由是"账号删了 key
+    // 仍能转发，真删会让网关少一批可用 key"。业主 2026-11-03 明确要求强绑定：
+    // 「账号删除 key 也跟着删除」。业务上也说得通：账号型 key 是**账号的附属物**
+    // （它的额度、套餐、余额全在账号那边），账号没了，这把 key 在池里只剩一个
+    // 打出去就 402/404 的空壳 —— 留着它比删掉更坏。
+    //
+    // 软删而不是物理删：`usage_logs.key_id` 还有历史行指着它（同 `deleteKey` 的理由）。
+    // **先删 key 再删台账**：台账行是"这把 key 属于谁"的唯一索引，删完就找不到它们了。
+    const softDelete = db.prepare(
+      `UPDATE upstream_keys
+       SET enabled = 0, deleted_at = ?, revision = revision + 1, updated_at = ?
+       WHERE id = ? AND deleted_at IS NULL`,
+    );
+    for (const pooled of linked) {
+      if (softDelete.run(at, at, pooled).changes === 0) continue;
+      appendChange(db, 'key', pooled, 'delete', null);
+    }
     // 套餐行与台账行都 `REFERENCES supplier_accounts(id)`，必须先删 —— 否则删账号行直接
     // `SQLITE_CONSTRAINT_FOREIGNKEY`（同 ADR-0016 那条 500 的成因，只是这里更短）。
     db.prepare('DELETE FROM supplier_account_subscriptions WHERE account_id = ?').run(id);
     db.prepare('DELETE FROM supplier_account_keys WHERE account_id = ?').run(id);
     db.prepare('DELETE FROM supplier_accounts WHERE id = ?').run(id);
-    // 与删除同一事务：崩在中间会让"库里已解绑、网关还认着账号"成为**永久**状态。
-    for (const pooled of linked) appendChange(db, 'key', pooled, 'update', null);
   })();
 }
 
@@ -1058,6 +1088,46 @@ export function latestSubscriptionSubNo(db: Db, accountId: string): string | nul
     )
     .get(accountId) as { sub_no: string } | undefined;
   return row === undefined ? null : row.sub_no;
+}
+
+/**
+ * 废号池判据所需的一份快照（契约 §21.2 / ADR-0043）。
+ *
+ * 取行口径与 `latestSubscriptionSubNo` **同一条 SQL**（最新到期那条，`end_at` 最大、`NULL` 排后）：
+ * 一个账号叠多套餐时，"正在生效的那个"就是操作员与判据说的"这个号的套餐"。
+ *
+ * `remainingTokens` 从台账两列现算（`basic_token_total - basic_token_used`）：
+ * 任一为 `NULL` ⇒ 整体 `null`（"上游没说"，不是 0 —— ADR-0003 同款纪律）；
+ * 负差值夹到 0（`backfillSubscriptionTokenPlan` 的写侧已夹过，这里再夹一道是防御）。
+ *
+ * 名下没有套餐行 ⇒ `null`（调用方据此不判"套餐耗尽"，宁可留在池子 —— 见 `scrap.ts` ②）。
+ */
+export function currentPlanForScrap(
+  db: Db,
+  accountId: string,
+): { remainingTokens: number | null; expiresAt: string | null } | null {
+  const row = db
+    .prepare(
+      `SELECT basic_token_total, basic_token_used, end_at FROM supplier_account_subscriptions
+        WHERE account_id = ?
+        ORDER BY (end_at IS NULL), end_at DESC, sub_no DESC
+        LIMIT 1`,
+    )
+    .get(accountId) as { basic_token_total: number | null; basic_token_used: number | null; end_at: string | null } | undefined;
+  if (row === undefined) return null;
+  const remainingTokens =
+    row.basic_token_total === null || row.basic_token_used === null
+      ? null
+      : Math.max(0, row.basic_token_total - row.basic_token_used);
+  return { remainingTokens, expiresAt: row.end_at };
+}
+
+/** 废号池判定腿读的账号余额（分）；`NULL` = 未知。 */
+export function accountBalanceForScrap(db: Db, accountId: string): number | null {
+  const row = db
+    .prepare('SELECT balance_cents FROM supplier_accounts WHERE id = ?')
+    .get(accountId) as { balance_cents: number | null } | undefined;
+  return row?.balance_cents ?? null;
 }
 
 /**

@@ -47,6 +47,7 @@ A Decision Records 是 MADR 格式，文件名 `NNNN-标题.md`。新决策必�
 | [0040](../../../docs/adr/0040-tokenrhythm-second-supplier.md) | 第二家供应商 TokenRhythm：驱动器复用 + 能力位分发 | 动多供应商接入时 |
 | [0041](../../../docs/adr/0041-overdraft-latch.md) | 透支锁存：余额 <10 分 / 套餐余量 =0 ⇒ 锁出选路（第四轴，`enabled` 不动），只有人工解除回池；判定腿挂**七个**落库点 | 动 `depleted` / `isUsable` / 任何余额余量落库点时 |
 | [0042](../../../docs/adr/0042-error-event-key-attribution.md) | 错误事件的 key 标识**三腿分列**（上游 key / 客户端网关 key / 来源 IP+指纹）+ `attemptTrail`；`keyId` 语义改为「当时正在用哪把」；401 只到 socket IP 与 8 hex 指纹 | 动错误事件字段 / 排查「裸 `****` 是哪把 key」/ 动 §12.1 或助手注入块时 |
+| [0043](../../../docs/adr/0043-scrap-pool.md) | **废号池**：有效套餐余量 <1 **且** 余额 <1 元 ⇒ 进池（过期时余量按 0 计）；进池 = 账号两列 + key 级联锁存 + `enabled=0`；`unscrap` 人工出池且全量恢复 key；`DELETE ?force=true` 改**强绑定软删 key**（推翻 §15.2 旧「只解绑」） | 动 `scrap.ts` 判据 / `scrap-latch.ts` / 删账号行为 / 动 §21 或 §15.2 `DELETE` 时 |
 
 ## 维护纪律
 

@@ -32,12 +32,16 @@
 import { sanitizeUpstreamBody } from '../../balance/raw.js';
 import type { Db } from '../../db/database.js';
 import { isAccountDepleted } from '../../db/depletion.js';
+import { decideAccountScrap } from '../../db/scrap.js';
 import { newId } from '../../db/ids.js';
 import { latchAccountCascade, latchAccountDepleted } from '../../db/repo/depletion-latch.js';
+import { disableKeysOfAccount, latchAccountScrapped } from '../../db/repo/scrap-latch.js';
 import { createKey, deleteKey } from '../../db/repo/keys.js';
 import {
+  accountBalanceForScrap,
   backfillSubscriptionTokenPlan,
   createSupplierAccount,
+  currentPlanForScrap,
   findSupplierAccountByIdentifierHash,
   latestSubscriptionSubNo,
   linkSupplierAccountKey,
@@ -771,6 +775,7 @@ async function refreshAccount(
     patch.statusMessage = safeMessage(subsCall.result.message, active);
     updateSupplierAccount(ctx.db, active.id, patch);
     latchAccountIfDepleted(ctx, active.id, self);
+    scrapAccountIfWorthless(ctx, active.id);
     return {
       ok: false,
       relogged,
@@ -783,6 +788,7 @@ async function refreshAccount(
   patch.statusMessage = null;
   updateSupplierAccount(ctx.db, active.id, patch);
   latchAccountIfDepleted(ctx, active.id, self);
+  scrapAccountIfWorthless(ctx, active.id);
   return { ok: true, relogged, code: null, message: null };
 }
 
@@ -810,6 +816,43 @@ function latchAccountIfDepleted(
   if (!isAccountDepleted({ unlimited: self.unlimited, balanceCents: self.balanceCents })) return;
   latchAccountDepleted(ctx.db, accountId);
   latchAccountCascade(ctx.db, accountId);
+}
+
+/**
+ * 判定腿 6（契约 §21.3 / ADR-0043）：账号**进废号池**。
+ *
+ * **必须在余额与套餐台账都落库之后调**（与判定腿 5 同一条纪律）：它判的是库里此刻的事实。
+ * 套餐腿失败的那个分支也要调 —— 那里余额已写、台账是上一轮的，判据仍成立（余量未知/旧值
+ * 都按 `scrap.ts` 的"未知不废"走，不会误进池）。
+ *
+ * 与判定腿 5 的关系（两条**互不替代**，别合并）：
+ *   · `depleted`（§20）阈值 10 分 = 0.1 元，判"这把钱包付不起账"，只置锁、不碰 `enabled`；
+ *   · `scrapped`（§21）阈值 100 分 = 1 元，**还要**套餐余量也已见底（或套餐过期），
+ *     判"这个号没残值了"，除锁存外把名下 key 一并停用。
+ * 余额跌破 1 元时通常 scrap 先命中（阈值更宽），但它要求套餐那一项也见底。
+ *
+ * 落库三件事：
+ *   ① 账号 `scrapped_at` / `scrap_reason` 置位（粘性）；
+ *   ② 名下 key 打 `depleted_reason = 'account'`（复用 §20.6 那条腿）—— 让网关**不选**它；
+ *   ③ 名下 key `enabled = 0` —— 业主要的"全部停用"，管理面看得见、批量启用也拦一道。
+ *
+ * ②③ 都要做的理由在 `repo/scrap-latch.ts` 文件头：只做 ③ 的话，一次批量启用
+ * （`batchSetEnabled` 只写 `enabled`）就把废号池的 key 全放回池子；只做 ② 的话，
+ * 管理面显示"启用中"而它其实已被排除，操作员看不懂为什么没流量。
+ *
+ * 三步都不做"已废则跳过"的短路：每步各自幂等（粘性 `WHERE scrapped_at IS NULL` /
+ * `depleted_at IS NULL` / `enabled = 1`），中断后的半成品状态下一轮刷新会补齐。
+ */
+function scrapAccountIfWorthless(ctx: SupplierOps, accountId: string): void {
+  const decision = decideAccountScrap({
+    balanceCents: accountBalanceForScrap(ctx.db, accountId),
+    plan: currentPlanForScrap(ctx.db, accountId),
+  });
+  if (!decision.scrap) return;
+  latchAccountScrapped(ctx.db, accountId, decision.reason);
+  latchAccountDepleted(ctx.db, accountId);
+  latchAccountCascade(ctx.db, accountId);
+  disableKeysOfAccount(ctx.db, accountId);
 }
 
 /**
@@ -2201,6 +2244,11 @@ async function syncForAccount(
     // 回填失败不该让整次同步失败：它只是让那把 key 多留一轮 `NULL`（= 未知，仍可选路）。
     backfillSubscriptionTokenPlan(ctx.db, cred.id, subs as readonly SupplierSubscriptionBackfill[]);
   }
+
+  // 废号池判定腿 6 的另一个落点（契约 §21.3）：此刻套餐余量刚落库，
+  // 判"套餐这一项"才用得上本轮的新数。放在 `tokens()` **之前** ——
+  // 后面那条腿还有两个早返回分支（取 key 列表失败），放它们后面会让已废账号漏判一轮。
+  scrapAccountIfWorthless(ctx, cred.id);
 
   const tokensCall = await callWithRelogin(client, budget.credential(session), (c) => client.tokens(c));
   persistRenewed(ctx, cred.id, tokensCall.renewed);

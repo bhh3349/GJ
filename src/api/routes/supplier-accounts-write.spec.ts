@@ -1446,3 +1446,203 @@ describe('POST /rotate-key', () => {
     expect(sub['has_key']).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 废号池（契约 §21 / ADR-0043）
+// ---------------------------------------------------------------------------
+//
+// 判据本身在 `src/db/scrap.spec.ts` 逐条钉住；这里测的是**判定腿挂得对不对** ——
+// 一次 refresh / sync 之后，库里那三件事（两列、key 的锁存、key 的 enabled）有没有一起发生。
+
+describe('废号池（§21）', () => {
+  /** 让上游 `/api/user/self` 回一个指定余额（默认换算比 500000 ⇒ `cents/100*500000` 的 quota）。 */
+  function selfBalance(h: Harness, cents: number): void {
+    h.upstream.on('/api/user/self', () => ok({ quota: Math.round((cents / 100) * 500_000), id: '42' }));
+  }
+
+  /** 让上游 `/api/subscription/self` 回一条套餐（refresh 的套餐腿会把它整批落库）。 */
+  function planRow(
+    h: Harness,
+    over: { total?: number; used?: number; endAt?: string } = {},
+  ): void {
+    h.upstream.on('/api/subscription/self', () =>
+      ok({
+        all_subscriptions: [
+          {
+            sub_no: 'SB-SCRAP-1',
+            basic_token_total: over.total ?? 8_000_000,
+            basic_token_used: over.used ?? 0,
+            ...(over.endAt === undefined ? {} : { end_time: over.endAt }),
+          },
+        ],
+      }),
+    );
+  }
+
+  /** 造一把入池的套餐 key 并挂到账号名下，返回 keyId。 */
+  function bindKey(h: Harness, upstreamId: string, accountId: string): string {
+    const key = createKey(
+      h.db,
+      { upstreamId, key: freshPlaintext(), category: 'token-plan', label: '套餐-废池夹具' },
+      MASTER_KEY,
+    );
+    linkSupplierAccountKey(h.db, accountId, key.id, key.maskedKey);
+    return key.id;
+  }
+
+  function keyState(h: Harness, keyId: string): Record<string, unknown> {
+    return h.db
+      .prepare('SELECT enabled, deleted_at, depleted_at, depleted_reason FROM upstream_keys WHERE id = ?')
+      .get(keyId) as Record<string, unknown>;
+  }
+
+  it('套餐烧完 + 余额不足 1 元 → 进池，名下 key **全部停用**（enabled=0 + 锁存）', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    const keyId = bindKey(h, id, accountId);
+    selfBalance(h, 80); // 0.8 元 < 1 元
+    planRow(h, { used: 8_000_000 }); // 套餐余量 0
+
+    const { result } = await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id, ids: [accountId] });
+    expect(result.ok).toBe(1);
+
+    const row = accountRow(h.db, accountId);
+    expect(row['scrapped_at']).not.toBeNull();
+    expect(row['scrap_reason']).toBe('plan_exhausted');
+
+    const key = keyState(h, keyId);
+    // 业主要的两件事：真停用（enabled=0）+ 网关不选它（锁存 'account'）
+    expect(key['enabled']).toBe(0);
+    expect(key['depleted_reason']).toBe('account');
+    expect(key['enabled']).toBe(0);
+  });
+
+  it('余额不足但套餐还剩 600 万 → **不**进池，key 一切照旧', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    const keyId = bindKey(h, id, accountId);
+    selfBalance(h, 0);
+    planRow(h, { used: 2_000_000 }); // 还剩 600 万
+
+    await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id, ids: [accountId] });
+
+    const row = accountRow(h.db, accountId);
+    expect(row['scrapped_at']).toBeNull();
+    expect(keyState(h, keyId)['enabled']).toBe(1);
+  });
+
+  it('套餐过期（台账还剩 600 万）+ 余额不足 → 进池，reason=plan_expired', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    selfBalance(h, 50);
+    planRow(h, { used: 2_000_000, endAt: '2026-01-01T00:00:00' }); // 早于今天
+
+    await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id, ids: [accountId] });
+
+    const row = accountRow(h.db, accountId);
+    expect(row['scrap_reason']).toBe('plan_expired');
+  });
+
+  it('余额未知（查不到）→ 不误判进池（未知 ≠ 0）', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    // 上游 self 回一个没有 quota 的体 ⇒ balanceCents 为 null
+    h.upstream.on('/api/user/self', () => ok({ id: '42' }));
+    planRow(h, { used: 8_000_000 });
+
+    await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id, ids: [accountId] });
+
+    expect(accountRow(h.db, accountId)['scrapped_at']).toBeNull();
+  });
+
+  it('unscrap → 出池，key 恢复 enabled=1 且清锁', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    const keyId = bindKey(h, id, accountId);
+    selfBalance(h, 80);
+    planRow(h, { used: 8_000_000 });
+    await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id, ids: [accountId] });
+    expect(accountRow(h.db, accountId)['scrapped_at']).not.toBeNull();
+
+    const res = await post(h, `/api/supplier-accounts/${accountId}/unscrap`);
+    expect(res.status).toBe(200);
+    expect(res.body['scrapped']).toBe(false);
+    expect(res.body['scrappedAt']).toBeNull();
+    expect(res.body['scrapReason']).toBeNull();
+
+    const key = keyState(h, keyId);
+    expect(key['enabled']).toBe(1);
+    expect(key['depleted_at']).toBeNull();
+  });
+
+  it('names ?scrapped=true 能筛出废号池、false 排除它', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const scrappedId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    selfBalance(h, 80);
+    planRow(h, { used: 8_000_000 });
+    await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id, ids: [scrappedId] });
+    // 另一个健康号
+    seedPasswordAccount(h.db, id, { phone: PHONE_B, secret: SECRET_B, session: 'sess-ok' });
+
+    const inPool = await h.app.inject({
+      method: 'GET',
+      url: '/api/supplier-accounts?scrapped=true',
+      headers: { cookie: h.cookie },
+    });
+    expect(inPool.statusCode).toBe(200);
+    const inBody = inPool.json() as { items: { id: string; scrapped: boolean }[]; total: number };
+    expect(inBody.total).toBe(1);
+    expect(inBody.items[0]?.id).toBe(scrappedId);
+    expect(inBody.items[0]?.scrapped).toBe(true);
+
+    const outPool = await h.app.inject({
+      method: 'GET',
+      url: '/api/supplier-accounts?scrapped=false',
+      headers: { cookie: h.cookie },
+    });
+    const outBody = outPool.json() as { items: { id: string }[]; total: number };
+    expect(outBody.total).toBe(1);
+    expect(outBody.items[0]?.id).not.toBe(scrappedId);
+  });
+
+  it('DELETE ?force=true → 名下 key 一并软删（强绑定，§21.5）', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    const keyId = bindKey(h, id, accountId);
+
+    const res = await h.app.inject({
+      method: 'DELETE',
+      url: `/api/supplier-accounts/${accountId}?force=true`,
+      headers: { cookie: h.cookie, 'x-requested-with': 'fetch' },
+    });
+    expect(res.statusCode).toBe(204);
+
+    const key = keyState(h, keyId);
+    expect(key['deleted_at']).not.toBeNull();
+    expect(key['enabled']).toBe(0);
+    expect(h.db.prepare('SELECT id FROM supplier_accounts WHERE id = ?').get(accountId)).toBeUndefined();
+  });
+
+  it('DELETE 不带 force 且名下有 key → 409，且**零副作用**（key 还在、账号还在）', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    const keyId = bindKey(h, id, accountId);
+
+    const res = await h.app.inject({
+      method: 'DELETE',
+      url: `/api/supplier-accounts/${accountId}`,
+      headers: { cookie: h.cookie, 'x-requested-with': 'fetch' },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(keyState(h, keyId)['deleted_at']).toBeNull();
+    expect(h.db.prepare('SELECT id FROM supplier_accounts WHERE id = ?').get(accountId)).toBeDefined();
+  });
+});

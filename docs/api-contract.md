@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.20.0**　｜
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.21.0**　｜
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -2414,6 +2414,7 @@ v1.14.0 起写侧同样走上游真值：比值由调用方给，建 key 腿**�
 | `PATCH` | `/api/supplier-accounts/:id` | 改账号（**本版只收 `egressId` + `revision`**，见下） → `200 SupplierAccount`（§16.7 Tier 2 / v1.13.0） |
 | `DELETE` | `/api/supplier-accounts/:id?force=false` | 删除账号（见下） |
 | **`POST`** | **`/api/supplier-accounts/:id/undeplete`** | **v1.17.0 新增**（§20.5）：**清账号透支锁 + 清其名下 `reason="account"` 的 key 锁**（同时 `enabled=1`） → `200 SupplierAccount`。**不带 `revision`**（它不是改写一个编辑值，是解除一个自动置位的标记）；未知 / 已删账号 → `404 NOT_FOUND`。审计 `supplier.account.undeplete` |
+| **`POST`** | **`/api/supplier-accounts/undeplete`** | **v1.21.0 新增**（§20.5 / ADR-0045）：**批量**解除透支，body `{upstreamId?, ids?}` → `202 {taskId}`，任务类型 `supplier_undeplete`，逐行结果复用 §15.3 `SupplierBatchResult`（`action` 新增第 8 个值 **`undeplete`**）。逐行语义 = 上面单账号版**逐字复用**（清账号锁 + 清名下 `reason="account"` 的 key 锁，不动 `"balance"` 锁）；`ids` 省略 = 该上游全部账号；单账号不存在落 `NOT_FOUND` 行、**不让整批失败**（v1.18.2 `oneOrItem` 同一条纪律）。审计 `supplier.undeplete`（`detail` 只放计数） |
 
 > **上表是两家共用的端点集**（v1.16.0；v1.16.4 增加 `import-sessions`）。**逐端点对第二家
 > TokenRhythm 的差异**，判据全在 §15.14 能力表：① `keys` 拒收 `unlimited:false` / 非空
@@ -2700,7 +2701,7 @@ createdAt, updatedAt`。
   诊断"换算比改没改"要看 TR 自己的信封而不是它），`subscriptionCount` 恒 `0`；
   `raw` 是 TR 信封两腿（`me` + `wallet/summary`）原样 —— 同样抹凭据、截断 8KB。
 
-### 15.3 批量任务 result（四个批量端点共用形状）
+### 15.3 批量任务 result（五个批量端点共用形状；`undeplete` 自 v1.21.0）
 
 ```json
 {
@@ -2715,11 +2716,12 @@ createdAt, updatedAt`。
 }
 ```
 
-- `action`：`login` \| `relogin` \| `refresh` \| `create` \| `sync` \| `rotate` \| `import`。
+- `action`：`login` \| `relogin` \| `refresh` \| `create` \| `sync` \| `rotate` \| `import` \| `undeplete`。
   **每个值都必须有生产者**，不留"枚举里有、没人发"的空值：`login` = `import` 里**新建**的账号
   首次登录成功；`relogin` = 已有账号在 `import` / `refresh` / `keys` 中被重登；`refresh` = `refresh`；
   `create` = `keys`；`sync` = `keys/sync`；`rotate` = `rotate-key`（§15.13）；
-  `import` = `import-sessions`（v1.16.4，只登记会话、**没有发生登录**）。
+  `import` = `import-sessions`（v1.16.4，只登记会话、**没有发生登录**）；
+  `undeplete` = `undeplete` 批量解除透支（v1.21.0 / ADR-0045，清锁 + `enabled=1` 一行一个账号）。
 - `code`：供应商错误码原样（如 `LOGIN_INVALID_CREDENTIALS`）或本节错误码；`message` 一句人话。
 - **逐行结果不含任何凭据**（`keyMasked` 是掩码，`keyId` / `tokenNo` 是内部标识）。
 - 进度**只由真正干完的账号推进**（复用 `startTask` 的 `step()`），不做假进度条。
@@ -2899,8 +2901,8 @@ createdAt, updatedAt`。
   - 用户版本号仍是 `2`：没有数据搬迁、没有重写表，只是补列补表 ——
     与 v1.1.1 加 `request_id` 时同一条判断。
 - 鉴权：同 §0.5 登录会话，**不使用** `READONLY_TOKEN`（带只读令牌打进来 → `403 FORBIDDEN`）。
-- 审计：四个批量端点各写一条 `audit_log`（`action` = `supplier.import` / `supplier.refresh` /
-  `supplier.keys.create` / `supplier.keys.sync`），`detail` **只放计数**，不放 identifier 列表、
+- 审计：**五个**批量端点各写一条 `audit_log`（`action` = `supplier.import` / `supplier.refresh` /
+  `supplier.keys.create` / `supplier.keys.sync`；v1.21.0 起第五个 `supplier.undeplete`），`detail` **只放计数**，不放 identifier 列表、
   不放任何凭据。
   - **v1.6.1 补登两个动作**：`supplier.export`（`detail = "rows=N"`）与
     `supplier.account.delete`（`detail = "force"` / `null`）。两者的判定与 `detail` 口径同上一段。
@@ -4044,6 +4046,23 @@ spec 三条判据：新库自带、老库真被 ALTER 到、重复跑不抛 dupl
 
 > **§15.5 连带（v1.8.0 已同批落）**：「27 个账号一轮刷新 ≈ 1 分钟」按 ⑥ 重算为 **≈14 min**（`ceil(54/4)×60s`，单出口口径），0.6s 降为账号级内层纪律，重开门槛（ADR-0017 补遗 6）登记为 §15.5 脚注。本表是那三处改动的唯一口径源。
 >
+> **v1.21.0（2026-11-03，§20.6 账号级连坐收窄 + 批量解除透支 —— 业主现场反馈「有套餐余额还是透支了，还禁止我全部 key」）**：
+> 落笔依据 **ADR-0045**（触发 = 业主截图：账号余额 ¥0.00、套餐 ¥29.90，却被打透支锁、名下 key 全被级联停用）。
+> ① **§20.2 / §20.6 判据收窄**：账号级连坐从「`balance_cents < 10` 一项见底」改为
+> **「余额见底 **且** 套餐不可用」**（套餐不可用 = 已过期 或 有效余量 < 1；过期把余量按 0 计，与 ADR-0043 同口径）。
+> 套餐仍可用 ⇒ **不连坐**：余额类 key 仍被自己的判据逐把锁（`reason="balance"`），**套餐 key 照常参与选路**。
+> 理由：套餐 key 花的是套餐额度、不是账号余额，余额见底不影响它出量（与 ADR-0043 废号池「且」同源）。
+> 判不出"套餐也见底"（台账无套餐行 / `basic_token_*` 为 NULL）⇒ **不连坐**（未知 ≠ 0，ADR-0003）。
+> 余额阈值**不变**（10 分，不是废号池的 100 分——两把尺子各自语境）。
+> ② **§15.2 新增批量端点** `POST /api/supplier-accounts/undeplete`（body `{upstreamId?, ids?}` → `202 {taskId}`，
+> 任务类型 `supplier_undeplete`）：历史误锁不会自动解除（§20.3 粘性），必须给一次批量出口；
+> 逐行语义 = 单账号 `POST /:id/undeplete` **逐字复用**（只清 `"account"` 锁，不动 `"balance"` 锁）。
+> ③ **§15.3 `action` 枚举 +1**：`undeplete`（第 8 个值，有生产者）。**§20.5 解除入口表 +1 行**。
+> ④ **`/v1/*` 零字节变更**：`isUsable` 的 `depleted` 过滤、排序、滑池全部不动，变的只是**哪些 key 会被打上锁**；
+> `src/gateway/` 零改动。`ERROR_CODES` / `GATEWAY_ERROR_CODES` / `hintCode` **零新增**（新端点只用既有 `INVALID_PARAM` /
+> `NOT_FOUND`；`undeplete` 是逐行 `action` 值，不进口径码表）。**零 DDL**（判据用既有列）。
+> ⑤ **前端同批**：账号池批量操作加「解除透支」（画师 `dev/web-m2`）。审计 `supplier.undeplete`（`detail` 只放计数）。
+>
 > **v1.20.0（2026-11-03，§16.3 选路顺序语义修订 —— 类目第一、到期优先、单请求滑池；业主 B1/B2/C 三件事）**：
 > 落笔依据 **ADR-0044**（路由者起草，Chief 拍板两点：键序**到期优先于 weight**、`reserve=1`）。
 > **触发**（业主原话摘要）：**B1** 同一请求内套餐类 key 失败后**要能继续尝试余额类 key**（总尝试上限仍受
@@ -4808,7 +4827,7 @@ CREATE TABLE IF NOT EXISTS group_models (
 |---|---|---|
 | 余额类 key（`category='balance'`） | `balance_cents < 10`（分）—— **含 `0` 与负数** | `balance_cents IS NULL`（未知 ≠ 0，ADR-0003）· `unlimited = 1` |
 | 套餐类 key（`category='token-plan'`） | 落库的 `token_plan_remaining = 0` | `token_plan_remaining IS NULL`（"上游没说"≠ 0）· 仅"已到期"（到期归 `isUsable` 既有时效判据，**不进** `depleted`） |
-| 账号 | `balance_cents < 10`（分） | `balance_cents IS NULL` · 上游 `unlimited`（此时 `balanceCents` 按设计落 `NULL`） |
+| 账号 | `balance_cents < 10`（分）**且 套餐不可用**（已过期 或 有效余量 < 1）—— **v1.21.0 收窄**（ADR-0045），细则见 §20.6 | `balance_cents IS NULL` · 上游 `unlimited` · **套餐仍可用**（有量且未过期）· 套餐台账缺失 / 余量未知（判不出"套餐也见底"，ADR-0003） |
 
 - **阈值 `DEPLETED_BALANCE_THRESHOLD_CENTS = 10`（= 0.1 元）只有一份实现**：
   `src/db/depletion.ts` 的 `isBalanceDepleted` / `isTokenPlanDepleted`。判定腿、写库腿、前端文案都指它。
@@ -4864,6 +4883,7 @@ CREATE TABLE IF NOT EXISTS group_models (
 |---|---|---|
 | key 批量（**扩枚举，不新增端点**） | `POST /api/keys/batch` `{ids, action:"undeplete"}` → `{updated}` | **清锁 + `enabled=1`**（幂等）。不存在的 id 静默不计入 `updated`（与既有 `enable` / `disable` 同语义） |
 | 账号（**新增端点**） | `POST /api/supplier-accounts/:id/undeplete` → `200 SupplierAccount` | 清账号锁 + 清该账号名下 `reason="account"` 的 key 锁（同样 `enabled=1`） |
+| 账号批量（**新增端点，v1.21.0**） | `POST /api/supplier-accounts/undeplete` `{upstreamId?, ids?}` → `202 {taskId}` | **批量**解除透支（ADR-0045）。逐行 = 上面那条；`ids` 省略 = 该上游全部；坏行落 `NOT_FOUND`，任务照常 `succeeded` |
 
 - **为什么是一个动作而不是两个**：业主的诉求是"重新启用"。做成"清标记"+"启用"两步，
   用户点一次会以为完成了、实际还要再点一次；而只点"启用"（`action:"enable"`）**不清锁**（下条）。
@@ -4881,15 +4901,23 @@ CREATE TABLE IF NOT EXISTS group_models (
 
 ### 20.6 账号级：标记账号 + 级联其名下池内 key
 
-- 账号 `balance_cents < 10` ⇒ 账号置位（`reason="balance"`）+ 该账号**名下所有已入池、未软删**的 key 置位
-  （`reason="account"`）。级联走**一次 SQL**（按 `account_id` 选出 `pooled_key_id`），不逐把循环。
-- **级联包含套餐 key**（业主原话"关联key全部"），且这是**登记的可推翻推断**：
-  ≥ TierFlow 的套餐是单独购买的，账号钱包与套餐额度是两笔钱；账号欠费时套餐 key 是否真还能用，
-  **我们没有实测证据**。本版按业主的话全量级联（宁可少一把候选，也不要"看起来能跑、打出去就 402"）。
-  若实测证明账号欠费不影响套餐 key，收窄只需一处：级联 SQL 加 `AND uk.category = 'balance'`。
+- **判据（v1.21.0 收窄 / ADR-0045）**：账号 **`balance_cents < 10`（分）且 套餐不可用** ⇒ 账号置位
+  （`reason="balance"`）+ 该账号**名下所有已入池、未软删**的 key 置位（`reason="account"`）。
+  级联走**一次 SQL**（按 `account_id` 选出 `pooled_key_id`），不逐把循环。
+  **套餐不可用** = 台账有套餐行 且（`end_at <= now` **已过期** 或 有效余量 `basic_token_total - basic_token_used < 1`）；
+  过期**把余量按 0 计**（与 ADR-0043 废号池同口径）。
+- **套餐仍可用 ⇒ 不连坐**：此时余额类 key 仍会被自己的判据逐把锁上（`reason="balance"`），
+  套餐 key 照常参与选路。余额阈值仍是 **10 分**（不是废号池的 100 分——两把尺子各自语境，见 ADR-0045 决策 1）。
+- **为什么收窄**（业主现场 2026-11-03，ADR-0045 触发节）：账号「余额 ¥0、套餐 ¥29.90」被判透支、
+  名下套餐 key 全被连坐锁死，而**套餐 key 花的是套餐额度、不是账号余额**——余额见底不影响它出量。
+  这是 ADR-0043 废号池「且」口径在账号级连坐上的同一道理。
+- **判不出"套餐也见底"时一律不连坐**（ADR-0003 未知 ≠ 0）：台账没有套餐行 · `basic_token_*` 任一为 NULL。
+  代价是"真该连坐但台账缺失"的账号晚一轮才锁——比误锁整批 key 轻。
 - 账号的**无限额度**（上游 `unlimited` ⇒ `balanceCents = null`）同样**永不锁存**。
 - 账号 DTO 的 `status` **不动**：`status` 说的是会话 / 登录健康（`active` / `login_failed` /
   `session_expired` / `unknown`），透支是资金事实 —— 一个 `active` 且余额为 `0` 的账号是**正常态**。
+- **历史误锁不会自动解除**（§20.3 粘性）：按旧判据锁上的账号需人工清一次——单账号 `POST /:id/undeplete`
+  或 **v1.21.0 批量 `POST /api/supplier-accounts/undeplete`（§15.2）**。
 
 ### 20.7 网关侧
 

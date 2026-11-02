@@ -1,6 +1,6 @@
-# ADR 索引 —— 44 份一行表
+# ADR 索引 —— 45 份一行表
 
-**读法**：先用本表定位，再 `Read docs/adr/NNNN-*.md` 那一份。不要按目录顺序整读（44 份约 7,500 行）。
+**读法**：先用本表定位，再 `Read docs/adr/NNNN-*.md` 那一份。不要按目录顺序整读（45 份约 7,700 行）。
 A Decision Records 是 MADR 格式，文件名 `NNNN-标题.md`。新决策必须落 `docs/adr/`，不许只留在聊天记录（AGENTS.md §7）。
 
 | ADR | 一行结论 | 什么时候必须去读 |
@@ -49,6 +49,7 @@ A Decision Records 是 MADR 格式，文件名 `NNNN-标题.md`。新决策必�
 | [0042](../../../docs/adr/0042-error-event-key-attribution.md) | 错误事件的 key 标识**三腿分列**（上游 key / 客户端网关 key / 来源 IP+指纹）+ `attemptTrail`；`keyId` 语义改为「当时正在用哪把」；401 只到 socket IP 与 8 hex 指纹 | 动错误事件字段 / 排查「裸 `****` 是哪把 key」/ 动 §12.1 或助手注入块时 |
 | [0043](../../../docs/adr/0043-scrap-pool.md) | **废号池**：有效套餐余量 <1 **且** 余额 <1 元 ⇒ 进池（过期时余量按 0 计）；进池 = 账号两列 + key 级联锁存 + `enabled=0`；`unscrap` 人工出池且全量恢复 key；`DELETE ?force=true` 改**强绑定软删 key**（推翻 §15.2 旧「只解绑」） | 动 `scrap.ts` 判据 / `scrap-latch.ts` / 删账号行为 / 动 §21 或 §15.2 `DELETE` 时 |
 | [0044](../../../docs/adr/0044-routing-category-first-and-pool-sliding.md) | 选路顺序语义修订（修订 0011/0030）：**类目第一**（weight 降为类内键，不可跨类目插队，套餐优先升级为无条件不变式）+ **到期升序优先于 weight**（`null`=未知到期 `+∞` 排最后、仍可用）+ **单请求滑池**（`reserve=1`：套餐类最多 `maxAttempts−1` 次真实尝试，未用预算滚入余额段；跳过不耗预算；`maxAttempts=1` 诚实降级） | 动 `key-pool.ts` 排序 / `engine.ts` 尝试预算 / §16.3 选路句 / dev-constraints §三.6 时 |
+| [0045](../../../docs/adr/0045-account-depletion-narrowing-and-batch-undeplete.md) | **账号连坐收窄 + 批量解除**（修订 0041 判据腿）：连坐 = 余额 <10 分 **且** 套餐不可用（`plan===null`/余量 null ⇒ 不连坐，过期把余量按 0 计）；新增 `POST /api/supplier-accounts/undeplete` 批量解除（逐行 = 单账号解除，只清 `'account'` 锁不动 `'balance'` 锁，`enabled=1`） | 动 `isAccountDepleted` / `latchAccountIfDepleted` / 动 §20.2、§20.5、§20.6 / 排查「账号余额 0 却锁了套餐 key」时 |
 
 ## 维护纪律
 

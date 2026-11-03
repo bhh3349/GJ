@@ -267,6 +267,53 @@ describe('web 排版防回退锁（2026-10-12 事故）', () => {
     expect(vite).toMatch(/host:\s*true/);
   });
 
+  it('Key 管理表：加「首次调用」列不增横滚，空值渲染「未调用」而不是 —（v1.23.0 / 业主 2026-11-03）', () => {
+    // 两条事故风险，都真会发到屏幕上：
+    //  ① 新列把 Σ 列宽撑大 ⇒ 1440 下横滚量增加（业主对「无谓横向滚动」的既有口径）。
+    //     所以新列的宽度必须从有余量的列里借，Σ 不许涨 —— 这里锁的就是 Σ 的上界。
+    //  ② `firstUsedAt: null`（从未被真正用过）被画成 `—` / `0` / 空串：`—` 在本页已经
+    //     被「手工 key 无归属」占用，两个空混成一个符号，读的人分不清"没有归属"和"没用过"。
+    const page = readFileSync(join(webSrcRoot, 'pages', 'KeysPage.tsx'), 'utf8');
+    const BASELINE_TABLE_WIDTH = 1662; // 加列之前的 Σ 列宽（含勾选列 32）
+
+    const scrollX = /scroll=\{\{ x: (\d+) \}\}/.exec(page)?.[1];
+    expect(scrollX).toBeTruthy();
+    expect(Number(scrollX)).toBeLessThanOrEqual(BASELINE_TABLE_WIDTH);
+    // 正对照：把新列的 96 直接加到 scroll.x 上（本次唯一禁止的写法）必须被抓到。
+    expect(Number(/scroll=\{\{ x: (\d+) \}\}/.exec('scroll={{ x: 1758 }}')?.[1])).toBeGreaterThan(
+      BASELINE_TABLE_WIDTH,
+    );
+
+    const colAt = page.indexOf("dataIndex: 'firstUsedAt'");
+    expect(colAt).toBeGreaterThan(0);
+    const col = page.slice(colAt, page.indexOf("title: '更新于'", colAt));
+    expect(col).toMatch(/width: \d+/);
+    // 空值分支：文案「未调用」在，`—` 不在；有值分支走相对时间 + 精确时刻 tooltip。
+    expect(col).toMatch(/未调用/);
+    expect(col).not.toMatch(/'—'/);
+    // 负腿：把 null 渲染成 `—` 的合成样本必须被判据抓到（否则这条锁是摆设）。
+    expect(/render: \(v\) => v === null \? <Text>—<\/Text>/.test("render: (v) => v === null ? <Text>—</Text> : null")).toBe(true);
+    expect(col).toMatch(/formatIso\(value\)/);
+
+    // 冻结与可见性在这张表上互相冲突：1662px 的表冻 312px「操作」会从 1104px 起把右侧整段盖住，
+    // 实测「首次调用」整列被盖掉（0px 可见，1440×900）。所以在表格瘦身之前，这里**不许**出现
+    // 固定列；要冻必须先瘦身（那时同步改这条锁并在回执里点名）。
+    expect(page).not.toMatch(/fixed: '(left|right)'/);
+
+    // Σ 列宽逐列加总 = 1630（11 个数据列），加勾选列 32 = 1662 = 加列前的表宽：
+    // 任何人往表里塞宽列而不腾地方，这里当场红。
+    const colsSrc = page.slice(
+      page.indexOf('const columns: ColumnsType<UpstreamKey>'),
+      page.indexOf('const loading = list.loading'),
+    );
+    const widths = [...colsSrc.matchAll(/^ {6}width: (\d+),$/gm)].map((m) => Number(m[1]));
+    expect(widths).toHaveLength(11);
+    const sumWithSelection = widths.reduce((a, b) => a + b, 0) + 32;
+    expect(sumWithSelection).toBe(BASELINE_TABLE_WIDTH);
+    // 正对照：多塞一列 96px 而不腾地方的合成样本，判据必须红。
+    expect([...widths, 96].reduce((a, b) => a + b, 0) + 32).toBeGreaterThan(BASELINE_TABLE_WIDTH);
+  });
+
   it('账号池表：列宽收紧后仍在 1440 视口内，左右两列成对冻结（业主 2026-11-03）', () => {
     // 事故本体：`scroll={{ x: 1894 }}` + 11 列清一色给宽，1440 视口（实测可用 1166px）白白滚一屏；
     // 操作列在横向滚动时滑出视野，业主原话「把操作那一列变成冻结列，永远常在」。

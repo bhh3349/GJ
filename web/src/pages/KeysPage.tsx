@@ -17,6 +17,10 @@
  *   任务进度与逐行结论复用 `useTaskPolling` + `SupplierBatchDrawer`，不自造轮询。
  * - 账号型上游（tierflow / tokenrhythm）的 key **没有 key 级余额查询**（契约 §2 v1.18.1，
  *   后端恒 422）：这类行的「查余额」换成指向账号池的引导入口，见 `balanceReadiness.ts` 的注释。
+ * - v1.23.0：`firstUsedAt` = **第一次有真实请求落到它身上**的时刻（不是「首次成功」：上游失败的
+ *   尝试不落用量日志，终态成功 / 4xx / 429 / 流式中断都算「用过」）。`null` = 从未被真正用过
+ *   （存量 key 的调用日志过保留期也回 null）→ 渲染灰字「未调用」，**不渲染 `—` / `0` / 空串**，
+ *   也不拿 `todayTokens` 之类的旁证反推时刻：这一格只回答"用没用过"，不负责猜"什么时候用过"。
  */
 import { DeleteOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons';
 import {
@@ -528,11 +532,13 @@ export default function KeysPage() {
 
   const columns: ColumnsType<UpstreamKey> = [
     {
-      // 唯一"吃剩余宽度"的列：给它一个下限（220），scroll.x 按下限算，
-      // 否则窄屏时它会被自己声明的其它列挤到只剩几十像素。
+      // 身份列**不冻结**：本表 12 列合计 1662px，1440 视口可用宽只有 1176px。
+      // 冻结「操作」(312px) 会从 1104px 起把右侧整段盖住 —— 实测「首次调用」整列被盖掉
+      // （0px 可见），主数据变成必须先横滚才看得见。冻结 + 可见性在这张表上不能同时成立，
+      // 列预算（今日 token 是否并入余额 / 套餐等）留给独立的表格瘦身单，不在加列这一单里混。
       title: '标签 / Key',
       dataIndex: 'label',
-      width: 220,
+      width: 200,
       ellipsis: true,
       render: (_: string, row) => (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
@@ -574,7 +580,7 @@ export default function KeysPage() {
     {
       title: '分类',
       dataIndex: 'category',
-      width: 110,
+      width: 96,
       render: (value: KeyCategory) =>
         value === 'balance' ? (
           <Tag bordered={false} style={{ background: tokens.tint.info, color: tokens.color.info }}>
@@ -657,14 +663,48 @@ export default function KeysPage() {
     {
       title: '今日 token',
       dataIndex: 'todayTokens',
-      width: 110,
+      width: 96,
       align: 'right',
       render: (value: number) => <Text style={{ fontVariantNumeric: 'tabular-nums' }}>{formatCompact(value)}</Text>,
     },
     {
+      /**
+       * 契约 v1.23.0：这把 key 第一次**有真实请求落到它身上**的时刻。列表 / 详情都带。
+       *
+       * 口径不是「首次成功」：上游失败的尝试不落用量日志，所以只要有一行带这把 key 的记录，
+       * 就说明请求真的发出去过一次 —— 终态是成功 / 4xx 透传 / 429 / 流式中断都算「用过」。
+       * 「这把 key 到底能不能用」不是这一列的问题。
+       *
+       * `null` = **从未被真正用过**，渲染灰字「未调用」—— 不是 `—`、不是 0、不是空串：
+       * `—` 在本页已被「手工 key 无归属」占用（语义是"这类 key 本来就没有"），
+       * 而这里要回答的是"用没用过"，两个空必须长得不一样。
+       * 存量 key 的调用日志超出保留期时后端也回 `null` —— 宁可显示「未调用」，不按旁证
+       * （如 `todayTokens`）反推一个假时刻，所以这里**只读不推**。
+       * 有值 → 相对时间（与「更新于」同一套 `formatRelative` 口径），精确时刻进 tooltip
+       * （本地时区 + 原始 ISO 串，两者都要，跨时区核对以 ISO 为准）。
+       */
+      title: '首次调用',
+      dataIndex: 'firstUsedAt',
+      width: 96,
+      render: (value: string | null) =>
+        !value ? (
+          <Tooltip title="这把 key 还没有被真正用过 —— 至今没有一条请求落到它的上游。存量 key 的调用日志超出保留期后也会显示「未调用」，后端宁可空着也不编一个时刻">
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              未调用
+            </Text>
+          </Tooltip>
+        ) : (
+          <Tooltip title={`第一次被真正用上（请求发往上游）：${formatIso(value)} · ${value}`}>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              {formatRelative(value)}
+            </Text>
+          </Tooltip>
+        ),
+    },
+    {
       title: '更新于',
       dataIndex: 'updatedAt',
-      width: 110,
+      width: 96,
       render: (value: string) => (
         <Tooltip title={formatIso(value)}>
           <Text type="secondary" style={{ fontSize: 12 }}>
@@ -676,7 +716,7 @@ export default function KeysPage() {
     {
       title: '启用',
       dataIndex: 'enabled',
-      width: 80,
+      width: 64,
       render: (_: unknown, row) => (
         <Tooltip
           title={
@@ -700,9 +740,13 @@ export default function KeysPage() {
       ),
     },
     {
+      // 「操作」**不冻结**：理由是刚性冲突而不是口味 —— 本表 1662px 宽、1440 可用 1176px，
+      // 冻结这 312px 会让「首次调用 / 更新于 / 启用」在首屏被整列盖住（实测 0px 可见）。
+      // 业主「操作列冻结常在」的口径在账号池表成立（那张表已瘦身到 1166px 容得下），
+      // 这张表的列预算还没做，先保主数据可见。
       title: '操作',
       key: 'actions',
-      width: 330,
+      width: 312,
       render: (_: unknown, row) => (
         <Space size={tokens.space.sm}>
           <Button
@@ -1041,7 +1085,11 @@ export default function KeysPage() {
           onChange: (keys) => setSelectedIds(keys as string[]),
           getCheckboxProps: (row) => ({ disabled: Boolean(row.deletedAt) }),
         }}
-        scroll={{ x: 1640 }}
+        // Σ 列宽（含勾选列 32）与加「首次调用」**之前**逐像素持平（1440 / 1280 实测均 1662）：
+        // 新列的 96px 从有余量的列里借（标签 -20 / 分类 -14 / 今日 token -14 / 更新于 -14 /
+        // 启用 -16 / 操作 -18 = 96），两档的横向滚动量因此一分不涨。
+        // scroll.x = 1662 = 真实表宽（scrollW 实测），不是拍的；改列宽先量后改。
+        scroll={{ x: 1662 }}
         pagination={{
           current: page,
           pageSize,

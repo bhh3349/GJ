@@ -578,6 +578,46 @@ export interface KeyBatchResult {
   updated: number;
 }
 
+/**
+ * 试调一次（契约 §3 v1.24.0 `POST /api/keys/:id/probe` / ADR-0049）。
+ *
+ * 它回答「这把 key **现在**能不能用」，与 `firstUsedAt`（问"用过没有、什么时候"）是两件事：
+ * 探活是真打一次上游，**不写用量、不动健康态**，纯观测。
+ */
+export type KeyProbeCode =
+  | 'UPSTREAM_UNREACHABLE'
+  | 'TIMEOUT'
+  | 'AUTH_REJECTED'
+  | 'MODEL_REJECTED'
+  | 'QUOTA_EXHAUSTED'
+  | 'RATE_LIMITED'
+  | 'UPSTREAM_ERROR'
+  | 'EMPTY_RESPONSE';
+
+/** 请求体可省略：`model` 缺省取该 key 白名单第一条；点名的 model 不在白名单 → 400。 */
+export interface KeyProbeRequest {
+  model?: string;
+  /** `2000..15000`，缺省 12000。 */
+  timeoutMs?: number;
+}
+
+export interface KeyProbeResult {
+  ok: boolean;
+  keyId: string;
+  maskedKey: string;
+  /** `chat` = 真打一次 max_tokens=1；`models` = 无白名单模型时退化为探 `/v1/models`（零 token）。 */
+  kind: 'chat' | 'models';
+  model: string | null;
+  endpoint: string;
+  httpStatus: number | null;
+  durationMs: number;
+  /** `null` = ok。业务失败也回 `200` + `ok:false`（诊断结论不该被错误分支吃掉）。 */
+  probeCode: KeyProbeCode | null;
+  upstreamErrorCode: string | null;
+  upstreamMessage: string | null;
+  checkedAt: Iso8601;
+}
+
 // ── §4 用户组 ─────────────────────────────────────────────────────────────
 
 /** `null` ⇒ **不限**（契约 §4）。 */

@@ -43,6 +43,14 @@ export interface HealthTagProps {
   cooldownUntil?: string | null | undefined;
   lastFailureReason?: FailureReason | null | undefined;
   consecutiveFailures?: number | undefined;
+  /**
+   * `true` = 只画运行态**主 chip**（「冷却中」三个字），倒计时/失败次数留给调用方的次行或 tooltip。
+   *
+   * 为什么需要：Key 管理页的健康格被业主压到 ~116px 宽，且透支行只许画「透支」一个主 chip ——
+   * 主 chip 再带「· 2 分 30 秒」会把格子撑开或折断。tooltip 内容一个不少（倒计时、连续失败、
+   * 最近失败原因都还在），只是不再挤进 chip。
+   */
+  compact?: boolean | undefined;
 }
 
 export function HealthTag({
@@ -50,6 +58,7 @@ export function HealthTag({
   cooldownUntil = null,
   lastFailureReason = null,
   consecutiveFailures = 0,
+  compact = false,
 }: HealthTagProps) {
   const meta = HEALTH_META[health];
   const cooldown = health === 'cooling' ? formatCooldown(cooldownUntil) : null;
@@ -66,7 +75,7 @@ export function HealthTag({
         style={{ marginInlineEnd: 0, color: meta.color, background: meta.bg, whiteSpace: 'nowrap' }}
       >
         {meta.text}
-        {cooldown ? ` · ${cooldown}` : ''}
+        {cooldown && !compact ? ` · ${cooldown}` : ''}
       </Tag>
     </Tooltip>
   );

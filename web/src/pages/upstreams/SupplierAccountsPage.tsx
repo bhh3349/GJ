@@ -184,7 +184,7 @@ interface BatchActionSpec {
 const BATCH_ACTIONS: readonly BatchActionSpec[] = [
   {
     key: 'refresh',
-    label: '批量刷新余额',
+    label: '刷新余额',
     submit: (body) => supplierAccountsApi.refresh(body),
   },
   {
@@ -194,15 +194,15 @@ const BATCH_ACTIONS: readonly BatchActionSpec[] = [
     // 让用户以为它只搬掩码，于是"套餐余额怎么还不更新"找不到入口 —— 改名 + 确认框末句说明回填。
     // v1.22.0 起账号池「刷新余额」也会顺带回填余量与掩码，所以它**不再是唯一**的回填腿；
     // 但仍保留这个入口：掩码取不到时刷新补不上，只有它能补（ADR-0047）。
-    label: '批量同步 key 与套餐余量',
+    label: '同步余量',
     submit: (body) => supplierAccountsApi.syncKeys(body),
-    outcome: '执行后等终态，逐行结论见明细浮层；同步会把各账号套餐的基础额度（Token 余量）回填到名下入池的套餐 key。',
+    outcome: '执行后等终态，逐行见明细；会回填套餐额度到名下套餐 key。',
   },
   {
     key: 'rotate',
-    label: '批量重置套餐 key',
+    label: '重置套餐',
     submit: (body) => supplierAccountsApi.rotateKey(body),
-    outcome: '执行后等终态，逐行结论见明细浮层；旧套餐 key 会立即失效。',
+    outcome: '执行后等终态，逐行见明细；旧套餐 key 立即失效。',
     requiresPlans: true,
   },
   {
@@ -216,11 +216,10 @@ const BATCH_ACTIONS: readonly BatchActionSpec[] = [
      * "看起来没反应"，比一个恒在的按钮更糟。
      */
     key: 'undeplete',
-    label: '批量解除透支',
+    label: '解除透支',
     submit: (body) => supplierAccountsApi.undepleteBatch(body),
-    outcome:
-      '执行后等终态，逐行结论见明细浮层；只解「账号连坐」这一层：账号锁清掉，被账号带停的 key 重新启用。自己余额不足的那几把 key 不会被放回池中 —— 它没钱这件事没变；判据仍然成立的账号，下一轮余额刷新会再次锁上。',
-    okText: '执行（本地清锁，不打上游）',
+    outcome: '只解账号连坐这一层；自己余额不足的 key 不放回，判据仍成立的下一轮刷新会再锁上。',
+    okText: '执行',
     icon: <UnlockOutlined />,
   },
 ];
@@ -652,8 +651,10 @@ export default function SupplierAccountsPage() {
         </Tooltip>
       ),
       dataIndex: 'identifier',
-      /** 横向滚时**左冻结**（业主 2026-11-03：只冻右边不冻左边，滚到中段就分不清那行是谁）。宽度按 mono 两行实值给。 */
-      fixed: 'left' as const,
+      /**
+       * **不冻结**（业主 2026-11-03 点名纠正：只冻操作列，首列一律不冻 —— 左冻结是他没要过的，
+       * 9b90fa4 那笔成对冻结撤掉）。行首是谁靠「账号 + id」两行 mono 自答。
+       */
       width: 120,
       render: (_: unknown, row) => (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -705,7 +706,7 @@ export default function SupplierAccountsPage() {
     {
       // 契约依据（§20.1 的第四轴）留在注释里 —— 用户可见文案不带开发术语。
       title: (
-        <Tooltip title="这一列按「要不要动手」判，从上往下第一个命中即停：登录失败 / 会话过期 / 未查询过 → 余额未知 → 额度耗尽 → 余额偏低 → 正常。它比左边的「状态」多一层：能登录的号也再分余额够不够。「透支」是另一根独立的轴：它答的是资金事实、落库粘住，与上面这一档正交 —— 充完钱但还没解除的号会同时显示「正常」与「透支」。">
+        <Tooltip title="按「要不要动手」判，第一个命中即停：登录失败 / 会话过期 / 未查询 → 余额未知 → 耗尽 → 偏低 → 正常。与「透支」正交。">
           <span>健康</span>
         </Tooltip>
       ),
@@ -845,7 +846,7 @@ export default function SupplierAccountsPage() {
     },
     {
       title: (
-        <Tooltip title="套餐余额 = 本账号名下各套餐「总额 − 已用」的合计（¥）。它与左边的「账号余额」是两个口径、不相加：那是账号钱包，这是套餐里的钱。套餐不是 key，也不进 key 的余额合计。">
+        <Tooltip title="套餐余额 = 各套餐「总额 − 已用」的合计（¥），与左边「账号余额」两个口径、不相加。">
           <span>套餐余额</span>
         </Tooltip>
       ),
@@ -898,7 +899,7 @@ export default function SupplierAccountsPage() {
     },
     {
       title: (
-        <Tooltip title="这个账号当前绑定的出口。它只回答「这个号被指派给了哪条出口」，不代表这条出口当时是通的或健康的。「宿主出口」表示尚未绑定，会走本机 IP，这是配置状态，不是「未知」也不是「不可用」。注意：绑定不等于流量真的从该出口出去。">
+        <Tooltip title="这个号被指派给哪条出口，不代表它当时通不通；「宿主出口」= 未绑定，走本机 IP。">
           <span>出口</span>
         </Tooltip>
       ),

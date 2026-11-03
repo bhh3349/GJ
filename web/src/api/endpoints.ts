@@ -43,6 +43,8 @@ import type {
   KeyCreateRequest,
   KeyListQuery,
   KeyPatchRequest,
+  KeyProbeRequest,
+  KeyProbeResult,
   ChangePasswordRequest,
   LoginRequest,
   LogListQuery,
@@ -167,6 +169,12 @@ export const keysApi = {
   testBalance: (id: string) => api.post<BalanceTestResult>(`/keys/${id}/test-balance`),
   batch: (body: KeyBatchRequest) => api.post<KeyBatchResult>('/keys/batch', body),
   refreshAllBalances: () => api.post<TaskAccepted>('/keys/balance/refresh'),
+  /**
+   * 试调一次（v1.24.0）：用这把 key 真打一次上游，回答「现在能不能用」。
+   * 业务失败也是 `200` + `ok:false`，只有 400/404/429 才会进 catch ——
+   * 429 = 同一把 key 10s 内重复点，`details.retryAfterSeconds` 给等几秒。
+   */
+  probe: (id: string, body?: KeyProbeRequest) => api.post<KeyProbeResult>(`/keys/${id}/probe`, body),
 };
 
 // ── §4 用户组 ─────────────────────────────────────────────────────────────

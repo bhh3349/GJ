@@ -267,21 +267,20 @@ describe('web 排版防回退锁（2026-10-12 事故）', () => {
     expect(vite).toMatch(/host:\s*true/);
   });
 
-  it('Key 管理表：加「首次调用」列不增横滚，空值渲染「未调用」而不是 —（v1.23.0 / 业主 2026-11-03）', () => {
+  it('Key 管理表：瘦身 Σ≤1176 零横滚，操作列右冻结、首列无冻结（业主 2026-11-03）', () => {
     // 两条事故风险，都真会发到屏幕上：
-    //  ① 新列把 Σ 列宽撑大 ⇒ 1440 下横滚量增加（业主对「无谓横向滚动」的既有口径）。
-    //     所以新列的宽度必须从有余量的列里借，Σ 不许涨 —— 这里锁的就是 Σ 的上界。
+    //  ① Σ 列宽回弹 ⇒ 1440（可用 1176px）重新出现无谓横向滚动（业主口径：列宽按内容收紧）。
     //  ② `firstUsedAt: null`（从未被真正用过）被画成 `—` / `0` / 空串：`—` 在本页已经
     //     被「手工 key 无归属」占用，两个空混成一个符号，读的人分不清"没有归属"和"没用过"。
     const page = readFileSync(join(webSrcRoot, 'pages', 'KeysPage.tsx'), 'utf8');
-    const BASELINE_TABLE_WIDTH = 1662; // 加列之前的 Σ 列宽（含勾选列 32）
+    const AVAIL_WIDTH = 1176; // 1440×900 实测可用宽（Chrome 缩放 100%，侧栏收起）
 
     const scrollX = /scroll=\{\{ x: (\d+) \}\}/.exec(page)?.[1];
     expect(scrollX).toBeTruthy();
-    expect(Number(scrollX)).toBeLessThanOrEqual(BASELINE_TABLE_WIDTH);
-    // 正对照：把新列的 96 直接加到 scroll.x 上（本次唯一禁止的写法）必须被抓到。
-    expect(Number(/scroll=\{\{ x: (\d+) \}\}/.exec('scroll={{ x: 1758 }}')?.[1])).toBeGreaterThan(
-      BASELINE_TABLE_WIDTH,
+    expect(Number(scrollX)).toBeLessThanOrEqual(AVAIL_WIDTH);
+    // 正对照：瘦身前的事故值 1662 必须被判据抓到（这条锁放开过一次，判据不许跟着失灵）。
+    expect(Number(/scroll=\{\{ x: (\d+) \}\}/.exec('scroll={{ x: 1662 }}')?.[1])).toBeGreaterThan(
+      AVAIL_WIDTH,
     );
 
     const colAt = page.indexOf("dataIndex: 'firstUsedAt'");
@@ -295,12 +294,16 @@ describe('web 排版防回退锁（2026-10-12 事故）', () => {
     expect(/render: \(v\) => v === null \? <Text>—<\/Text>/.test("render: (v) => v === null ? <Text>—</Text> : null")).toBe(true);
     expect(col).toMatch(/formatIso\(value\)/);
 
-    // 冻结与可见性在这张表上互相冲突：1662px 的表冻 312px「操作」会从 1104px 起把右侧整段盖住，
-    // 实测「首次调用」整列被盖掉（0px 可见，1440×900）。所以在表格瘦身之前，这里**不许**出现
-    // 固定列；要冻必须先瘦身（那时同步改这条锁并在回执里点名）。
-    expect(page).not.toMatch(/fixed: '(left|right)'/);
+    // 冻结口径（业主 2026-11-03 点名纠正，取代旧"瘦身前不许出现固定列"锁）：
+    // **只**许操作列 fixed:'right'，首列（标签 / Key）一律不冻 —— 左冻结是他没要过的。
+    expect(page).toMatch(/fixed: 'right'/);
+    expect(page).not.toMatch(/fixed: 'left'/);
+    // 变异验证：把左冻结加回合成样本，判据必须当场红（否则"不许左冻"是恒真摆设）。
+    const hasLeftFixed = (src: string): boolean => /fixed: 'left'/.test(src);
+    expect(hasLeftFixed("dataIndex: 'identifier', fixed: 'left' as const,")).toBe(true);
+    expect(hasLeftFixed(page)).toBe(false);
 
-    // Σ 列宽逐列加总 = 1630（11 个数据列），加勾选列 32 = 1662 = 加列前的表宽：
+    // Σ 列宽逐列加总 = 1140（11 个数据列），加勾选列 32 = 1172 ≤ 1176（1440 零横滚）：
     // 任何人往表里塞宽列而不腾地方，这里当场红。
     const colsSrc = page.slice(
       page.indexOf('const columns: ColumnsType<UpstreamKey>'),
@@ -309,15 +312,17 @@ describe('web 排版防回退锁（2026-10-12 事故）', () => {
     const widths = [...colsSrc.matchAll(/^ {6}width: (\d+),$/gm)].map((m) => Number(m[1]));
     expect(widths).toHaveLength(11);
     const sumWithSelection = widths.reduce((a, b) => a + b, 0) + 32;
-    expect(sumWithSelection).toBe(BASELINE_TABLE_WIDTH);
-    // 正对照：多塞一列 96px 而不腾地方的合成样本，判据必须红。
-    expect([...widths, 96].reduce((a, b) => a + b, 0) + 32).toBeGreaterThan(BASELINE_TABLE_WIDTH);
+    expect(sumWithSelection).toBeLessThanOrEqual(AVAIL_WIDTH);
+    // scroll.x 必须与真实 Σ 一致（改列宽忘改 scroll.x 的漂移当场红）。
+    expect(Number(scrollX)).toBe(sumWithSelection);
+    // 正对照：事故值 1662 加回合成样本，判据必须红。
+    expect(1662).toBeGreaterThan(AVAIL_WIDTH);
   });
 
-  it('账号池表：列宽收紧后仍在 1440 视口内，左右两列成对冻结（业主 2026-11-03）', () => {
+  it('账号池表：操作列右冻结、首列不冻（业主 2026-11-03 纠正：成对冻结撤左腿）', () => {
     // 事故本体：`scroll={{ x: 1894 }}` + 11 列清一色给宽，1440 视口（实测可用 1166px）白白滚一屏；
     // 操作列在横向滚动时滑出视野，业主原话「把操作那一列变成冻结列，永远常在」。
-    // 锁的不是像素而是两个**结构事实**：表宽不超过 1440 可用宽、冻结成对且带宽度。
+    // 2026-11-03 业主再纠正：只冻操作列，**首列不冻**（左冻结是我们自己加的，他没要过）。
     const page = readFileSync(
       join(webSrcRoot, 'pages', 'upstreams', 'SupplierAccountsPage.tsx'),
       'utf8',
@@ -332,11 +337,10 @@ describe('web 排版防回退锁（2026-10-12 事故）', () => {
       MAX_TABLE_WIDTH,
     );
 
-    // 只冻右边不冻左边，横向滚到中段就分不清那行是谁 —— 两列必须成对冻结，且都得声明宽度
-    // （没宽度的列在 fixed 布局里会被内容挤成面条，2026-10-12 事故同源）。
+    // 首列（账号）**无** fixed，宽度声明保留（fixed 布局里没宽度的列会被内容挤成面条）。
     const accountAt = page.indexOf("dataIndex: 'identifier'");
     const accountCol = page.slice(accountAt, page.indexOf("dataIndex: 'status'", accountAt));
-    expect(accountCol).toMatch(/fixed: 'left'/);
+    expect(accountCol).not.toMatch(/fixed: 'left'/);
     expect(accountCol).toMatch(/width: \d+/);
 
     const actionsAt = page.indexOf("key: 'actions'");
@@ -346,6 +350,10 @@ describe('web 排版防回退锁（2026-10-12 事故）', () => {
     expect(actionCol).toMatch(/width: \d+/);
     // 负腿：右侧少了 fixed 的合成样本必须被抓到（判据不是恒真）。
     expect(/fixed: 'right'/.test("key: 'actions', width: 176,")).toBe(false);
+    // 变异验证：把左冻结加回合成样本，「首列不冻」判据必须当场红。
+    const hasLeftFixed = (src: string): boolean => /fixed: 'left'/.test(src);
+    expect(hasLeftFixed(`${accountCol.slice(0, 80)}\n fixed: 'left' as const,`)).toBe(true);
+    expect(hasLeftFixed(accountCol)).toBe(false);
 
     // 勾选/展开两列默认各 54/36px，收紧到 32 才把省下的宽度让给内容列。
     expect(page).toMatch(/rowSelection=\{\{[\s\S]{0,160}columnWidth: 32/);

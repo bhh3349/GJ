@@ -7,12 +7,13 @@
  * 两者正交：`health="healthy"` + `depleted=true` 是**完全合法的组合** —— 这把 key 没被停用、
  * 没在冷却，只是没钱了、网关不会选它（§20.1）。
  *
- * 把它塞进 `HealthTag` 的 `HEALTH_META` 会造成**互斥的假象**：一把健康的透支 key
- * 只会画出「透支」，读的人于是以为它不健康 —— 而它健康得很，问题在钱包里。
- * 所以这里**必须**与 `HealthTag` 并排画（见 KeysPage 的健康态列），不得只画一个。
+ * 但它**不是**与「健康」并排的第二等标签（v1.24.0 补记 / 业主原话「都透支了还健康呢」）：
+ * `depleted=true` 的行里，**主 chip 只能是「透支」**，运行态细节（冷却 / 连续失败）降为
+ * 次行灰字或 tooltip。所以调用方（KeysPage 健康格）在透支行只画这一个标签，
+ * 不再并排一个绿色「健康」。
  *
- * 橙（`tokens.color.orange`）而不是红：红色留给"真出事"（登录失败 / 会话过期），
- * 透支是"已经耗尽、不是故障" —— 与 `color` 表里 `orange` 那段注释同一口径。
+ * 颜色 = **红**：业主 2026-11-03 口径（透支是"没钱付账、网关已排除它"，不是可忽略的提示）。
+ * 早先这里用橙，理由是"红留给真出事"；业主看板后定红，账号池与账号详情共用本组件，口径统一。
  */
 import { Tag, Tooltip } from 'antd';
 
@@ -34,8 +35,8 @@ import { formatIso, formatRelative } from '@/utils/format';
  * 他现在看到的"有套餐余额还是被锁"正是收窄前的旧判据留下的历史锁，靠「解除透支」清）。
  */
 const REASON_HINT: Record<DepletedReason, string> = {
-  balance: '它自己的余额 / 套餐余量已耗尽',
-  account: '它所属的账号停了它（账号余额见底且套餐也不可用，或该账号已进废号池）',
+  balance: '余额 / 套餐余量已耗尽',
+  account: '所属账号停了它（余额见底且套餐也不可用，或账号已进废号池）',
 };
 
 export interface DepletedTagProps {
@@ -51,9 +52,8 @@ export function DepletedTag({ depleted, depletedAt = null, depletedReason = null
   const reason = depletedReason ? REASON_HINT[depletedReason] : '原因未记录';
   const parts = [
     `透支锁存：${reason}`,
-    // 「重新启用」是旧写法，而 `enable` **不清锁**（后端定死）—— 照字面点「启用」会得到一个
-    // "点了没报错、什么都没变"，是这一格最容易误导人的一处。这里写动作的真名。
-    '网关已把它排除出选路。只有人工「解除透支」才解除 —— 余额回升**不会**自动解锁，点「启用」也不清这把锁。',
+    // 「重新启用」是旧写法，而 `enable` **不清锁**（后端定死）—— 只留「不做会怎样」这一句。
+    '网关已排除它出选路；只有人工「解除透支」才清，余额回升不会自动解锁',
   ];
   if (depletedAt) parts.push(`最早发现于 ${formatIso(depletedAt)}（${formatRelative(depletedAt)}）`);
 
@@ -63,8 +63,8 @@ export function DepletedTag({ depleted, depletedAt = null, depletedReason = null
         bordered={false}
         style={{
           marginInlineEnd: 0,
-          color: tokens.color.orange,
-          background: tokens.tint.orange,
+          color: tokens.color.error,
+          background: tokens.tint.error,
           whiteSpace: 'nowrap',
         }}
       >

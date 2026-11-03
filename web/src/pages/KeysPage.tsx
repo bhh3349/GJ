@@ -10,7 +10,7 @@
  *   同一条（§16.7 Tier 1.5）⇒ §14.7 二次确认，走 `confirmManualRefresh`，本页不自造请求数。
  *   单把 key 的刷新**刻意不弹**：一次请求，"批"的代价量级不成立，且同一个动作问两遍会让人盲点「确定」。
  * - v1.18.0：`account` / `tokenPlan.totalTokens` / `remainingTokens` 的 null 语义上首页 ——
- *   「未同步」与「0」是两句话，见 `TokenPlanCell`。套餐余量的回填腿 v1.22.0 起有**两条**：
+ *   「未同步」与「0」是两句话，见 `AmountCell`（业主口径后列头改「金额」，余额类/套餐类各画各的）。套餐余量的回填腿 v1.22.0 起有**两条**：
  *   账号池 `refresh`（「刷新余额」，顺带回填余量与掩码）与 §15.2 `keys/sync`（行内/批量
  *   「同步套餐余量」，`ids` = 归属账号）。`keys/sync` 仍是**掩码取不到时的兜底** —— 上游
  *   那个待实测端点没回数据时，刷新补不了掩码，「未同步」会一直挂着，只能靠它补（ADR-0047）。
@@ -26,6 +26,7 @@ import { DeleteOutlined, PlusOutlined, ReloadOutlined } from '@ant-design/icons'
 import {
   App,
   Button,
+  Dropdown,
   Empty,
   Input,
   Segmented,
@@ -37,12 +38,14 @@ import {
   Tooltip,
   Typography,
 } from 'antd';
+import type { MenuProps } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import { keysApi, supplierAccountsApi, upstreamsApi } from '@/api/endpoints';
 import { useAction, useResource } from '@/api/hooks';
+import { describeError, isApiError } from '@/api/http';
 import { useTaskPolling } from '@/api/useTaskPolling';
 import {
   PAGE_SIZE_DEFAULT,
@@ -51,14 +54,15 @@ import {
   type HintCode,
   type KeyCategory,
   type KeyHealth,
+  type KeyProbeCode,
   type Upstream,
   type UpstreamKey,
 } from '@/api/types';
 import { BalanceHint } from '@/components/BalanceHint';
-import { BalanceText } from '@/components/BalanceText';
+import { BalanceText, balanceSourceLabel } from '@/components/BalanceText';
 import { balanceReadiness } from '@/utils/balanceReadiness';
 import { DepletedTag } from '@/components/DepletedTag';
-import { HealthTag, failureReasonLabel } from '@/components/HealthTag';
+import { HealthTag } from '@/components/HealthTag';
 import { confirmManualRefresh } from '@/components/ManualRefreshConfirm';
 import { PageHeader } from '@/components/PageHeader';
 import { ErrorState, LoadingState } from '@/components/states/StateBlock';
@@ -67,7 +71,14 @@ import { BalanceModal, KeyFormModal } from '@/pages/keys/KeyModals';
 import { KeyBalanceSelfTest } from '@/pages/keys/KeyBalanceSelfTest';
 import { useLive } from '@/realtime/useLive';
 import { tokens } from '@/theme/tokens';
-import { formatCents, formatCompact, formatIso, formatRelative, formatTokens, formatTokensShort, formatUntil } from '@/utils/format';
+import {
+  formatCents,
+  formatCompact,
+  formatIso,
+  formatRelative,
+  formatTokensShort,
+  formatUntil,
+} from '@/utils/format';
 
 const { Text } = Typography;
 
@@ -93,45 +104,58 @@ const EMPTY_FILTERS: Filters = {
 };
 
 /**
- * 「余额 / 套餐」列的套餐侧（契约 §3 v1.18.0 / v1.22.0）。
+ * 试调结论的中文短名（契约 §3 `ProbeResult.probeCode` 八值，v1.24.0）。
  *
- * 三个取值**必须长得不一样**（§0.2「未知 ≠ 0」在这张表上的落点）：
- * - `remainingTokens === null` → 「未同步」徽标：**从未查到过**，不是烧干。tooltip 顺手指明
- *   真相源与兜底路（账号池「刷新余额」会回填；刷新后仍不消 = 掩码没取到 → 「同步套餐余量」补）。
- * - `remainingTokens === 0` → 「0」并给烧干色：查到过、确实没了。与徽标同列出现时一眼可分。
- * - 有值 → `6.2M / 8M`；`totalTokens === null`（无归属 / 撞号 / 上游没给）只给 `6.2M / —`。
- *   两个都 null 时只画「未同步」，不画「— / —」的空壳 —— 那读起来像"两个字段都坏了"，
- *   而事实只是"还没同步"。
- *
- * **第二行 = 钱额度面**（v1.22.0 / ADR-0046）：`¥29.90 · 已用 ¥6.42`。台账里有这一面，
- * 本页此前只有 token 数，业主读成"数据没显示对"。两格**各自透传**（token 未知不拖累金额），
- * 所以「未同步」的行只要台账给了钱额度也照画；两格都 null 才不画这一段。
- * 格子最多两行：到期用 `formatUntil` 的短形（「还剩 29 天」）与钱面同行，精确时刻进 tooltip。
+ * 逐行把错码翻成人话 —— 业主点完按钮要能直接读出"哪把能用、为什么不能用"，
+ * 不是去查枚举。上游自己给的 `upstreamMessage` 单独放进 tooltip（已过后端脱敏）。
  */
-function TokenPlanCell({ row }: { row: UpstreamKey }) {
-  const plan = row.tokenPlan;
-  if (plan === null) {
-    // 契约保证 token-plan 行的 `tokenPlan` 恒为对象（`repo/keys.ts` 读路径按类别再造），
-    // 这个分支是防御：真到了说明响应违约，如实说，不编一个 0。
-    return <Text type="secondary">套餐信息缺失</Text>;
-  }
-  const remaining = plan.remainingTokens;
-  const total = plan.totalTokens;
-  const exhausted = remaining === 0;
-  // 钱额度面：`null` = 台账没给出（无归属 / 撞号 / 上游没给），照 §0.2 画「—」不是 0。
-  const moneyVisible = plan.amountTotalCents !== null || plan.amountUsedCents !== null;
-  const moneyShort = moneyVisible
-    ? `${formatCents(plan.amountTotalCents)} · 已用 ${formatCents(plan.amountUsedCents)}`
-    : null;
-  const moneyTip = moneyVisible
-    ? ` · 台账套餐额度 ${formatCents(plan.amountTotalCents)}、已用 ${formatCents(plan.amountUsedCents)}`
-    : '';
-  const expiryShort = plan.expiresAt ? formatUntil(plan.expiresAt) : '无到期时间';
-  const secondLine = [moneyShort, expiryShort].filter(Boolean).join(' · ');
-  return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
-      {remaining === null ? (
-        <Tooltip title="这把 key 的套餐余量还没同步过（余量未知 ≠ 0，不是 0）。账号池「刷新余额」会顺带回填余量与掩码，所以正常下一轮刷新后「未同步」自己就消失；刷新过仍是未同步，说明这个账号的 key 掩码还没取到 —— 点一次「同步套餐余量」（本页行内或账号池批量）即可补上">
+const PROBE_LABEL: Record<KeyProbeCode, string> = {
+  UPSTREAM_UNREACHABLE: '上游连不上',
+  TIMEOUT: '探活超时',
+  AUTH_REJECTED: '鉴权被拒',
+  MODEL_REJECTED: '模型不被接受',
+  QUOTA_EXHAUSTED: '额度耗尽',
+  RATE_LIMITED: '上游限流',
+  UPSTREAM_ERROR: '上游错误',
+  EMPTY_RESPONSE: '空响应',
+};
+
+/** 单行试调结果：`✓` / `✗` + 短名进格子，完整诊断进 tooltip。 */
+interface ProbeRowState {
+  ok: boolean;
+  short: string;
+  detail: string;
+}
+
+/**
+ * 「金额」列（业主 2026-11-03 口径：列头由「余额 / 套餐」改成「金额」，210 → ~150）。
+ *
+ * 业主原话：「余额key就显示余额啊，套餐key就显示套餐金额和赠送的8M啊（29.9/8M）」。
+ *
+ * - **套餐类**：主行 `¥29.90 / 8M`（`amountTotalCents` / `totalTokens`，现成字段、零后端改动），
+ *   次行 `剩 6.2M · 还剩 29 天`，全量（含已用金额、到期精确时刻）进 tooltip。
+ * - **余额类**：只画余额（账号型 key 仍是 `account.balanceCents` 只读镜像），次行只留
+ *   来源 / 更新时间的小灰字。
+ *
+ * 三个 null 语义照旧（§0.2「0 和 null 不是一回事」在这张表上的落点）：
+ * - 套餐两面都没值 ⇒ 「未同步」徽标（**从未查到过**，不是烧干）；两格都 null 时**不画**空壳
+ *   `— / —`，那读起来像"两个字段都坏了"，而事实只是"还没同步"。
+ * - 单面 null ⇒ 那一格画 `—`（台账没给这一面），另一面照画。
+ * - `remainingTokens === 0` ⇒ 次行照写「剩 0」并给烧干色 —— 查到过、确实没了。
+ */
+function AmountCell({ row }: { row: UpstreamKey }) {
+  if (row.category === 'token-plan') {
+    const plan = row.tokenPlan;
+    if (plan === null) {
+      // 契约保证 token-plan 行的 `tokenPlan` 恒为对象（读路径按类别再造），这个分支是防御：
+      // 真到了说明响应违约，如实说，不编一个 0。
+      return <Text type="secondary">套餐信息缺失</Text>;
+    }
+    const moneyKnown = plan.amountTotalCents !== null || plan.amountUsedCents !== null;
+    const tokenKnown = plan.totalTokens !== null || plan.remainingTokens !== null;
+    if (!moneyKnown && !tokenKnown) {
+      return (
+        <Tooltip title="台账未同步（未知 ≠ 0）：账号池「刷新余额」会回填">
           <Tag
             bordered={false}
             style={{
@@ -144,25 +168,68 @@ function TokenPlanCell({ row }: { row: UpstreamKey }) {
             未同步
           </Tag>
         </Tooltip>
-      ) : (
-        <Tooltip
-          title={`${formatTokens(remaining)}${total === null ? '' : ` / ${formatTokens(total)}`}${moneyTip}${plan.expiresAt ? ` · 到期 ${formatIso(plan.expiresAt)}` : ''}`}
-        >
-          <Text
-            style={{
-              fontVariantNumeric: 'tabular-nums',
-              color: exhausted ? tokens.color.error : undefined,
-              fontWeight: exhausted ? 600 : undefined,
-            }}
-          >
-            {formatTokensShort(remaining)}
-            <Text type="secondary"> / {formatTokensShort(total)}</Text>
+      );
+    }
+    const exhausted = plan.remainingTokens === 0;
+    const main = `${formatCents(plan.amountTotalCents)} / ${formatTokensShort(plan.totalTokens)}`;
+    const second = [
+      plan.remainingTokens === null ? null : `剩 ${formatTokensShort(plan.remainingTokens)}`,
+      plan.expiresAt ? formatUntil(plan.expiresAt) : null,
+    ]
+      .filter(Boolean)
+      .join(' · ');
+    const tip = [
+      `套餐额度 ${formatCents(plan.amountTotalCents)}，已用 ${formatCents(plan.amountUsedCents)}`,
+      `基础额度 ${formatTokensShort(plan.totalTokens)}，剩余 ${formatTokensShort(plan.remainingTokens)}`,
+      plan.expiresAt ? `到期 ${formatIso(plan.expiresAt)}（${formatUntil(plan.expiresAt)}）` : '无到期时间',
+    ].join('；');
+    return (
+      <Tooltip title={tip}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
+          <Text strong style={{ fontVariantNumeric: 'tabular-nums', fontSize: 13 }}>
+            {main}
           </Text>
-        </Tooltip>
-      )}
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        {secondLine}
-      </Text>
+          {second ? (
+            <Text
+              type="secondary"
+              style={{
+                fontSize: 11,
+                color: exhausted ? tokens.color.error : undefined,
+                fontWeight: exhausted ? 600 : undefined,
+              }}
+            >
+              {second}
+            </Text>
+          ) : null}
+        </div>
+      </Tooltip>
+    );
+  }
+
+  /*
+   * 余额类。契约 §3 v1.18.1：账号型 key 的余额是**账号级资金的只读镜像** —— 渲染
+   * `account.balanceCents` / `account.balanceUpdatedAt`，**不渲染 key 自己的 `balance`**
+   * （账号型上游 key 级余额查询不支持，那列恒 null；拿它渲染只会得到一片「未知」）。
+   * 币种：账号行只有分，没有 currency 列，管理面统一按 CNY 呈现（§15.1 金额口径）。
+   */
+  const viaAccount = row.account !== null;
+  const value = viaAccount && row.account ? row.account.balanceCents : row.balance;
+  const updatedAt = viaAccount && row.account ? row.account.balanceUpdatedAt : row.balanceUpdatedAt;
+  const sourceLabel = viaAccount ? '账号' : balanceSourceLabel(row.balanceSource);
+  const second = [sourceLabel, updatedAt ? formatRelative(updatedAt) : null].filter(Boolean).join(' · ');
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0 }}>
+      <BalanceText
+        value={value}
+        currency={row.balanceCurrency ?? 'CNY'}
+        unlimited={row.unlimited}
+        strong
+      />
+      {second ? (
+        <Text type="secondary" style={{ fontSize: 11 }}>
+          {second}
+        </Text>
+      ) : null}
     </div>
   );
 }
@@ -191,6 +258,12 @@ export default function KeysPage() {
     open: false,
     title: '同步套餐余量',
   });
+
+  /** 逐行试调结果（`✓` / `✗` 与完整诊断），按 key id 记；重拉列表不主动清（结论只对"刚才那一刻"有效）。 */
+  const [probeById, setProbeById] = useState<Record<string, ProbeRowState>>({});
+  const [probingIds, setProbingIds] = useState<Record<string, true>>({});
+  /** 批量试调的进度（只在 header 那个按钮上显示，够看就行）。 */
+  const [probeBatch, setProbeBatch] = useState({ running: false, done: 0, total: 0 });
 
   const upstreams = useResource(() => upstreamsApi.list({ pageSize: 200 }), []);
   const upstreamName = useMemo(() => {
@@ -341,6 +414,110 @@ export default function KeysPage() {
   };
 
   /**
+   * 试调一次（契约 §3 v1.24.0 `POST /api/keys/:id/probe`）。
+   *
+   * 与「查余额」的分工：探活打的是**这把 key 本身**（白名单第一条模型打一次 chat，
+   * 或退化成 `/v1/models`），回答"现在能不能用"；后端**不写用量、不动健康态**（ADR-0049），
+   * 所以这里也不 reload 列表 —— 重拉只会把没变的值再画一遍，看着像"点完什么都没发生"。
+   *
+   * 429 是「同一把 key 10 秒内又点了一次」的后端频控，**不是失败结论**：提示等几秒，
+   * 绝不写进 `✗`（写进去会让人以为 key 坏了）。
+   */
+  const probeOne = async (row: UpstreamKey): Promise<void> => {
+    setProbingIds((prev) => ({ ...prev, [row.id]: true }));
+    try {
+      const res = await keysApi.probe(row.id);
+      const where = res.kind === 'chat' ? `${res.model ?? 'chat'}（打了一次 chat）` : '/v1/models（不烧 token）';
+      const label = res.ok ? '可用' : PROBE_LABEL[res.probeCode ?? 'UPSTREAM_ERROR'];
+      const detail = [
+        `${label} · ${where}`,
+        `状态 ${res.httpStatus ?? '无'} · ${res.durationMs}ms`,
+        res.upstreamErrorCode ? `上游码 ${res.upstreamErrorCode}` : null,
+        res.upstreamMessage ? `上游说：${res.upstreamMessage}` : null,
+        `${formatIso(res.checkedAt)} 试调`,
+      ]
+        .filter(Boolean)
+        .join('；');
+      setProbeById((prev) => ({ ...prev, [row.id]: { ok: res.ok, short: label, detail } }));
+    } catch (reason) {
+      if (isApiError(reason) && reason.status === 429) {
+        const retry = (reason.details as { retryAfterSeconds?: number } | null)?.retryAfterSeconds;
+        message.warning(`${row.maskedKey} 刚试调过，${retry ?? 10} 秒后再试（同一把 key 10 秒一次）`);
+        return;
+      }
+      const { code, message: text } = describeError(reason);
+      setProbeById((prev) => ({
+        ...prev,
+        [row.id]: { ok: false, short: '请求失败', detail: `${text} [${code}]` },
+      }));
+    } finally {
+      setProbingIds((prev) => {
+        const next = { ...prev };
+        delete next[row.id];
+        return next;
+      });
+    }
+  };
+
+  /**
+   * 批量试调：勾选优先，没有勾选 = **当前页全部启用行**。并发 2 —— 与后端全局上限同一量级：
+   * 后端那 2 路是"管理员手点的保险"，前端开更多只会排队、把进度拖长，不会更快。
+   * 单把失败不中断全批（`probeOne` 自己吃掉所有错误，含 429）。
+   */
+  const runProbePool = async (targets: UpstreamKey[]): Promise<void> => {
+    const queue = [...targets];
+    let done = 0;
+    setProbeBatch({ running: true, done: 0, total: targets.length });
+    const worker = async (): Promise<void> => {
+      for (;;) {
+        const row = queue.shift();
+        if (row === undefined) return;
+        await probeOne(row);
+        done += 1;
+        setProbeBatch({ running: true, done, total: targets.length });
+      }
+    };
+    await Promise.all([worker(), worker()]);
+    setProbeBatch({ running: false, done, total: targets.length });
+    message.success(`试调完成：${targets.length} 把，结论见各行 ✓ / ✗`);
+  };
+
+  /**
+   * 「全部试调」= 业主原话「每个账号的key必须要调用一下保活」。
+   * 打之前先说清**打谁、打几把**（这是真打上游的批动作，不是本地刷新）。
+   */
+  const probeMany = (): void => {
+    const picked = selectedIds.length > 0;
+    const targets = picked
+      ? rows.filter((row) => selectedIds.includes(row.id))
+      : rows.filter((row) => row.enabled && row.deletedAt === null);
+    if (targets.length === 0) {
+      message.info(picked ? '勾选里没有可试调的 key' : '当前页没有启用中的 key');
+      return;
+    }
+    modal.confirm({
+      title: `试调 ${targets.length} 把 key？`,
+      content: (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          <span>
+            {picked
+              ? `逐把真打上游（勾选的 ${targets.length} 把，前端并发 2）。`
+              : `逐把真打上游（当前页全部启用的 ${targets.length} 把，前端并发 2）。`}
+          </span>
+          <span style={{ color: tokens.color.textSecondary }}>
+            只读观测：不写用量、不动健康态；单把失败不中断，结果逐行 ✓ / ✗。
+          </span>
+        </div>
+      ),
+      okText: '开始试调',
+      cancelText: '取消',
+      onOk: async () => {
+        await runProbePool(targets);
+      },
+    });
+  };
+
+  /**
    * 勾选 → 按**上游**分组去重出要同步的账号集合。
    *
    * 为什么按上游而不是逐账号打：`keys/sync` 的 `ids` 就是「该上游的账号列表」，一个上游
@@ -461,17 +638,13 @@ export default function KeysPage() {
   const undeplete = (): void => {
     const ids = [...selectedIds];
     if (ids.length === 0) return;
-    const depletedCount = rows.filter((row) => ids.includes(row.id) && row.depleted).length;
     modal.confirm({
       title: `解除 ${ids.length} 个 key 的透支锁？`,
       content: (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          <span>
-            将清除锁存标记并启用这 {ids.length} 个 key（其中 {depletedCount} 个当前处于透支锁存）。
-          </span>
+          <span>清锁并启用这 {ids.length} 个 key，它们会回到选路池。</span>
           <span style={{ color: tokens.color.warning }}>
-            清除后它们会<strong>回到选路池</strong>。如果余额 / 套餐余量仍然是空的，下一次余额刷新会
-            <strong>再次锁上</strong> —— 解除不等于钱到账了。
+            若余额仍是空的，下一次余额刷新会<strong>再次锁上</strong>。
           </span>
         </div>
       ),
@@ -532,13 +705,12 @@ export default function KeysPage() {
 
   const columns: ColumnsType<UpstreamKey> = [
     {
-      // 身份列**不冻结**：本表 12 列合计 1662px，1440 视口可用宽只有 1176px。
-      // 冻结「操作」(312px) 会从 1104px 起把右侧整段盖住 —— 实测「首次调用」整列被盖掉
-      // （0px 可见），主数据变成必须先横滚才看得见。冻结 + 可见性在这张表上不能同时成立，
-      // 列预算（今日 token 是否并入余额 / 套餐等）留给独立的表格瘦身单，不在加列这一单里混。
+      // 业主原话「那个标签/key那么长，干嘛啊」→ 200 收到 118：标签**一行省略号**（全文进 tooltip），
+      // 掩码另起一行 mono。宽表里身份列不该靠"多显示几个字的标签"占掉主数据的宽度。
+      // 首列**不冻结**（业主 2026-11-03：只冻操作列，左右成对冻结是我们自己加的，已撤）。
       title: '标签 / Key',
       dataIndex: 'label',
-      width: 200,
+      width: 118,
       ellipsis: true,
       render: (_: string, row) => (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
@@ -552,10 +724,18 @@ export default function KeysPage() {
       ),
     },
     {
+      // 140 → 106：上游名只做"这是哪家"的定位，长名字省略号 + tooltip，不让它撑列。
       title: '上游',
       dataIndex: 'upstreamId',
-      width: 140,
-      render: (value: string) => <Text type="secondary">{upstreamName.get(value) ?? value}</Text>,
+      width: 106,
+      render: (value: string) => {
+        const name = upstreamName.get(value) ?? value;
+        return (
+          <Text type="secondary" style={{ fontSize: 12 }} ellipsis={{ tooltip: name }}>
+            {name}
+          </Text>
+        );
+      },
     },
     {
       /**
@@ -565,7 +745,7 @@ export default function KeysPage() {
        */
       title: '所属账号',
       dataIndex: 'account',
-      width: 150,
+      width: 112,
       render: (account: UpstreamKey['account']) =>
         account === null ? (
           <Tooltip title="手工建的 key（非账号池来源），没有归属账号 —— 这不是「未知」">
@@ -573,14 +753,19 @@ export default function KeysPage() {
           </Tooltip>
         ) : (
           <Tooltip title="归属供应商账号（掩码）。该账号的余额与套餐余量是这些 key 的资金来源">
-            <Text style={{ fontFamily: tokens.font.mono, fontSize: 12 }}>{account.identifier}</Text>
+            <Text
+              style={{ fontFamily: tokens.font.mono, fontSize: 12 }}
+              ellipsis={{ tooltip: account.identifier }}
+            >
+              {account.identifier}
+            </Text>
           </Tooltip>
         ),
     },
     {
       title: '分类',
       dataIndex: 'category',
-      width: 96,
+      width: 84,
       render: (value: KeyCategory) =>
         value === 'balance' ? (
           <Tag bordered={false} style={{ background: tokens.tint.info, color: tokens.color.info }}>
@@ -593,68 +778,40 @@ export default function KeysPage() {
         ),
     },
     {
-      title: '余额 / 套餐',
+      title: '金额',
       dataIndex: 'balance',
-      width: 210,
-      render: (_: unknown, row) => {
-        if (row.category === 'token-plan') return <TokenPlanCell row={row} />;
-        /*
-         * 契约 §3 v1.18.1：账号型 key 的余额是**账号级资金的只读镜像** —— 渲染
-         * `account.balanceCents` / `account.balanceUpdatedAt`，**不渲染 key 自己的 `balance`**
-         * （账号型上游的 key 级余额查询不支持，那一列恒 null；拿它渲染只会得到一片「未知」，
-         * 而那正是业主说的"key 管理的余额没体现"）。
-         * 币种：账号行只有分，没有 currency 列，管理面统一按 CNY 呈现（§15.1 金额口径）。
-         */
-        if (row.account !== null) {
-          return (
-            <BalanceText
-              value={row.account.balanceCents}
-              updatedAt={row.account.balanceUpdatedAt}
-              showMeta
-              strong
-            />
-          );
-        }
-        return (
-          <BalanceText
-            value={row.balance}
-            currency={row.balanceCurrency ?? 'CNY'}
-            source={row.balanceSource}
-            updatedAt={row.balanceUpdatedAt}
-            unlimited={row.unlimited}
-            showMeta
-            strong
-          />
-        );
-      },
+      width: 150,
+      render: (_: unknown, row) => <AmountCell row={row} />,
     },
     {
       title: '健康态',
       dataIndex: 'health',
-      width: 170,
+      width: 116,
       render: (_: unknown, row) => (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           {/*
-            §20.1 硬约束：`depleted=true` 时**不得只画三灯**。所以这里是**并排两个**标签，
-            不是一个标签的两个取值 —— 一把 `health="healthy"` + `depleted=true` 的 key
-            两个标签同时出现，那正是它真实的样子（没坏，但没钱）。
+            §20.1 反向禁则（业主 2026-11-03：「都透支了还健康呢？」）：`depleted=true` 的行
+            **只画红「透支」**，不再并排绿色「健康」—— 没钱的 key 挂着绿灯是撒谎。
+            三灯只在 `depleted=false` 时出现；失败原因与冷却细节都收进 HealthTag 的 tooltip。
           */}
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: tokens.space.xs }}>
+          {row.depleted ? (
+            <DepletedTag
+              depleted
+              depletedAt={row.depletedAt}
+              depletedReason={row.depletedReason}
+            />
+          ) : (
             <HealthTag
+              compact
               health={row.health}
               cooldownUntil={row.cooldownUntil}
               lastFailureReason={row.lastFailureReason}
               consecutiveFailures={row.consecutiveFailures}
             />
-            <DepletedTag
-              depleted={row.depleted}
-              depletedAt={row.depletedAt}
-              depletedReason={row.depletedReason}
-            />
-          </div>
+          )}
           {row.consecutiveFailures > 0 ? (
             <Text type="secondary" style={{ fontSize: 11 }}>
-              连续失败 {row.consecutiveFailures} 次 · {failureReasonLabel(row.lastFailureReason)}
+              连续失败 {row.consecutiveFailures} 次
             </Text>
           ) : null}
         </div>
@@ -663,7 +820,7 @@ export default function KeysPage() {
     {
       title: '今日 token',
       dataIndex: 'todayTokens',
-      width: 96,
+      width: 88,
       align: 'right',
       render: (value: number) => <Text style={{ fontVariantNumeric: 'tabular-nums' }}>{formatCompact(value)}</Text>,
     },
@@ -685,10 +842,10 @@ export default function KeysPage() {
        */
       title: '首次调用',
       dataIndex: 'firstUsedAt',
-      width: 96,
+      width: 84,
       render: (value: string | null) =>
         !value ? (
-          <Tooltip title="这把 key 还没有被真正用过 —— 至今没有一条请求落到它的上游。存量 key 的调用日志超出保留期后也会显示「未调用」，后端宁可空着也不编一个时刻">
+          <Tooltip title="这把 key 至今没有一条请求落到上游；日志超出保留期也显示「未调用」">
             <Text type="secondary" style={{ fontSize: 12 }}>
               未调用
             </Text>
@@ -704,7 +861,7 @@ export default function KeysPage() {
     {
       title: '更新于',
       dataIndex: 'updatedAt',
-      width: 96,
+      width: 84,
       render: (value: string) => (
         <Tooltip title={formatIso(value)}>
           <Text type="secondary" style={{ fontSize: 12 }}>
@@ -716,15 +873,15 @@ export default function KeysPage() {
     {
       title: '启用',
       dataIndex: 'enabled',
-      width: 64,
+      width: 52,
       render: (_: unknown, row) => (
         <Tooltip
           title={
             row.deletedAt
-              ? '该 key 已删除，不再参与路由'
+              ? '已删除，不参与路由'
               : row.depleted
-                ? '管理端只写启用状态；健康态由网关决定。透支锁不受这里影响 —— 打开它不会让这把 key 回池，要用「解除透支」'
-                : '管理端只写启用状态；健康态由网关决定'
+                ? '只写启用状态；透支锁要「解除透支」才清'
+                : '只写启用状态；健康态由网关决定'
           }
         >
           <Switch
@@ -740,100 +897,89 @@ export default function KeysPage() {
       ),
     },
     {
-      // 「操作」**不冻结**：理由是刚性冲突而不是口味 —— 本表 1662px 宽、1440 可用 1176px，
-      // 冻结这 312px 会让「首次调用 / 更新于 / 启用」在首屏被整列盖住（实测 0px 可见）。
-      // 业主「操作列冻结常在」的口径在账号池表成立（那张表已瘦身到 1166px 容得下），
-      // 这张表的列预算还没做，先保主数据可见。
+      /*
+        「操作」右冻结（业主 2026-11-03 口径：**只**冻结操作列，首列一律不冻）。
+        瘦身后 Σ=1172 ≤ 1440 可用 1176，冻结不再遮列（旧版 312px 冻结会把
+        「首次调用 / 更新于 / 启用」整列盖掉，实测 0px 可见，所以当年不冻）。
+        行内常驻「试调」；结果以 ✓ / ✗ 短标落在按钮左侧，完整诊断进 tooltip；
+        其余低频动作收进「更多」。
+      */
       title: '操作',
       key: 'actions',
-      width: 312,
-      render: (_: unknown, row) => (
-        <Space size={tokens.space.sm}>
-          <Button
-            size="small"
-            type="link"
-            style={{ padding: 0 }}
-            onClick={() => {
+      width: 146,
+      fixed: 'right',
+      render: (_: unknown, row) => {
+        const probe = probeById[row.id];
+        const menu: MenuProps = {
+          items: [
+            { key: 'edit', label: '编辑' },
+            ...(row.category === 'balance' ? [{ key: 'balance-input', label: '录入余额' }] : []),
+            { key: 'balance-check', label: '查余额' },
+            ...(row.category === 'token-plan' && row.account !== null
+              ? [{ key: 'plan-sync', label: '同步余量' }]
+              : []),
+            ...(row.category === 'balance' ? [{ key: 'self-test', label: '自测' }] : []),
+            { key: 'delete', label: '删除', danger: true },
+          ],
+          onClick: ({ key }) => {
+            if (key === 'edit') {
               setEditing(row);
               setFormOpen(true);
-            }}
-          >
-            编辑
-          </Button>
-          {row.category === 'balance' ? (
-            <Button size="small" type="link" style={{ padding: 0 }} onClick={() => setBalanceTarget(row)}>
-              录入余额
-            </Button>
-          ) : null}
-          {/*
-            账号型上游（tierflow / tokenrhythm）的 key 余额是**账号级资金的镜像**（契约 §2 v1.18.1）：
-            key 级余额查询不支持、后端恒 422。所以这里不给「查余额」按钮 —— 那是把一次注定的
-            失败做成一个功能 —— 换成指向账号池的引导入口。这是整页唯一"不发请求的按钮"，
-            文案必须写成**去哪儿做什么**，不能只写「查余额」把人送去一个空动作。
-          */}
-          {accountKindByUpstream.get(row.upstreamId) === true ? (
-            <Tooltip title="账号型上游的 key 余额就是账号余额（只读镜像），不支持单独查这把 key 的余额。余额请去账号池「刷新余额」—— 那一次刷新也会顺带回填套餐余量；掩码还没取到的再点「同步套餐余量」补齐">
-              <Button
-                size="small"
-                type="link"
-                style={{ padding: 0 }}
-                onClick={() => {
-                  navigate(`/upstreams/${row.upstreamId}/accounts`);
-                }}
-              >
-                去账号池查余额
-              </Button>
-            </Tooltip>
-          ) : (
-            <Button
-              size="small"
-              type="link"
-              style={{ padding: 0 }}
-              loading={isPending(`refresh:${row.id}`)}
-              disabled={row.deletedAt !== null}
-              onClick={() => {
+            } else if (key === 'balance-input') {
+              setBalanceTarget(row);
+            } else if (key === 'balance-check') {
+              /*
+                账号型上游的 key 余额是账号级镜像（§3 v1.18.1），key 级查询后端恒 422 ——
+                同一个「查余额」，账号型路由去账号池（那里才是账号余额的写入口）。
+              */
+              if (accountKindByUpstream.get(row.upstreamId) === true) {
+                navigate(`/upstreams/${row.upstreamId}/accounts`);
+              } else {
                 void refreshOne(row);
-              }}
-            >
-              查余额
-            </Button>
-          )}
-          {/*
-            套餐余量的回填腿：v1.22.0 起账号池「刷新余额」也会顺带回填余量与掩码，
-            所以这条（§15.2 `keys/sync`）不再是**唯一**的腿，而是**掩码取不到时的兜底** ——
-            刷新只能回填已有掩码的行，掩码缺了就一直是「未同步」，只有它能补（ADR-0047）。
-            只有「token-plan + 有归属账号」的行才有这个入口：没有归属就没有可同步的订阅。
-          */}
-          {row.category === 'token-plan' && row.account !== null ? (
+              }
+            } else if (key === 'plan-sync') {
+              void syncPlanOne(row);
+            } else if (key === 'self-test') {
+              setTestTarget(row);
+            } else if (key === 'delete') {
+              removeKey(row);
+            }
+          },
+        };
+        return (
+          <Space size={4}>
+            {probe ? (
+              <Tooltip title={probe.detail}>
+                <Tag
+                  bordered={false}
+                  color={probe.ok ? 'green' : 'red'}
+                  style={{ marginInlineEnd: 0 }}
+                  data-testid={`probe-result-${row.id}`}
+                >
+                  {probe.ok ? '✓' : '✗'}
+                </Tag>
+              </Tooltip>
+            ) : null}
             <Button
               size="small"
               type="link"
               style={{ padding: 0 }}
-              loading={isPending(`plansync:${row.id}`)}
+              loading={probingIds[row.id] === true}
               disabled={row.deletedAt !== null}
               onClick={() => {
-                void syncPlanOne(row);
+                void probeOne(row);
               }}
             >
-              同步套餐余量
+              试调
             </Button>
-          ) : null}
-          {row.category === 'balance' ? (
-            <Button
-              size="small"
-              type="link"
-              style={{ padding: 0 }}
-              disabled={row.deletedAt !== null}
-              onClick={() => setTestTarget(row)}
-            >
-              自测
-            </Button>
-          ) : null}
-          <Button size="small" type="link" danger style={{ padding: 0 }} onClick={() => removeKey(row)}>
-            删除
-          </Button>
-        </Space>
-      ),
+            <Dropdown menu={menu} trigger={['click']}>
+              <Button size="small" type="link" style={{ padding: 0 }}>
+                更多
+              </Button>
+            </Dropdown>
+          </Space>
+        );
+      },
     },
   ];
 
@@ -864,6 +1010,14 @@ export default function KeysPage() {
           <Space>
             <Button
               size="small"
+              onClick={probeMany}
+              loading={probeBatch.running}
+              disabled={(upstreams.data?.items.length ?? 0) === 0}
+            >
+              {probeBatch.running ? `试调 ${probeBatch.done}/${probeBatch.total}` : '全部试调'}
+            </Button>
+            <Button
+              size="small"
               icon={<ReloadOutlined />}
               loading={isPending('refreshAll') || task.running}
               disabled={(upstreams.data?.items.length ?? 0) === 0}
@@ -871,7 +1025,7 @@ export default function KeysPage() {
                 confirmRefreshAll();
               }}
             >
-              全量查余额
+              刷新
             </Button>
             <Button
               type="primary"
@@ -883,7 +1037,7 @@ export default function KeysPage() {
                 setFormOpen(true);
               }}
             >
-              新增 Key
+              新建
             </Button>
           </Space>
         }
@@ -961,8 +1115,8 @@ export default function KeysPage() {
             setPage(1);
           }}
         />
-        {/* 契约依据写在注释里（§20.1 的第四轴），tooltip 里只留人话：用户可见文案不带开发术语。 */}
-        <Tooltip title="透支锁存是一根与健康态正交的轴 —— 一把「健康」的 key 也可以同时是透支的">
+        {/* 契约依据写在注释里（§20.1 的第四轴），tooltip 只留一句人话。 */}
+        <Tooltip title="只看透支锁还挂着的 key（与健康态无关）">
           <Segmented
             size="small"
             value={filters.depleted === undefined ? 'all' : filters.depleted ? 'yes' : 'no'}
@@ -980,20 +1134,19 @@ export default function KeysPage() {
             }}
           />
         </Tooltip>
-        <Tooltip title="默认不显示已软删的 key；打开后可查历史（软删行仍保留，日志外键不断）">
-          <Segmented
-            size="small"
-            value={filters.includeDeleted ? 'with' : 'without'}
-            options={[
-              { label: '不含已删', value: 'without' },
-              { label: '含已删', value: 'with' },
-            ]}
-            onChange={(value) => {
-              setFilters((prev) => ({ ...prev, includeDeleted: value === 'with' }));
-              setPage(1);
-            }}
-          />
-        </Tooltip>
+        {/* 软删行的存在性说明留给「含已删」三个字本身。 */}
+        <Segmented
+          size="small"
+          value={filters.includeDeleted ? 'with' : 'without'}
+          options={[
+            { label: '不含已删', value: 'without' },
+            { label: '含已删', value: 'with' },
+          ]}
+          onChange={(value) => {
+            setFilters((prev) => ({ ...prev, includeDeleted: value === 'with' }));
+            setPage(1);
+          }}
+        />
         <Input.Search
           size="small"
           allowClear
@@ -1042,7 +1195,7 @@ export default function KeysPage() {
               (row) => selectedIds.includes(row.id) && row.category === 'token-plan' && row.account !== null,
             ) ? (
               <Button size="small" onClick={batchSyncPlan}>
-                批量同步套餐余量
+                同步余量
               </Button>
             ) : null}
             <Button size="small" danger icon={<DeleteOutlined />} onClick={batchRemove}>
@@ -1085,11 +1238,11 @@ export default function KeysPage() {
           onChange: (keys) => setSelectedIds(keys as string[]),
           getCheckboxProps: (row) => ({ disabled: Boolean(row.deletedAt) }),
         }}
-        // Σ 列宽（含勾选列 32）与加「首次调用」**之前**逐像素持平（1440 / 1280 实测均 1662）：
-        // 新列的 96px 从有余量的列里借（标签 -20 / 分类 -14 / 今日 token -14 / 更新于 -14 /
-        // 启用 -16 / 操作 -18 = 96），两档的横向滚动量因此一分不涨。
-        // scroll.x = 1662 = 真实表宽（scrollW 实测），不是拍的；改列宽先量后改。
-        scroll={{ x: 1662 }}
+        // 瘦身后 Σ 列宽（含勾选列 32）= 32+118+106+112+84+150+116+88+84+84+52+146 = 1172，
+        // ≤ 1440×900 可用 1176 ⇒ 首屏零横滚；1280×800 可用 1016，溢出 156（实测回填）。
+        // 操作列 fixed:'right' 常在，首列无冻结（业主 2026-11-03 口径）。
+        // scroll.x = 1172 = 真实表宽（scrollW 实测），不是拍的；改列宽先量后改。
+        scroll={{ x: 1172 }}
         pagination={{
           current: page,
           pageSize,

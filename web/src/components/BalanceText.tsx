@@ -25,6 +25,14 @@ const SOURCE_HINT: Record<BalanceSource, string> = {
   template: '按上游余额查询模板取回',
 };
 
+/**
+ * 来源的中文短名（`手动` / `模板`）。列表页把来源放到**次行小灰字**时用这一份 ——
+ * 与组件内部标签同源，避免"页面上两个地方叫两个名字"。
+ */
+export function balanceSourceLabel(source: BalanceSource | null | undefined): string | null {
+  return source ? SOURCE_LABEL[source] : null;
+}
+
 export interface BalanceTextProps {
   value: Cents | null | undefined;
   currency?: string | undefined;

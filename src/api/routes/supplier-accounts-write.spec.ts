@@ -785,6 +785,162 @@ describe('POST /refresh 的账号透支锁存与级联（§20.4 / §20.6）', ()
     expect(h.upstream.calls.length).toBe(callsBefore);
   });
 
+  /**
+   * 上一用例的**下半截**（生产真库取证，2026-11-03 成都机）：刷新打了、台账行重写了、
+   * 回填函数也调了 —— 但 `upstream_keys` 一个字节没动。根因不在回填腿，在**认领键**：
+   * 上游套餐列表**不带** `key`，`mapSubscription` 于是给 `keyMasked=null`，
+   * 而 `backfillSubscriptionTokenPlan` 的认领段只认掩码 ⇒ 整行 `continue`。
+   *
+   * v1.22.1（ADR-0047）：刷新先用库里已知掩码播种，缺的走 `keys/sync` 同一条补掩码腿
+   * （§15.2 第三个来源，best-effort），然后才写台账、才回填。
+   */
+  it('套餐列表不带掩码 ⇒ 刷新补掩码，回填才认领得到（v1.22.1 / ADR-0047 生产形状）', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    const planKey = seedBoundKey(h, id, accountId, { category: 'token-plan' });
+    const masked = (h.db.prepare('SELECT masked_key AS m FROM upstream_keys WHERE id = ?').get(planKey) as { m: string }).m;
+    const tail = masked.slice(-4);
+
+    h.upstream.on('/api/user/self', () => ok({ quota: 300_000, id: '42' }));
+    // 生产形状：`has_key: true`，**没有** `key` 字段 —— 上面那条 v1.22.0 用例带的就是 `key`，
+    // 那条测的是"响应自带掩码"这条顺风路，这一条测的是真库上反复发生的逆风路。
+    h.upstream.on('/api/subscription/self', () =>
+      ok({
+        all_subscriptions: [
+          {
+            sub_no: 'SB-MASK-1',
+            end_at: '2026-12-03 06:06:41',
+            auto_renew: false,
+            has_key: true,
+            basic_token_total: 8_000_000,
+            basic_token_used: 6_000_000,
+          },
+        ],
+      }),
+    );
+    // 补掩码腿：与 `keys/sync` 同一个端点、同一个解包函数。
+    h.upstream.on('/api/subscription/self/token', () => ok({ key: 'sk-probe-' + 'M'.repeat(16) + tail }));
+
+    const { result } = await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id });
+    expect(result.items[0]).toMatchObject({ action: 'refresh', ok: true });
+
+    // **恰好一次**：这一行从没拿到过掩码，播种没得播，补掩码腿正好补这一次。
+    // 多发（每轮刷新都无脑重问）与少发（该补时不补）都让这一行变红。
+    expect(h.upstream.count('/api/subscription/self/token')).toBe(1);
+
+    const sub = h.db
+      .prepare(
+        'SELECT key_masked AS m, basic_token_total AS total, basic_token_used AS used, end_at AS endAt FROM supplier_account_subscriptions WHERE account_id = ? AND sub_no = ?',
+      )
+      .get(accountId, 'SB-MASK-1') as { m: string | null; total: number; used: number; endAt: string };
+    expect(sub.m, '补到的掩码要进台账（否则下一轮刷新仍得重问上游）').toBe(masked);
+
+    const stored = h.db
+      .prepare('SELECT token_plan_remaining AS remaining, token_plan_expires_at AS expiresAt FROM upstream_keys WHERE id = ?')
+      .get(planKey) as { remaining: number | null; expiresAt: string | null };
+    expect(stored.remaining).toBe(sub.total - sub.used);
+    expect(stored.expiresAt).toBe(sub.endAt);
+
+    // 读面（Key 管理那一格）：不必再打上游。
+    const callsBefore = h.upstream.calls.length;
+    const res = await h.app.inject({ method: 'GET', url: `/api/keys/${planKey}`, headers: { cookie: h.cookie } });
+    expect(res.json()).toMatchObject({ tokenPlan: { remainingTokens: 2_000_000, totalTokens: 8_000_000 } });
+    expect(h.upstream.calls.length).toBe(callsBefore);
+  });
+
+  it('第二轮刷新：库里已有掩码 ⇒ 播种命中、**不再打**补掩码端点，掩码也不退回未知', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    const planKey = seedBoundKey(h, id, accountId, { category: 'token-plan' });
+    const masked = (h.db.prepare('SELECT masked_key AS m FROM upstream_keys WHERE id = ?').get(planKey) as { m: string }).m;
+    const tail = masked.slice(-4);
+
+    h.upstream.on('/api/user/self', () => ok({ quota: 300_000, id: '42' }));
+    h.upstream.on('/api/subscription/self', () =>
+      ok({
+        all_subscriptions: [
+          {
+            sub_no: 'SB-MASK-2',
+            end_at: '2026-12-03 06:06:41',
+            has_key: true,
+            basic_token_total: 8_000_000,
+            basic_token_used: 6_000_000,
+          },
+        ],
+      }),
+    );
+    h.upstream.on('/api/subscription/self/token', () => ok({ key: 'sk-probe-' + 'M'.repeat(16) + tail }));
+    await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id });
+    const firstCalls = h.upstream.count('/api/subscription/self/token');
+    expect(firstCalls).toBe(1);
+
+    // 这一刻补掩码端点答不出来了（它本就是 §16.1.1 待实测的那几个之一）。
+    // 播种必须接住：既不为"已知"的事白打一次上游，也不让台账里的掩码退回未知。
+    h.upstream.on('/api/subscription/self/token', () => ok({}));
+    const second = await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id });
+    expect(second.result.items[0]).toMatchObject({ action: 'refresh', ok: true });
+
+    expect(h.upstream.count('/api/subscription/self/token'), '已知掩码不该再问上游').toBe(firstCalls);
+
+    const sub = h.db
+      .prepare('SELECT key_masked AS m FROM supplier_account_subscriptions WHERE account_id = ? AND sub_no = ?')
+      .get(accountId, 'SB-MASK-2') as { m: string | null };
+    expect(sub.m).toBe(masked);
+
+    // 回填这一轮仍然走通（认领键还在），且值与台账同源。
+    const stored = h.db
+      .prepare('SELECT token_plan_remaining AS remaining FROM upstream_keys WHERE id = ?')
+      .get(planKey) as { remaining: number | null };
+    expect(stored.remaining).toBe(2_000_000);
+  });
+
+  it('补掩码腿失败 ⇒ 刷新**照常成功**、掩码留 NULL、key 侧不写（best-effort + 宁缺勿假）', async () => {
+    const h = await setup();
+    const { id } = tierflowUpstream(h.db);
+    const accountId = seedPasswordAccount(h.db, id, { session: 'sess-ok' });
+    const planKey = seedBoundKey(h, id, accountId, { category: 'token-plan' });
+    // 夹具给这把 key 种的是 `remainingTokens=5000 / expiresAt=null`（不是 NULL）。
+    // 断言"刷新后仍是这两个值"才是"key 侧零写入"的证据 —— 只看 `null` 会把
+    // "回填写了 0" 误判成"没写"。
+    const seeded = h.db
+      .prepare('SELECT token_plan_remaining AS remaining, token_plan_expires_at AS expiresAt FROM upstream_keys WHERE id = ?')
+      .get(planKey) as { remaining: number | null; expiresAt: string | null };
+    expect(seeded.remaining).toBe(5000);
+
+    h.upstream.on('/api/user/self', () => ok({ quota: 300_000, id: '42' }));
+    h.upstream.on('/api/subscription/self', () =>
+      ok({
+        all_subscriptions: [
+          {
+            sub_no: 'SB-MASK-3',
+            end_at: '2026-12-03 06:06:41',
+            has_key: true,
+            basic_token_total: 8_000_000,
+            basic_token_used: 6_000_000,
+          },
+        ],
+      }),
+    );
+    h.upstream.on('/api/subscription/self/token', () => rejected('补掩码端点抖了', 500));
+
+    const { result } = await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id });
+    // 少一列掩码与"整次刷新失败"不是同一量级的损失 —— 与 `keys/sync` 的补掩码腿同口径。
+    expect(result.items[0]).toMatchObject({ action: 'refresh', ok: true });
+
+    const sub = h.db
+      .prepare('SELECT key_masked AS m FROM supplier_account_subscriptions WHERE account_id = ? AND sub_no = ?')
+      .get(accountId, 'SB-MASK-3') as { m: string | null };
+    expect(sub.m).toBeNull();
+
+    const stored = h.db
+      .prepare('SELECT token_plan_remaining AS remaining, token_plan_expires_at AS expiresAt FROM upstream_keys WHERE id = ?')
+      .get(planKey) as { remaining: number | null; expiresAt: string | null };
+    // 认领不到就不写：宁可让 Key 管理多留一轮「未同步」，也不编一个余量出来。
+    expect(stored).toEqual(seeded);
+  });
+
   it('`unlimited_quota` 的账号不锁（余额是 `null` —— "未知 ≠ 没钱"，ADR-0003）', async () => {
     const h = await setup();
     const { id } = tierflowUpstream(h.db);

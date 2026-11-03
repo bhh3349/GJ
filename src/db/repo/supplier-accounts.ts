@@ -1022,11 +1022,47 @@ export interface SupplierSubscriptionWrite {
 }
 
 /**
+ * 该账号**已知**的套餐掩码（`sub_no → key_masked`；`NULL` 的不进表）。
+ *
+ * 两个用途，读的是同一张表：
+ *   - `replaceSupplierSubscriptions` 写侧的"沿用上一行掩码"（v1.22.1 / ADR-0047）；
+ *   - `refreshOne` 在补掩码**之前**的播种 —— 沿用逻辑发生在写台账那一刻，而补掩码
+ *     （`fillSubscriptionKeyMasks`）在写台账**之前**跑；不先播种，库里明明有掩码的行
+ *     会被当成"从没拿到过"去白打一次上游（`/api/subscription/self/token` 是 §16.1.1
+ *     待实测端点，能少打一次是一次）。
+ */
+export function knownSubscriptionMasks(db: Db, accountId: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const rows = db
+    .prepare(
+      `SELECT sub_no, key_masked FROM supplier_account_subscriptions
+        WHERE account_id = ? AND key_masked IS NOT NULL`,
+    )
+    .all(accountId) as { sub_no: string; key_masked: string }[];
+  for (const row of rows) out.set(row.sub_no, row.key_masked);
+  return out;
+}
+
+/**
  * 整批替换一个账号的套餐行。
  *
  * **替换而不是 upsert**：上游给的是"此刻这个账号的全部套餐"，我们照抄这个全集。
  * 只做 upsert 的话，一个**在上游已被删掉**的套餐会永远留在我们库里 ——
  * 于是 `subscriptionCount` 长期偏大，而到期排序里会飘着一个早就不存在的套餐。
+ *
+ * ## v1.22.1（ADR-0047）：已知掩码不退回未知
+ *
+ * 上面那条"照抄全集"有一个例外 —— **掩码**。上游套餐列表（实测）不自带 `key`，
+ * 我们手上这份 `key_masked` 是 `keys/sync` 的补掩码腿单独问出来的（§15.2 第三个来源）。
+ * 照抄 `null` 的后果不是"少一列显示"，而是 `backfillSubscriptionTokenPlan` 的认领段
+ * **只认掩码** —— 掩码一没，回填整行跳过，`upstream_keys.token_plan_*` 一个字节不写，
+ * 业主那句「台账有数、Key 管理没有」换个形状复发（生产实测见 ADR-0047）。
+ *
+ * 所以同一 `sub_no` 上八种情形这样定：
+ *   - 本轮带了掩码（含 `rotate` 响应给的新掩码）→ 照抄新值，它是更新的；
+ *   - 本轮没带、但上游仍说 `has_key === true` → **沿用上一行的掩码**（已知不该退回未知）；
+ *   - 上游说没 key（`hasKey !== true`）→ 清成 `NULL`：掩码是"有 key"的从属事实，
+ *     key 都没了还留一个掩码，等于让回填去认领一把上游已经不要的 key。
  */
 export function replaceSupplierSubscriptions(
   db: Db,
@@ -1035,6 +1071,8 @@ export function replaceSupplierSubscriptions(
 ): void {
   const at = nowIso();
   db.transaction(() => {
+    // 先读后删（同一事务）：整体替换要能在删掉的那一瞬把已知掩码接住。
+    const previous = knownSubscriptionMasks(db, accountId);
     db.prepare('DELETE FROM supplier_account_subscriptions WHERE account_id = ?').run(accountId);
     const insert = db.prepare(
       `INSERT INTO supplier_account_subscriptions (
@@ -1044,6 +1082,9 @@ export function replaceSupplierSubscriptions(
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const s of subs) {
+      // 掩码三态（见函数头 v1.22.1 那节）：本轮给了就用本轮的；没给但上游仍说有 key
+      // 就沿用上一行；上游说没 key 才清空。
+      const keyMasked = s.keyMasked ?? (s.hasKey === true ? (previous.get(s.subNo) ?? null) : null);
       insert.run(
         newId('supplierSubscription'),
         accountId,
@@ -1062,7 +1103,7 @@ export function replaceSupplierSubscriptions(
         // 三态：`null` = 上游没给这个字段，**不是 false**（§15.1）。落库保持 NULL。
         s.autoRenew === undefined || s.autoRenew === null ? null : s.autoRenew ? 1 : 0,
         s.hasKey === true ? 1 : 0,
-        s.keyMasked ?? null,
+        keyMasked,
         at,
       );
     }

@@ -43,6 +43,7 @@ import {
   createSupplierAccount,
   currentPlanForScrap,
   findSupplierAccountByIdentifierHash,
+  knownSubscriptionMasks,
   latestSubscriptionSubNo,
   linkSupplierAccountKey,
   listLinkedPooledKeyMasks,
@@ -785,6 +786,29 @@ async function refreshAccount(
   }
 
   const subs = mapSubscriptions(subsCall.result.data, self.quotaPerUnit);
+  // v1.22.1（ADR-0047）：**先补掩码，再写台账，再回填** —— 顺序与 `keys/sync` 那一段逐字同构。
+  //
+  // 生产实测（2026-11-03，成都机真库）：套餐列表响应**不带** `key`，于是映射出来的行是
+  // `hasKey=true / keyMasked=null`；而 `backfillSubscriptionTokenPlan` 的认领段只认掩码。
+  // 少了这一步，刷新写完台账却在认领处整行跳过 —— key 侧零写入，业主看到的仍是
+  // 「台账 ¥29.90 / 800 万都在，Key 管理还是『未同步』」，也就是 v1.22.0 想根治的那个形状。
+  //
+  // 两段分开做，是为了不多打上游：
+  //   ① **播种**：库里同一 `sub_no` 上一轮（`keys/sync` / 上一轮刷新）已补到的掩码先填回去 ——
+  //      多数账号的掩码早就在手，这一步零请求；
+  //   ② **补漏**：只有从没拿到过掩码的行才走 `fillSubscriptionKeyMasks`（`keys/sync` 同源同口径，
+  //      best-effort：失败静默留 NULL，不阻塞刷新、不改刷新成败）。
+  const knownMask = knownSubscriptionMasks(ctx.db, active.id);
+  for (const sub of subs) {
+    if (sub.keyMasked != null || sub.hasKey !== true) continue;
+    const previous = knownMask.get(sub.subNo);
+    if (previous !== undefined) sub.keyMasked = previous;
+  }
+  await fillSubscriptionKeyMasks(
+    client,
+    sessionAfter(subsCall.renewed, sessionAfter(selfCall.renewed, start)),
+    subs,
+  );
   replaceSupplierSubscriptions(ctx.db, active.id, subs);
   // v1.22.0 / ADR-0046：刷新**顺手把套餐余量回填给池里那把 key**。
   //

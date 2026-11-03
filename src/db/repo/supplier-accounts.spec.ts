@@ -996,3 +996,98 @@ describe('upsertSupplierSubscription：只写 has_key / key_masked 两格（审�
     expect(rowOf(db, acc, 'SB1').amount_total_cents).toBe(9900);
   });
 });
+
+// ---------------------------------------------------------------------------
+// replaceSupplierSubscriptions 的掩码沿用（v1.22.1 / ADR-0047）
+// ---------------------------------------------------------------------------
+//
+// 这一组的存在理由（生产实测，2026-11-03 成都机真库）：
+//   刷新**确实**重写了台账行、也确实**调了**回填函数，但 `key_masked` 被这次整体替换
+//   照抄成 `NULL`，于是回填在认领段整行跳过 —— `upstream_keys.token_plan_*` 零写入，
+//   业主看到的还是「台账有数、Key 管理没有」。所以"整体替换"要有一条例外：**已知掩码
+//   不退回未知**。下面四条把这条例外按四种情形钉死。
+describe('replaceSupplierSubscriptions：已知掩码不退回未知（v1.22.1 / ADR-0047）', () => {
+  const END_AT = '2026-11-16T00:00:00.000Z';
+  function maskOf(db: Db, accountId: string, subNo: string): string | null {
+    const row = db
+      .prepare('SELECT key_masked AS m FROM supplier_account_subscriptions WHERE account_id = ? AND sub_no = ?')
+      .get(accountId, subNo) as { m: string | null } | undefined;
+    return row?.m ?? null;
+  }
+
+  /** 上一轮（`keys/sync` 或上一轮刷新）已经补到掩码的那一行。 */
+  function seedWithMask(db: Db, accountId: string, subNo = 'SB1'): void {
+    replaceSupplierSubscriptions(db, accountId, [
+      {
+        subNo,
+        basicTokenTotal: 8_000_000,
+        basicTokenUsed: 0,
+        endAt: END_AT,
+        hasKey: true,
+        keyMasked: 'sk-****iHLd',
+      },
+    ]);
+  }
+
+  it('本轮套餐行不带掩码（上游列表的真实形状）⇒ 沿用上一行的，不落 NULL', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-tf', baseUrl: 'https://tf.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    seedWithMask(db, acc);
+
+    // 刷新拿到的那一行：`has_key: true` 而**没有** `key` 字段（`mapSubscription` 于是给 null）。
+    replaceSupplierSubscriptions(db, acc, [
+      { subNo: 'SB1', basicTokenTotal: 8_000_000, basicTokenUsed: 2_000_000, endAt: END_AT, hasKey: true },
+    ]);
+
+    expect(maskOf(db, acc, 'SB1')).toBe('sk-****iHLd');
+    // 其余列照抄本轮（替换语义没变）—— 掩码是唯一的例外。
+    const used = db
+      .prepare('SELECT basic_token_used AS u FROM supplier_account_subscriptions WHERE account_id = ? AND sub_no = ?')
+      .get(acc, 'SB1') as { u: number };
+    expect(used.u).toBe(2_000_000);
+  });
+
+  it('本轮带了新掩码（`rotate` 响应给的新 key）⇒ 以本轮为准，旧掩码作废', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-tf', baseUrl: 'https://tf.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    seedWithMask(db, acc);
+
+    replaceSupplierSubscriptions(db, acc, [
+      { subNo: 'SB1', basicTokenTotal: 8_000_000, basicTokenUsed: 0, endAt: END_AT, hasKey: true, keyMasked: 'sk-****NEW1' },
+    ]);
+
+    expect(maskOf(db, acc, 'SB1')).toBe('sk-****NEW1');
+  });
+
+  it('上游说没有 key（`hasKey` 不是 true）⇒ 掩码清空（它是「有 key」的从属事实）', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-tf', baseUrl: 'https://tf.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    seedWithMask(db, acc);
+
+    replaceSupplierSubscriptions(db, acc, [
+      { subNo: 'SB1', basicTokenTotal: 8_000_000, basicTokenUsed: 0, endAt: END_AT, hasKey: false },
+    ]);
+
+    expect(maskOf(db, acc, 'SB1')).toBeNull();
+  });
+
+  it('掩码按 `sub_no` 认领，不串行：没掩码的另一条套餐不会被隔壁那条的掩码填上', () => {
+    const db = setup();
+    const up = createUpstream(db, { name: 'up-tf', baseUrl: 'https://tf.example.com' });
+    const acc = seedAccount(db, { upstreamId: up.id });
+    seedWithMask(db, acc, 'SB1');
+
+    replaceSupplierSubscriptions(db, acc, [
+      { subNo: 'SB1', basicTokenTotal: 8_000_000, basicTokenUsed: 0, endAt: END_AT, hasKey: true },
+      { subNo: 'SB2', basicTokenTotal: 1_000_000, basicTokenUsed: 0, endAt: END_AT, hasKey: true },
+    ]);
+
+    expect(maskOf(db, acc, 'SB1')).toBe('sk-****iHLd');
+    // SB2 从没拿到过掩码 ⇒ 仍是未知（"宁缺勿假"）：把 SB1 的掩码抄给它，
+    // 回填就会把 SB1 的套餐余量写到 SB2 那把 key 上 —— 比留 NULL 坏一个数量级。
+    expect(maskOf(db, acc, 'SB2')).toBeNull();
+  });
+});

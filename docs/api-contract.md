@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.23.0**　｜
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.24.0**　｜
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -773,8 +773,52 @@
 | **`PUT`** | **`/api/keys/:id/balance`** | **手动录入余额**（见下） |
 | `POST` | `/api/keys/:id/balance/refresh` | 按模板查单个 key 余额 → `202 {taskId}`（异步，轮询 `GET /api/tasks/:id`；`result` 含可选 `retryAfterSeconds`，v1.8.1） |
 | `POST` | `/api/keys/:id/test-balance` | **自测**：用该 key 的生效查询方式真实打一次 → `200 BalanceTestResult`（同步、不写库，见 §2） |
+| **`POST`** | **`/api/keys/:id/probe`** | **试调一次（v1.24.0）**：用该 key 真打一次上游 → `200 ProbeResult`（同步；**不写 `usage_logs`、不动 `key_runtime`**，见下节） |
 | `POST` | `/api/keys/batch` | `{ids: [], action: "enable"\|"disable"\|"undeplete"}` → `{updated: 5}`。`"undeplete"` 为 **v1.17.0 新增**：**清透支锁 + `enabled=1`**（§20.5）。**`"enable"` 不清锁**（否则一次批量启用就能把整池透支 key 放回池） |
 | `POST` | `/api/keys/balance/refresh` | 批量查余额 → `202 {taskId}`（`result` 含可选 `retryAfterSeconds`，v1.8.1） |
+
+### `POST /api/keys/:id/probe` — 试调一次（v1.24.0 / ADR-0049）
+
+回答的是「**这把 key 现在能不能用**」，不是「它有没有被用过、什么时候」——后者是 `firstUsedAt`（v1.23.0）。
+
+请求体（可省略）：`{ "model"?: string, "timeoutMs"?: int }`
+
+- `model`：不传 → 取该 key `models` 白名单的**第一条**（显式来自 key 自己的约束，**服务端不硬编码默认模型**——猜错模型名会把 4xx 误判成「key 不可用」）；点了名但不在白名单 → `400 INVALID_PARAM`（`details.field="model"`）；白名单与点名都没有 → `kind="models"`，退化为 `GET /v1/models` 探活（零 token，只验鉴权与连通）。
+- `timeoutMs`：`2000..15000`，缺省 `12000`。
+
+响应 `200 ProbeResult`（业务失败也 `200` + `ok:false`，与 `BalanceTestResult` 同口径 —— 诊断结论不该被错误分支吃掉）：
+
+```json
+{
+  "ok": true, "keyId": "key_9c21", "maskedKey": "****a1b2",
+  "kind": "chat", "model": "gpt-4o-mini",
+  "endpoint": "https://api.my88.com/v1/chat/completions",
+  "httpStatus": 200, "durationMs": 640,
+  "probeCode": null, "upstreamErrorCode": null, "upstreamMessage": null,
+  "checkedAt": "2026-11-03T02:10:00.000Z"
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `kind` | `"chat"`（`max_tokens=1` 真打一次）\| `"models"`（只探 `/v1/models`，零 token） |
+| `probeCode` | `null` = ok；否则 `UPSTREAM_UNREACHABLE` \| `TIMEOUT` \| `AUTH_REJECTED`（401/403）\| `MODEL_REJECTED`（400/404/422）\| `QUOTA_EXHAUSTED`（402，或 429 且上游码含 `quota`）\| `RATE_LIMITED`（429 其余）\| `UPSTREAM_ERROR`（5xx，或 2xx + `success:false` 信封）\| `EMPTY_RESPONSE`（2xx 但没有 `choices` / `data`） |
+| `upstreamErrorCode` | 上游 `error.code` 原样（截断 64 字符）；`null` = 上游没给或没走到上游 |
+| `upstreamMessage` | 上游错误文案，**已过 `sanitizeUpstreamBody` 抹掉 key 明文**并截断 512 字符；`null` = 无可回显文案 |
+| `endpoint` | 规范化后的目标地址（`协议//host/path`）；**绝不回显 key** |
+
+**判据与数据面同口径**：2xx + `success:false` 的上游信封（§16.2）也算失败 —— 数据面把它当 fail，探活不许说 ok。
+
+**写入纪律（ADR-0049 决策 4，这条最要紧）**：
+
+- **零 `usage_logs`**（不是客户流量，写进去会污染 QPS / 成功率 / 成本账）；
+- **零 `key_runtime`**：不调 `reportFailure` / `reportSuccess` —— 尤其后者会清 `autoDisabled`，一次手点就能把「401 风暴里被自动停用的死 key」探活复活；
+- **零 `upstream_keys` 写入**：余额 / 余量 / `revision` / `updated_at` 全不动；
+- **唯一写入 = 一条审计 `key.probe`**（detail 只含 kind / model / 结论 / 状态码 / 错码 / 耗时；**零 key 明文、零上游 body 原文**）。
+
+**状态码**：key 或上游不存在 → `404`；`model` 不在白名单 → `400`；同一把 key `10s` 内重复 → `429 TOO_MANY_ATTEMPTS` + `details.retryAfterSeconds`（**复用既有码，零新增枚举**）；未登录 → `401`；其余诊断性失败一律 `200` + `ok:false`。
+
+**并发**：进程内全局上限 `2` 路 —— 管理员手点的保险，不是限流器（多实例部署时各自计数）。
 
 ### `PUT /api/keys/:id/balance` — 手动录入
 
@@ -4064,6 +4108,17 @@ spec 三条判据：新库自带、老库真被 ALTER 到、重复跑不抛 dupl
 | ⑨ | 容量口径 | 所有容量数字（`capacity` / `reserveForData` / 每轮 token 数 / §15.5 的 ≈14 min 与重开门槛）都是**「单出口」口径**：出口 > 1 时**逐出口各自成立，不得跨出口加总** |
 
 > **§15.5 连带（v1.8.0 已同批落）**：「27 个账号一轮刷新 ≈ 1 分钟」按 ⑥ 重算为 **≈14 min**（`ceil(54/4)×60s`，单出口口径），0.6s 降为账号级内层纪律，重开门槛（ADR-0017 补遗 6）登记为 §15.5 脚注。本表是那三处改动的唯一口径源。
+>
+> **v1.24.0（2026-11-03，Key「试调一次」`POST /api/keys/:id/probe` —— 业主要求「每个 key 加一个首次调用功能」的第二批）**：
+> 落笔依据 **ADR-0049**。① 新端点**同步**执行：用指定 key 真打一次上游（`max_tokens=1`），
+> `200 ProbeResult` + `ok` / `probeCode`；业务失败也 `200`（诊断语义，与 `BalanceTestResult` 同族）。
+> ② **计量隔离**：零 `usage_logs`、零 `key_runtime`（不调 `reportFailure` / `reportSuccess` ——
+> 后者会清 `autoDisabled`，一次手点就能把"401 风暴里被自动停用的死 key"探活复活）、零 `upstream_keys` 写入；
+> 唯一写入 = 审计 `key.probe`。③ **接入面**：管理面**直连上游**（与 `test-balance` 同族），
+> `src/gateway` / `ports.ts` 冻结面零改动 —— 探活绕开选路正是它存在的理由。④ 模型解析三段：
+> 点名（须在白名单内）→ 白名单第一条 → 都无则退化 `kind="models"` 探 `/v1/models`（零 token）。
+> ⑤ 频控：同 key `10s` 一次（`429 TOO_MANY_ATTEMPTS`，复用既有码）、进程内全局并发 `2`。
+> **零新增错误码、零字段改名、`/v1/*` 零字节变更**。
 >
 > **v1.23.0（2026-11-03，Key「首次调用时刻」—— 业主要求「每个 key 加一个首次调用功能」，第一批：时间列）**：
 > ① **§3 Key 对象新增 `firstUsedAt`**（ISO8601 \| `null`）：这把 key **第一次有真实请求落到它身上**的时刻

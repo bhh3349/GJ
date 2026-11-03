@@ -1,6 +1,6 @@
-# ADR 索引 —— 48 份一行表
+# ADR 索引 —— 49 份一行表
 
-**读法**：先用本表定位，再 `Read docs/adr/NNNN-*.md` 那一份。不要按目录顺序整读（48 份约 8,100 行）。
+**读法**：先用本表定位，再 `Read docs/adr/NNNN-*.md` 那一份。不要按目录顺序整读（49 份约 8,400 行）。
 A Decision Records 是 MADR 格式，文件名 `NNNN-标题.md`。新决策必须落 `docs/adr/`，不许只留在聊天记录（AGENTS.md §7）。
 
 | ADR | 一行结论 | 什么时候必须去读 |
@@ -54,6 +54,8 @@ A Decision Records 是 MADR 格式，文件名 `NNNN-标题.md`。新决策必�
 | [0047](../../../docs/adr/0047-refresh-mask-claim.md) | **`refresh` 补齐掩码认领键**（修 0046 的验证腿）：上游套餐列表不带 `key` ⇒ `refresh` 用无掩码行整体替换台账会把 `keys/sync` 补的掩码抹回 `NULL`，回填按 `key_masked` 认领整行跳过（"调了但没写"）；改为**播种已知掩码（零请求）+ 补漏（`/api/subscription/self/token`，best-effort）→ 写台账 → 回填**；`replaceSupplierSubscriptions` 例外：同 `sub_no` 无掩码且 `has_key=true` 沿用上一行、`has_key!=true` 清空、跨 `sub_no` 绝不串用 | 动 `refresh` 掩码段 / `fillSubscriptionKeyMasks` / `replaceSupplierSubscriptions` / 动 §15.2 回填腿 / 排查「刷新点了但 key 侧没变」时 |
 
 | [0048](../../../docs/adr/0048-key-first-used-at.md) | **key 首次调用时刻**：落 `upstream_keys.first_used_at`（不落 `key_runtime` —— 镜像会重写、重启归零）；写入方 = 用量攒批 flush 事务里的 `markKeyFirstUsed`（`WHERE first_used_at IS NULL`，同批取最早，**只写一次**）；**不递增 `revision`、不进 `change_log`**（使用态 ≠ 配置）；升级时从现存 `usage_logs` 一次性回填 `MIN(ts)`，之后**永不重算**（保留期裁剪会让重算值越算越晚）；裁光 ⇒ `NULL` = 「未调用」，不编时刻 | 动 `usage-sink` flush / `markKeyFirstUsed` / §3 `firstUsedAt` / 保留期与首次时间的口径 / 做第二批「试调一次」时 |
+
+| [0049](../../../docs/adr/0049-key-probe.md) | **key 探活（「试调一次」）**：`POST /api/keys/:id/probe` 由**管理面直连上游**（不动 `src/gateway`/`ports.ts`），测的正是这一把（401 即结论、绝不换把）；判据与数据面同口径（2xx+`success:false` 也算 fail）；**计量隔离四条**：零 `reportFailure`/`reportSuccess`（防把 `autoDisabled` 的死 key 探活复活）、零 `usage_logs`、零 `upstream_keys`，唯一写入 = 审计 `key.probe`；模型三段（点名→白名单首条→退化 `/v1/models`），**不硬编码默认模型**；频控 10s/把 + 全局并发 2 | 动 `key-probe.ts` / 探活路由 / §3 `ProbeResult` / 想让探活动运行态或健康时 |
 
 ## 维护纪律
 

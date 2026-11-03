@@ -1195,6 +1195,64 @@ describe('余额自测（契约 §2 · M6-A）：同步、诊断语义、绝不�
     await closeHarness(h);
   });
 
+  it('key 探活（v1.24.0）：200 + ok，落一条审计且 detail 无明文、不写 usage_logs、不动 key 行', async () => {
+    const probeFetch = (async () =>
+      new Response(JSON.stringify({ object: 'list', data: [{ id: 'm1' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })) as unknown as typeof fetch;
+    const h = await setup({ fetchImpl: probeFetch });
+    const upstreamId = await createUpstream(h);
+    const secret = probeSecret();
+    const key = await createKey(h, upstreamId, { key: secret });
+    const before = h.db.prepare('SELECT revision, updated_at FROM upstream_keys WHERE id = ?').get(key.id);
+
+    const res = await h.app.inject({
+      method: 'POST',
+      url: `/api/keys/${key.id}/probe`,
+      headers: auth(h),
+    });
+    expect(res.statusCode, res.body).toBe(200);
+    const body = res.json() as { ok: boolean; kind: string; maskedKey: string; probeCode: string | null };
+    expect(body.ok).toBe(true);
+    expect(body.kind).toBe('models'); // 无白名单、未点名 ⇒ 退化为 /v1/models 探活
+    expect(body.probeCode).toBeNull();
+    expect(body.maskedKey).toBe(key.maskedKey);
+
+    // 唯一落库动作 = 审计一条；detail 零明文、零上游 body
+    const audit = h.db
+      .prepare("SELECT detail FROM audit_log WHERE action = 'key.probe' AND target_id = ?")
+      .all(key.id) as { detail: string }[];
+    expect(audit).toHaveLength(1);
+    expect(audit[0]!.detail).not.toContain(secret);
+    expect(h.db.prepare('SELECT COUNT(*) AS n FROM usage_logs').get()).toEqual({ n: 0 });
+    // 探活不是配置变更：revision / updated_at 都不动
+    expect(h.db.prepare('SELECT revision, updated_at FROM upstream_keys WHERE id = ?').get(key.id)).toEqual(before);
+    await closeHarness(h);
+  });
+
+  it('key 探活：未知 key 404、model 不在白名单 400（details.field=model）', async () => {
+    const h = await setup();
+    const upstreamId = await createUpstream(h);
+    const key = await createKey(h, upstreamId, { key: probeSecret() });
+    h.db.prepare('UPDATE upstream_keys SET model_limits = ? WHERE id = ?').run('allowed-model', key.id);
+
+    const missing = await h.app.inject({ method: 'POST', url: '/api/keys/key_ghost/probe', headers: auth(h) });
+    expect(missing.statusCode).toBe(404);
+
+    const badModel = await h.app.inject({
+      method: 'POST',
+      url: `/api/keys/${key.id}/probe`,
+      headers: auth(h),
+      payload: { model: 'not-in-whitelist' },
+    });
+    expect(badModel.statusCode).toBe(400);
+    const err = badModel.json() as { code: string; details?: { field?: string } };
+    expect(err.code).toBe('INVALID_PARAM');
+    expect(err.details?.field).toBe('model');
+    await closeHarness(h);
+  });
+
   it('命中内置 preset 的上游，key 级自测走 preset（无需用户配模板）', async () => {
     // preset 是一个**两跳**查询（subscription + usage），所以这个假 fetch 按 URL 分型回不同 body
     const presetFetch = (async (input: unknown) => {

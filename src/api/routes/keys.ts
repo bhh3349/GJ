@@ -25,6 +25,7 @@ import { idParam, includeDeletedProp, nullableInteger, nullableString, pageProps
 import { assertQueryable } from '../services/balance-query.js';
 import { countRefreshableKeys, refreshBalances } from '../services/balance-refresh.js';
 import { runKeyBalanceTest, describeTestForAudit } from '../services/balance-selftest.js';
+import { probeKey } from '../services/key-probe.js';
 import { startTask } from '../task-runner.js';
 import type { ApiContext } from '../app.js';
 
@@ -329,6 +330,44 @@ export function registerKeyRoutes(app: FastifyInstance, ctx: ApiContext): void {
         targetType: 'key',
         targetId: req.params.id,
         detail: describeTestForAudit(result),
+      });
+      return reply.code(200).send(result);
+    },
+  );
+
+  /**
+   * key 探活（契约 §3 v1.24.0 / ADR-0049）—— 前端「试调一次」按钮的后端。
+   *
+   * 同步执行；业务失败回 `200` + `ok:false`（诊断类，与 `test-balance` 同口径）。
+   * **唯一落库动作 = 下面这条审计**：detail 里零 key 明文、零上游 body 原文，
+   * 只留 kind / model / 结论 / 状态码 / 错码 / 耗时。探活不动 `key_runtime`、不写 `usage_logs`。
+   */
+  app.post<{ Params: { id: string }; Body: { model?: string; timeoutMs?: number } | undefined }>(
+    '/api/keys/:id/probe',
+    {
+      schema: {
+        params: idParam,
+        body: {
+          // 无请求体必须也合法（与 test-balance 同族：管理员点一下就发，不带 payload）
+          type: ['object', 'null'],
+          additionalProperties: false,
+          properties: {
+            model: { type: 'string', minLength: 1, maxLength: 200 },
+            timeoutMs: { type: 'integer', minimum: 2000, maximum: 15000 },
+          },
+        },
+      },
+    },
+    async (req, reply) => {
+      const result = await probeKey(db, req.params.id, config.masterKey, ctx.supplier.fetchImpl, {
+        model: req.body?.model,
+        timeoutMs: req.body?.timeoutMs,
+      });
+      auditWrite(db, req, config, {
+        action: 'key.probe',
+        targetType: 'key',
+        targetId: req.params.id,
+        detail: `kind=${result.kind} model=${result.model ?? '-'} ok=${result.ok ? 1 : 0} status=${result.httpStatus ?? '-'} code=${result.probeCode ?? '-'} ${result.durationMs}ms`,
       });
       return reply.code(200).send(result);
     },

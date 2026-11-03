@@ -59,7 +59,10 @@
     compare-and-swap，防并发覆盖）；执行完必须核 `git rev-parse main^{tree}` 与目标 tip 的 tree 一致。
   - **合流后 `git status --porcelain` 为空才算收口**（R1：合并 ≠ 收口）。非空说明指针与工作区没同步，
     这时报"已合流"是假回执。回执里带上新 tip 与空 status 两样。
-- Conventional Commits。不装 husky，门禁走 CI。
+- Conventional Commits。不装 husky，门禁按清单全跑（仓库内无 CI 配置，收口前由 owner 手动跑）。
+- **收口门禁（六项，全绿才算收口）**：① `pnpm run typecheck`（root，只含 `src/**`）② `pnpm --filter @sub/web typecheck`
+  （web `strict` + `noUnusedLocals`；`web:build` 内含同一条，单跑是为了 20s 内先失败）③ `pnpm test`（含 `src/security/web-layout-parity.spec.ts`）
+  ④ `pnpm run build` ⑤ `pnpm run web:build` ⑥ `pnpm run check:secrets`。回执逐项报数字（文件数 / passed / skipped / 秒数 / 命中数），不写「四闸全绿」这种合称。
 - 决策记录写 `docs/adr/`（MADR 格式，`NNNN-标题.md`），不要只留在聊天记录里。
 - 长代码不写进 `AGENTS.md`；守则短写，写「读代码猜不到」的部分。
 

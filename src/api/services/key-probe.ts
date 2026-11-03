@@ -62,7 +62,7 @@ export interface KeyProbeResult {
   durationMs: number;
   /** null = ok。业务失败也回 200（与 BalanceTestResult 同口径：诊断不该被错误分支吃掉）。 */
   probeCode: KeyProbeCode | null;
-  /** 上游 error.code 原样（截断 64 字符）；null = 上游没给或没走到上游。 */
+  /** 上游 error.code，已过 sanitizeUpstreamBody 再截断 64 字符（零明文红线，与 message 同一切法）；null = 上游没给或没走到上游。 */
   upstreamErrorCode: string | null;
   /** 上游错误文案，已过 sanitizeUpstreamBody 并截断；null = 没有可回显的文案。 */
   upstreamMessage: string | null;
@@ -244,16 +244,16 @@ export async function probeKey(
     }
     const env = asEnvelope(body);
     const parts = env === null ? { code: null, message: null } : errorParts(env);
-    // 上游回显过明文也不许出门：文案先过 sanitize（同一把 key 的明文作密钥）。
+    // 上游回显过明文也不许出门：`message` 与 `code` 都过同一把 sanitize（以同一把 key 的明文作密钥），
+    // 再各自按口径截断。零明文是红线不是概率题 —— 不赌上游会不会把凭据回显进 `error.code`（路由者复核硬化项）。
     const message =
-      env === null || parts.message === null
-        ? null
-        : truncate(extractText(sanitizeUpstreamBody({ message: parts.message }, ref.decrypted)));
+      parts.message === null ? null : truncate(sanitizeField(parts.message, 'message', ref.decrypted));
+    const errorCode = parts.code === null ? null : pickShort(sanitizeField(parts.code, 'code', ref.decrypted));
 
     if (res.status >= 200 && res.status < 300) {
       if (env !== null && env['success'] === false) {
         // 200 + success:false 的信封：与数据面同口径，算 fail（§16.2）。
-        return fail({ ...base, httpStatus: res.status, durationMs, checkedAt }, 'UPSTREAM_ERROR', parts.code, message);
+        return fail({ ...base, httpStatus: res.status, durationMs, checkedAt }, 'UPSTREAM_ERROR', errorCode, message);
       }
       const hasPayload =
         kind === 'chat' ? Array.isArray(env?.choices) && env.choices.length > 0 : Array.isArray(env?.data);
@@ -269,19 +269,22 @@ export async function probeKey(
           checkedAt,
         };
       }
-      return fail({ ...base, httpStatus: res.status, durationMs, checkedAt }, 'EMPTY_RESPONSE', parts.code, message);
+      return fail({ ...base, httpStatus: res.status, durationMs, checkedAt }, 'EMPTY_RESPONSE', errorCode, message);
     }
 
+    // 分类仍看原始 code（`quota` 正则只是内部判据，不出出口）；对外一律给 sanitize 过的 errorCode。
     const classified = classifyStatus(res.status, parts.code);
-    return fail({ ...base, httpStatus: res.status, durationMs, checkedAt }, classified, parts.code, message);
+    return fail({ ...base, httpStatus: res.status, durationMs, checkedAt }, classified, errorCode, message);
   });
 }
 
-/** `sanitizeUpstreamBody({message})` 回来还是对象 —— 抠回字符串。 */
-function extractText(sanitized: unknown): string {
-  const env = asEnvelope(sanitized);
-  const message = env?.['message'];
-  return typeof message === 'string' ? message : '';
+/**
+ * 单个上游字符串字段过 sanitize：`{ [field]: raw }` → `sanitizeUpstreamBody` → 按原字段名抠回。
+ * 上游偶尔把 key 明文回显在 `error.code` 里（与 message 同一条泄漏路径），原样外露 = 把明文从服务端搬到浏览器。
+ */
+function sanitizeField(raw: string, field: 'code' | 'message', secret: string): string {
+  const out = asEnvelope(sanitizeUpstreamBody({ [field]: raw }, secret))?.[field];
+  return typeof out === 'string' ? out : '';
 }
 
 function classifyStatus(status: number, upstreamCode: string | null): KeyProbeCode {

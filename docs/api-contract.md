@@ -802,8 +802,8 @@
 | 字段 | 说明 |
 |---|---|
 | `kind` | `"chat"`（`max_tokens=1` 真打一次）\| `"models"`（只探 `/v1/models`，零 token） |
-| `probeCode` | `null` = ok；否则 `UPSTREAM_UNREACHABLE` \| `TIMEOUT` \| `AUTH_REJECTED`（401/403）\| `MODEL_REJECTED`（400/404/422）\| `QUOTA_EXHAUSTED`（402，或 429 且上游码含 `quota`）\| `RATE_LIMITED`（429 其余）\| `UPSTREAM_ERROR`（5xx，或 2xx + `success:false` 信封）\| `EMPTY_RESPONSE`（2xx 但没有 `choices` / `data`） |
-| `upstreamErrorCode` | 上游 `error.code` 原样（截断 64 字符）；`null` = 上游没给或没走到上游 |
+| `probeCode` | `null` = ok；否则 `UPSTREAM_UNREACHABLE` \| `TIMEOUT` \| `AUTH_REJECTED`（401/403）\| `MODEL_REJECTED`（400/404/422；**〔v1.24.0 补记〕404 含 baseUrl 路径配错** —— 模型名不存在与路径写错，对「这把 key 现在能不能用这个模型」是同一个「不能」；不为诊断细分拆第 9 个枚举，要细分看 `httpStatus` + `upstreamErrorCode`）\| `QUOTA_EXHAUSTED`（402，或 429 且上游码含 `quota`）\| `RATE_LIMITED`（429 其余）\| `UPSTREAM_ERROR`（5xx，或 2xx + `success:false` 信封）\| `EMPTY_RESPONSE`（2xx 但没有 `choices` / `data`） |
+| `upstreamErrorCode` | 上游 `error.code`，**已过 `sanitizeUpstreamBody`**（〔v1.24.0 补记：与 `upstreamMessage` 同一条切法 —— 零明文是红线不是概率题，上游把凭据回显进 `code` 也要抹）后截断 64 字符；`null` = 上游没给或没走到上游 |
 | `upstreamMessage` | 上游错误文案，**已过 `sanitizeUpstreamBody` 抹掉 key 明文**并截断 512 字符；`null` = 无可回显文案 |
 | `endpoint` | 规范化后的目标地址（`协议//host/path`）；**绝不回显 key** |
 
@@ -818,7 +818,7 @@
 
 **状态码**：key 或上游不存在 → `404`；`model` 不在白名单 → `400`；同一把 key `10s` 内重复 → `429 TOO_MANY_ATTEMPTS` + `details.retryAfterSeconds`（**复用既有码，零新增枚举**）；未登录 → `401`；其余诊断性失败一律 `200` + `ok:false`。
 
-**并发**：进程内全局上限 `2` 路 —— 管理员手点的保险，不是限流器（多实例部署时各自计数）。
+**并发与频控计数都在进程内**：全局上限 `2` 路（管理员手点的保险，不是限流器）；同 key `10s` 一次的计数**重启清零**、多实例各算各的（最坏各 `2N` 路，人工按钮的上界无害 —— ADR-0049 决策 5）。
 
 ### `PUT /api/keys/:id/balance` — 手动录入
 

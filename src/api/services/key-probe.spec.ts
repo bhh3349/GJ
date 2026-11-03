@@ -8,7 +8,7 @@
 //   3. 模型解析三段（点名须在白名单内 → 白名单第一条 → 都没有就退化探 /v1/models）；
 //   4. 频控：同 key 10s 一次（TOO_MANY_ATTEMPTS + retryAfterSeconds），且**绝不换把** ——
 //      401 就是这把 key 的结论，不是换一把再试的理由；
-//   5. 明文纪律：上游把 key 回显在报错文案里，出口前必须被 sanitize 抹掉。
+//   5. 明文纪律：上游把 key 回显在报错文案或 `error.code` 里，出口前必须被 sanitize 抹掉。
 // 出站全部由注入的假 fetchImpl 承担，零真实网络。
 
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -269,6 +269,21 @@ describe('频控与明文纪律', () => {
     expect(result.ok).toBe(false);
     expect(result.upstreamMessage).not.toBeNull();
     expect(result.upstreamMessage).not.toContain(secret);
+    expect(JSON.stringify(result)).not.toContain(secret);
+  });
+
+  it('上游把 key 明文回显进 error.code：code 同样必须被 sanitize 抹掉（零明文是红线不是概率题）', async () => {
+    const { db } = setup();
+    const keyId = seedKey(db, 'leakcode');
+    const secret = probeSecret('leakcode');
+    const { fetch } = fakeFetch([jsonRes(401, { error: { code: `echo_${secret}`, message: 'invalid api key' } })]);
+
+    const result = await probeKey(db, keyId, MASTER_KEY, fetch);
+
+    expect(result.probeCode).toBe('AUTH_REJECTED');
+    expect(result.upstreamErrorCode).not.toBeNull();
+    expect(result.upstreamErrorCode).not.toContain(secret);
+    expect(result.upstreamErrorCode).toContain('****');
     expect(JSON.stringify(result)).not.toContain(secret);
   });
 

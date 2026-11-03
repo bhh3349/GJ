@@ -10,8 +10,10 @@
  *   同一条（§16.7 Tier 1.5）⇒ §14.7 二次确认，走 `confirmManualRefresh`，本页不自造请求数。
  *   单把 key 的刷新**刻意不弹**：一次请求，"批"的代价量级不成立，且同一个动作问两遍会让人盲点「确定」。
  * - v1.18.0：`account` / `tokenPlan.totalTokens` / `remainingTokens` 的 null 语义上首页 ——
- *   「未同步」与「0」是两句话，见 `TokenPlanCell`。套餐余量的真相源是 §15.2 `keys/sync`
- *   的回填腿：行内「同步套餐余量」与「批量同步套餐余量」都打它（`ids` = 归属账号），
+ *   「未同步」与「0」是两句话，见 `TokenPlanCell`。套餐余量的回填腿 v1.22.0 起有**两条**：
+ *   账号池 `refresh`（「刷新余额」，顺带回填余量与掩码）与 §15.2 `keys/sync`（行内/批量
+ *   「同步套餐余量」，`ids` = 归属账号）。`keys/sync` 仍是**掩码取不到时的兜底** —— 上游
+ *   那个待实测端点没回数据时，刷新补不了掩码，「未同步」会一直挂着，只能靠它补（ADR-0047）。
  *   任务进度与逐行结论复用 `useTaskPolling` + `SupplierBatchDrawer`，不自造轮询。
  * - 账号型上游（tierflow / tokenrhythm）的 key **没有 key 级余额查询**（契约 §2 v1.18.1，
  *   后端恒 422）：这类行的「查余额」换成指向账号池的引导入口，见 `balanceReadiness.ts` 的注释。
@@ -91,7 +93,7 @@ const EMPTY_FILTERS: Filters = {
  *
  * 三个取值**必须长得不一样**（§0.2「未知 ≠ 0」在这张表上的落点）：
  * - `remainingTokens === null` → 「未同步」徽标：**从未查到过**，不是烧干。tooltip 顺手指明
- *   真相源（账号池「同步 key 与套餐余量」「刷新余额」= 回填腿，v1.22.0 起刷新也回填），让人找得到下一步。
+ *   真相源与兜底路（账号池「刷新余额」会回填；刷新后仍不消 = 掩码没取到 → 「同步套餐余量」补）。
  * - `remainingTokens === 0` → 「0」并给烧干色：查到过、确实没了。与徽标同列出现时一眼可分。
  * - 有值 → `6.2M / 8M`；`totalTokens === null`（无归属 / 撞号 / 上游没给）只给 `6.2M / —`。
  *   两个都 null 时只画「未同步」，不画「— / —」的空壳 —— 那读起来像"两个字段都坏了"，
@@ -125,7 +127,7 @@ function TokenPlanCell({ row }: { row: UpstreamKey }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
       {remaining === null ? (
-        <Tooltip title="这把 key 的套餐余量还没同步过（余量未知 ≠ 0）。账号池的「同步 key 与套餐余量」和「刷新余额」都会回填余量，本页行内的「同步套餐余量」也可以，不必专门手点">
+        <Tooltip title="这把 key 的套餐余量还没同步过（余量未知 ≠ 0，不是 0）。账号池「刷新余额」会顺带回填余量与掩码，所以正常下一轮刷新后「未同步」自己就消失；刷新过仍是未同步，说明这个账号的 key 掩码还没取到 —— 点一次「同步套餐余量」（本页行内或账号池批量）即可补上">
           <Tag
             bordered={false}
             style={{
@@ -726,7 +728,7 @@ export default function KeysPage() {
             文案必须写成**去哪儿做什么**，不能只写「查余额」把人送去一个空动作。
           */}
           {accountKindByUpstream.get(row.upstreamId) === true ? (
-            <Tooltip title="账号型上游的 key 余额就是账号余额（只读镜像），不支持单独查这把 key 的余额。余额请去账号池「刷新余额」，套餐余量用「同步套餐余量」">
+            <Tooltip title="账号型上游的 key 余额就是账号余额（只读镜像），不支持单独查这把 key 的余额。余额请去账号池「刷新余额」—— 那一次刷新也会顺带回填套餐余量；掩码还没取到的再点「同步套餐余量」补齐">
               <Button
                 size="small"
                 type="link"
@@ -753,7 +755,9 @@ export default function KeysPage() {
             </Button>
           )}
           {/*
-            套餐余量的唯一回填腿是 §15.2 `keys/sync`（`backfillSubscriptionTokenPlan`）。
+            套餐余量的回填腿：v1.22.0 起账号池「刷新余额」也会顺带回填余量与掩码，
+            所以这条（§15.2 `keys/sync`）不再是**唯一**的腿，而是**掩码取不到时的兜底** ——
+            刷新只能回填已有掩码的行，掩码缺了就一直是「未同步」，只有它能补（ADR-0047）。
             只有「token-plan + 有归属账号」的行才有这个入口：没有归属就没有可同步的订阅。
           */}
           {row.category === 'token-plan' && row.account !== null ? (

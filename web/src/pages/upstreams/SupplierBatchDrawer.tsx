@@ -32,8 +32,10 @@ import { formatCount, formatIso } from '@/utils/format';
 const { Text } = Typography;
 
 /** `action` 八值 → 人话。八值**每个都有生产者**（§15.3 / §15.13 / v1.16.4 / v1.21.0），所以这里没有兜底项要写"其它"。
- * `sync` 的口径订正（Chief 2026-11-03）：这个动作不只搬掩码，它是套餐余量回填的**唯一服务端腿**
+ * `sync` 的口径订正（Chief 2026-11-03）：这个动作不只搬掩码，它还回填套餐余量
  * （`keys/sync` → `backfillSubscriptionTokenPlan`），与 Key 管理页「同步套餐余量」按钮同名词。
+ * v1.22.0 起账号池「刷新余额」（`refresh`）也顺带回填余量与掩码，它不再是唯一回填腿 ——
+ * 但掩码取不到时只有它能补（ADR-0047），所以名字与入口都留着。
  * `undeplete`（v1.21.0）：纯本地清锁、不打上游 —— 逐行恒 `ok:true`，失败只可能来自"账号在任务
  * 创建后被删"（那是快照口径，不是失败）。 */
 const ACTION_TEXT: Record<SupplierBatchAction, string> = {

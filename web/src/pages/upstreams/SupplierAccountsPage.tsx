@@ -189,10 +189,11 @@ const BATCH_ACTIONS: readonly BatchActionSpec[] = [
   },
   {
     key: 'sync',
-    // v1.17.3 前的口径订正：这个动作不只对账，它是套餐基础额度（Token 余量）回填到
-    // 名下入池套餐 key 的唯一服务端腿（`keys/sync` → `backfillSubscriptionTokenPlan`，
-    // 契约 ADR-0022 承诺的"后续"腿）。旧文案「批量同步 key」让用户以为它只搬掩码，
-    // 于是"套餐余额怎么还不更新"找不到入口 —— 改名 + 确认框末句说明回填这个副作用。
+    // v1.17.3 前的口径订正：这个动作不只对账，它还把套餐基础额度（Token 余量）回填到
+    // 名下入池的套餐 key（`keys/sync` → `backfillSubscriptionTokenPlan`）。旧文案「批量同步 key」
+    // 让用户以为它只搬掩码，于是"套餐余额怎么还不更新"找不到入口 —— 改名 + 确认框末句说明回填。
+    // v1.22.0 起账号池「刷新余额」也会顺带回填余量与掩码，所以它**不再是唯一**的回填腿；
+    // 但仍保留这个入口：掩码取不到时刷新补不上，只有它能补（ADR-0047）。
     label: '批量同步 key 与套餐余量',
     submit: (body) => supplierAccountsApi.syncKeys(body),
     outcome: '执行后等终态，逐行结论见明细浮层；同步会把各账号套餐的基础额度（Token 余量）回填到名下入池的套餐 key。',

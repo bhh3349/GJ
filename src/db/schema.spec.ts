@@ -663,3 +663,108 @@ describe('v1.17.2 加列（gateway_error_events 三腿四列，ADR-0042）', () 
     }
   });
 });
+
+/* --------- v1.23.0 / ADR-0048：upstream_keys.first_used_at（纯加列 + 一次性回填） --------- */
+
+/**
+ * v1.23.0 之前形态：`upstream_keys` 没有 `first_used_at`，`usage_logs` 里已有调用历史。
+ *
+ * 回填是**一次性的**，判据不能只看"升级后有值"：
+ * `usage_logs` 会被保留期裁掉，如果实现改成每次启动重扫，值会随裁剪越算越晚
+ * （"现存最早" ≠ "真首次"）。所以用例必须同时证明"补列那一拍钉住"和"之后再 migrate 不重算"。
+ */
+function seedPreV1230KeysDatabase(path: string): void {
+  const legacy = new Database(path);
+  legacy.exec(`
+    CREATE TABLE upstream_keys (
+      id TEXT PRIMARY KEY, upstream_id TEXT NOT NULL, label TEXT NOT NULL,
+      masked_key TEXT NOT NULL, secret BLOB NOT NULL,
+      category TEXT NOT NULL CHECK (category IN ('balance','token-plan')),
+      enabled INTEGER NOT NULL DEFAULT 1, weight INTEGER NOT NULL DEFAULT 1,
+      balance_cents INTEGER, balance_currency TEXT, balance_updated_at TEXT,
+      balance_source TEXT, token_plan_remaining INTEGER, token_plan_expires_at TEXT,
+      today_tokens INTEGER NOT NULL DEFAULT 0, today_day TEXT,
+      revision INTEGER NOT NULL DEFAULT 1, deleted_at TEXT,
+      created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    );
+    CREATE TABLE usage_logs (
+      id TEXT PRIMARY KEY, ts TEXT NOT NULL, group_id TEXT, model TEXT,
+      upstream_id TEXT, key_id TEXT, key_masked TEXT NOT NULL,
+      status INTEGER NOT NULL, error_code TEXT,
+      prompt_tokens INTEGER NOT NULL DEFAULT 0, completion_tokens INTEGER NOT NULL DEFAULT 0,
+      total_tokens INTEGER NOT NULL DEFAULT 0, is_estimated INTEGER NOT NULL DEFAULT 0,
+      latency_ms INTEGER, ttfb_ms INTEGER, stream INTEGER NOT NULL DEFAULT 0,
+      cost_cents INTEGER NOT NULL DEFAULT 0
+    );
+  `);
+  legacy
+    .prepare(
+      `INSERT INTO upstream_keys (id, upstream_id, label, masked_key, secret, category, created_at, updated_at)
+       VALUES (?, 'up_legacy', '老 key', '****aaaa', X'00', 'balance', ?, ?)`,
+    )
+    .run('key_used', '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z');
+  legacy
+    .prepare(
+      `INSERT INTO upstream_keys (id, upstream_id, label, masked_key, secret, category, created_at, updated_at)
+       VALUES (?, 'up_legacy', '没调用过', '****bbbb', X'00', 'balance', ?, ?)`,
+    )
+    .run('key_unused', '2026-10-01T00:00:00.000Z', '2026-10-01T00:00:00.000Z');
+  const ins = legacy.prepare(
+    `INSERT INTO usage_logs (id, ts, key_id, key_masked, status) VALUES (?, ?, 'key_used', '****aaaa', 200)`,
+  );
+  ins.run('log_late', '2026-10-05T12:00:00.000Z');
+  ins.run('log_early', '2026-10-02T03:00:00.000Z');
+  ins.run('log_mid', '2026-10-03T08:00:00.000Z');
+  legacy.close();
+}
+
+describe('v1.23.0 加列 + 一次性回填（first_used_at，ADR-0048）', () => {
+  it('老库补列后从现存 usage_logs 回填 MIN(ts)；没调用过的 key 回 NULL（不编时刻）', () => {
+    const path = tempDbPath();
+    seedPreV1230KeysDatabase(path);
+
+    // 前置断言：种子库确实没有这一列。少了它，"migrate 什么都没做"也可能看起来通过。
+    const legacy = new Database(path);
+    expect(columnsOf(legacy, 'upstream_keys')).not.toContain('first_used_at');
+    legacy.close();
+
+    const db = open(path);
+    expect(columnsOf(db, 'upstream_keys')).toContain('first_used_at');
+    const first = db.prepare('SELECT first_used_at FROM upstream_keys WHERE id = ?').get('key_used') as {
+      first_used_at: string | null;
+    };
+    expect(first.first_used_at).toBe('2026-10-02T03:00:00.000Z');
+    const unused = db.prepare('SELECT first_used_at FROM upstream_keys WHERE id = ?').get('key_unused') as {
+      first_used_at: string | null;
+    };
+    expect(unused.first_used_at).toBeNull();
+    // 纯加列 ⇒ 版本号不动（判据是"列在不在"）
+    expect(db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+  });
+
+  it('只回填一次：把最早那条日志裁掉再 migrate，值不变（重算会得到越裁越晚的"假首次"）', () => {
+    const path = tempDbPath();
+    seedPreV1230KeysDatabase(path);
+    const db = open(path);
+
+    // 模拟保留期裁剪：最早那条日志被删掉
+    db.prepare('DELETE FROM usage_logs WHERE id = ?').run('log_early');
+    migrate(db);
+
+    const row = db.prepare('SELECT first_used_at FROM upstream_keys WHERE id = ?').get('key_used') as {
+      first_used_at: string | null;
+    };
+    expect(row.first_used_at).toBe('2026-10-02T03:00:00.000Z');
+  });
+
+  it('加列幂等：重复 migrate 不抛 duplicate column name', () => {
+    const path = tempDbPath();
+    seedPreV1230KeysDatabase(path);
+    const db = open(path);
+    expect(() => {
+      migrate(db);
+      migrate(db);
+    }).not.toThrow();
+    expect(columnsOf(db, 'upstream_keys').filter((c) => c === 'first_used_at')).toHaveLength(1);
+  });
+});

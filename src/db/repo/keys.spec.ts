@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { openDatabase, type Db } from '../database.js';
-import { applyTemplateBalance, applyTemplateTokenPlan, createKey, getKey, listKeys, setKeyBalance } from './keys.js';
+import { applyTemplateBalance, applyTemplateTokenPlan, createKey, getKey, listKeys, markKeyFirstUsed, setKeyBalance } from './keys.js';
 import { createUpstream } from './upstreams.js';
 
 const dirs: string[] = [];
@@ -541,5 +541,63 @@ describe('v1.18.0 读路径：归属账号 / 套餐总量 / remainingTokens 的 
     const balanceRow = byId.get(k2.id)!;
     expect(balanceRow.account).toBeNull();
     expect(balanceRow.tokenPlan).toBeNull();
+  });
+});
+
+describe('v1.23.0 首次调用时刻（契约 §3 `firstUsedAt` / ADR-0048）', () => {
+  function seeded(db: Db) {
+    const up = createUpstream(db, { name: 'tf', baseUrl: 'https://tierflow.cn', supplier: 'tierflow' });
+    const key = createKey(db, { upstreamId: up.id, key: probeSecret(), category: 'balance' }, MASTER_KEY);
+    return key;
+  }
+
+  function firstUsedRaw(db: Db, id: string): string | null {
+    return (db.prepare('SELECT first_used_at FROM upstream_keys WHERE id = ?').get(id) as {
+      first_used_at: string | null;
+    }).first_used_at;
+  }
+
+  it('只写一次：第二次带更晚时刻的调用不覆盖（语义 = MIN）', () => {
+    const db = setup();
+    const key = seeded(db);
+
+    expect(markKeyFirstUsed(db, key.id, '2026-10-06T11:00:00.000Z')).toBe(1);
+    // 第二次带**更早**时刻也不覆盖：判据是"有没有值"，不是比较大小（MIN 语义由调用方保证）
+    expect(markKeyFirstUsed(db, key.id, '2026-10-05T09:00:00.000Z')).toBe(0);
+    expect(firstUsedRaw(db, key.id)).toBe('2026-10-06T11:00:00.000Z');
+  });
+
+  it('不递增 revision、不写 change_log：使用态不是配置（§5 那条纪律的例外必须是显式的）', () => {
+    const db = setup();
+    const key = seeded(db);
+    const changesBefore = (db.prepare('SELECT COUNT(*) AS n FROM change_log').get() as { n: number }).n;
+
+    markKeyFirstUsed(db, key.id, '2026-10-06T11:00:00.000Z');
+
+    const row = db.prepare('SELECT revision, updated_at FROM upstream_keys WHERE id = ?').get(key.id) as {
+      revision: number;
+      updated_at: string;
+    };
+    // 补写使用态不该把配置版本推高（否则网关白热一轮重载）
+    expect(row.revision).toBe(key.revision);
+    expect(row.updated_at).toBe(key.updatedAt);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM change_log').get() as { n: number }).n).toBe(changesBefore);
+  });
+
+  it('DTO 透出 firstUsedAt：未调用是 null（不是 0、不是 createdAt）', () => {
+    const db = setup();
+    const key = seeded(db);
+    expect(getKey(db, key.id, false)!.firstUsedAt).toBeNull();
+
+    markKeyFirstUsed(db, key.id, '2026-10-06T11:00:00.000Z');
+    expect(getKey(db, key.id, false)!.firstUsedAt).toBe('2026-10-06T11:00:00.000Z');
+
+    const page = listKeys(db, { includeDeleted: false, page: 1, pageSize: 10 });
+    expect(page.items[0]!.firstUsedAt).toBe('2026-10-06T11:00:00.000Z');
+  });
+
+  it('不存在的 key id 返回 0 行影响、不抛（用量行可能指向已物理清理的 key）', () => {
+    const db = setup();
+    expect(markKeyFirstUsed(db, 'key_ghost', '2026-10-06T11:00:00.000Z')).toBe(0);
   });
 });

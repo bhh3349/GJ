@@ -14,6 +14,8 @@ import assert from 'node:assert/strict';
 import { afterEach, describe, it, vi } from 'vitest';
 
 import { openDatabase, type Db } from '../db/database.js';
+import { createKey } from '../db/repo/keys.js';
+import { createUpstream } from '../db/repo/upstreams.js';
 import type { UsageLogEntry } from '../gateway/ports.js';
 import { createUsageLogSink } from './usage-sink.js';
 import type { UsageSink } from './usage-sink.js';
@@ -212,6 +214,59 @@ describe('落库', () => {
     vi.advanceTimersByTime(20);
     assert.equal(rowCount(h.db), 1);
     assert.equal(h.sink.pending(), 0);
+  });
+});
+
+describe('首次调用时刻（v1.23.0 / 契约 §3 `firstUsedAt` / ADR-0048）', () => {
+  const MASTER_KEY = Buffer.from('22'.repeat(32), 'hex');
+
+  function seedKey(db: Db): string {
+    const up = createUpstream(db, { name: 'tf', baseUrl: 'https://tierflow.cn', supplier: 'tierflow' });
+    return createKey(
+      db,
+      { upstreamId: up.id, key: 'sk-first-' + 'A'.repeat(24), category: 'balance' },
+      MASTER_KEY,
+    ).id;
+  }
+
+  function firstUsedOf(db: Db, keyId: string): string | null {
+    const row = db.prepare('SELECT first_used_at FROM upstream_keys WHERE id = ?').get(keyId) as
+      | { first_used_at: string | null }
+      | undefined;
+    return row?.first_used_at ?? null;
+  }
+
+  it('flush 同批补写首次调用时刻；同一批里多条取最早那条', () => {
+    const h = setup();
+    const keyId = seedKey(h.db);
+    h.sink.record(entry({ keyId, at: '2026-10-06T12:00:00.000Z' }));
+    h.sink.record(entry({ keyId, at: '2026-10-06T11:00:00.000Z' }));
+    h.sink.record(entry({ keyId, at: '2026-10-06T13:00:00.000Z' }));
+
+    assert.equal(firstUsedOf(h.db, keyId), null, 'record 只入队：flush 之前 key 行不该被写');
+    h.sink.flush();
+    assert.equal(firstUsedOf(h.db, keyId), '2026-10-06T11:00:00.000Z');
+  });
+
+  it('之后更晚的调用不覆盖：语义是 MIN，只写一次', () => {
+    const h = setup();
+    const keyId = seedKey(h.db);
+    h.sink.record(entry({ keyId, at: '2026-10-06T12:00:00.000Z' }));
+    h.sink.flush();
+    h.sink.record(entry({ keyId, at: '2026-10-07T09:30:00.000Z' }));
+    h.sink.flush();
+
+    assert.equal(firstUsedOf(h.db, keyId), '2026-10-06T12:00:00.000Z');
+  });
+
+  it('没有对应 key 行的 keyId / 空 keyId 都不影响本批落库（不抛、不丢账）', () => {
+    const h = setup();
+    h.sink.record(entry({ keyId: 'key_not_in_db', at: '2026-10-06T12:00:00.000Z' }));
+    h.sink.record(entry({ keyId: '', at: '2026-10-06T12:00:01.000Z' }));
+
+    assert.equal(h.sink.flush(), 2);
+    assert.equal(rowCount(h.db), 2);
+    assert.equal(h.sink.dropped(), 0);
   });
 });
 

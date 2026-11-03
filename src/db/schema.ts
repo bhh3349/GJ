@@ -90,6 +90,11 @@ CREATE TABLE IF NOT EXISTS upstream_keys (
   depleted_reason     TEXT CHECK (depleted_reason IS NULL OR depleted_reason IN ('balance','account')),
   today_tokens        INTEGER NOT NULL DEFAULT 0,
   today_day           TEXT,                   -- UTC 自然日，切换日时把 today_tokens 归零
+  -- 首次调用时刻（v1.23.0 / 契约 §3 / ADR-0048）：这把 key 第一次被网关实际使用的时间。
+  -- 只写一次（语义 = MIN，更晚不覆盖），写入方 = 用量批量落库路径（usage-sink flush 事务），
+  -- **不递增 revision、不进 change_log**：使用态 ≠ 配置，网关选路不消费它。
+  -- 老库补列后 NULL = 从未调用 / 升级时日志已被保留期裁光（不重算、不编时刻）。
+  first_used_at       TEXT,
   revision            INTEGER NOT NULL DEFAULT 1,
   deleted_at          TEXT,                   -- 软删；已软删不进任何合计与计数
   created_at          TEXT NOT NULL,
@@ -765,6 +770,28 @@ export function migrate(db: SqliteDatabase): void {
       }
     }
   })();
+
+  // v1.23.0 / ADR-0048：upstream_keys.first_used_at（首次调用时刻）。**纯加列 + 一次性回填**，
+  // SCHEMA_VERSION 不递增。
+  //
+  // 同前几批：表在跑着的库里早已存在，只改上面 DDL 文本是空操作，必须真发 ALTER；
+  // 判据 `hasColumn()`（ADD COLUMN 不幂等，而这段跑在每次 openDatabase() 里）。
+  //
+  // **回填只在"这次刚补列"时跑**，放进 IF 里而不是每次启动都跑：`usage_logs` 会被保留期裁掉
+  // （见本文件保留期那段注释），每轮启动重算只会得到越裁越晚的"假首次"（现存最早 ≠ 真首次）。
+  // 因此升级当次把时间钉住一次，之后由用量落库路径（`markKeyFirstUsed`，只写 NULL 行）增量维护。
+  // 回填不到（日志已裁光 / 从未调用）= NULL，DTO 回 `firstUsedAt: null`
+  // —— 宁可显示「未调用」，不编造时刻。
+  if (!hasColumn(db, 'upstream_keys', 'first_used_at')) {
+    db.transaction(() => {
+      db.exec('ALTER TABLE upstream_keys ADD COLUMN first_used_at TEXT');
+      db.exec(`
+        UPDATE upstream_keys
+           SET first_used_at = (SELECT MIN(l.ts) FROM usage_logs l WHERE l.key_id = upstream_keys.id)
+         WHERE EXISTS (SELECT 1 FROM usage_logs l2 WHERE l2.key_id = upstream_keys.id)
+      `);
+    })();
+  }
 
   const current = db.pragma('user_version', { simple: true }) as number;
   if (current < SCHEMA_VERSION) {

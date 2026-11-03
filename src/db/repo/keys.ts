@@ -43,6 +43,8 @@ interface KeyRow {
   depleted_reason: DepletedReason | null;
   today_tokens: number;
   today_day: string | null;
+  /** v1.23.0 / 契约 §3：首次调用时刻（ISO8601 UTC）。NULL = 从未调用 / 升级时日志已被裁光。 */
+  first_used_at: string | null;
   revision: number;
   deleted_at: string | null;
   created_at: string;
@@ -223,6 +225,8 @@ function toDto(row: KeyRow, nowMs: number, nowDay: string, link?: KeyLink | unde
     lastFailureAt: row.rt_at,
     // 昨日累计在读取时归零，而不是靠定时任务；没有定时任务就永远差一天的实现更不容易出错
     todayTokens: row.today_day === nowDay ? row.today_tokens : 0,
+    // v1.23.0 / 契约 §3：首次调用时刻。NULL 透传（"从未调用" ≠ 0，前端渲染「未调用」）
+    firstUsedAt: row.first_used_at,
     revision: row.revision,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -236,6 +240,24 @@ function nowContext(): { nowMs: number; nowDay: string } {
 
 export function getKeyRow(db: Db, id: string): KeyRow | null {
   return (db.prepare(`${SELECT_BASE} WHERE k.id = ?`).get(id) as KeyRow | undefined) ?? null;
+}
+
+/**
+ * v1.23.0 / 契约 §3：把「首次调用时刻」补写进 key 行（`first_used_at`）。
+ *
+ * **只写一次**：`WHERE first_used_at IS NULL` —— 语义是 `MIN(ts)`，更晚的时刻不能覆盖。
+ * 调用点唯一：`src/wiring/usage-sink.ts` 的批量 flush 事务（热路径零同步写，§5 不变）。
+ *
+ * **不递增 `revision`、不写 `change_log`**：使用态 ≠ 配置。网关靠 `change_log` 轮询同步的是
+ * 选路配置，`first_used_at` 不参与选路 —— 为它通知一轮只会让网关白热一次缓存。
+ *
+ * 返回受影响行数（0 = 已经记过 / 该 id 不存在，两种情况都无需区分：写入方只看"要不要补"）。
+ */
+export function markKeyFirstUsed(db: Db, keyId: string, ts: string): number {
+  const info = db
+    .prepare('UPDATE upstream_keys SET first_used_at = ? WHERE id = ? AND first_used_at IS NULL')
+    .run(ts, keyId);
+  return info.changes;
 }
 
 export function getKey(db: Db, id: string, includeDeleted: boolean): KeyDto | null {

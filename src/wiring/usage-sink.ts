@@ -15,6 +15,7 @@
 
 import { appendUsageLog } from '../db/repo/logs.js';
 import type { UsageLogInput } from '../db/repo/logs.js';
+import { markKeyFirstUsed } from '../db/repo/keys.js';
 import type { Db } from '../db/database.js';
 import type { UsageLogEntry, UsageLogSink } from '../gateway/ports.js';
 
@@ -99,7 +100,19 @@ export function createUsageLogSink(options: UsageSinkOptions): UsageSink {
     try {
       // 一个事务写完一批：单写者原则下这是最省的形态（一次提交而不是 N 次）
       const write = db.transaction((rows: UsageLogEntry[]) => {
-        for (const row of rows) appendUsageLog(db, toInput(row));
+        // v1.23.0 / ADR-0048：首次调用时刻。同一批里同一把 key 可能有多条（重试/并发），
+        // 取**最早**那条 —— 补写本身也有 `WHERE first_used_at IS NULL` 兜底（只写一次）。
+        const firstUsed = new Map<string, string>();
+        for (const row of rows) {
+          const input = toInput(row);
+          appendUsageLog(db, input);
+          // keyId 为空（引擎全失败终态）没有"哪把 key"可言，跳过。
+          // ts 在这里恒有值（toInput 取的是 entry.at），空值只可能是调用方违约，防御性跳过。
+          if (input.keyId === null || input.ts === undefined) continue;
+          const seen = firstUsed.get(input.keyId);
+          if (seen === undefined || input.ts < seen) firstUsed.set(input.keyId, input.ts);
+        }
+        for (const [keyId, ts] of firstUsed) markKeyFirstUsed(db, keyId, ts);
       });
       write(batch);
       return batch.length;

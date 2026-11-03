@@ -1,6 +1,6 @@
-# ADR 索引 —— 47 份一行表
+# ADR 索引 —— 48 份一行表
 
-**读法**：先用本表定位，再 `Read docs/adr/NNNN-*.md` 那一份。不要按目录顺序整读（47 份约 7,950 行）。
+**读法**：先用本表定位，再 `Read docs/adr/NNNN-*.md` 那一份。不要按目录顺序整读（48 份约 8,100 行）。
 A Decision Records 是 MADR 格式，文件名 `NNNN-标题.md`。新决策必须落 `docs/adr/`，不许只留在聊天记录（AGENTS.md §7）。
 
 | ADR | 一行结论 | 什么时候必须去读 |
@@ -52,6 +52,8 @@ A Decision Records 是 MADR 格式，文件名 `NNNN-标题.md`。新决策必�
 | [0045](../../../docs/adr/0045-account-depletion-narrowing-and-batch-undeplete.md) | **账号连坐收窄 + 批量解除**（修订 0041 判据腿）：连坐 = 余额 <10 分 **且** 套餐不可用（`plan===null`/余量 null ⇒ 不连坐，过期把余量按 0 计）；新增 `POST /api/supplier-accounts/undeplete` 批量解除（逐行 = 单账号解除，只清 `'account'` 锁不动 `'balance'` 锁，`enabled=1`） | 动 `isAccountDepleted` / `latchAccountIfDepleted` / 动 §20.2、§20.5、§20.6 / 排查「账号余额 0 却锁了套餐 key」时 |
 | [0046](../../../docs/adr/0046-plan-ledger-single-source-sync.md) | **套餐数据单源**：台账写进哪，key 列就跟到哪 —— `refresh` 与 `rotate-key` 与写台账**同一笔**调 `backfillSubscriptionTokenPlan`（此前只有 `keys/sync` 调，故「台账已新、Key 管理仍旧值」）；§3 `tokenPlan` 增 `amountTotalCents`/`amountUsedCents`（与 `totalTokens` 同唯一匹配、三格各自透传）；到期相对时间禁用 past-only 的 `formatRelative` | 动 `refresh` / `rotate-key` / `backfillSubscriptionTokenPlan` / §3 `tokenPlan` / 到期列文案 / 排查「台账有数、Key 管理没有」时 |
 | [0047](../../../docs/adr/0047-refresh-mask-claim.md) | **`refresh` 补齐掩码认领键**（修 0046 的验证腿）：上游套餐列表不带 `key` ⇒ `refresh` 用无掩码行整体替换台账会把 `keys/sync` 补的掩码抹回 `NULL`，回填按 `key_masked` 认领整行跳过（"调了但没写"）；改为**播种已知掩码（零请求）+ 补漏（`/api/subscription/self/token`，best-effort）→ 写台账 → 回填**；`replaceSupplierSubscriptions` 例外：同 `sub_no` 无掩码且 `has_key=true` 沿用上一行、`has_key!=true` 清空、跨 `sub_no` 绝不串用 | 动 `refresh` 掩码段 / `fillSubscriptionKeyMasks` / `replaceSupplierSubscriptions` / 动 §15.2 回填腿 / 排查「刷新点了但 key 侧没变」时 |
+
+| [0048](../../../docs/adr/0048-key-first-used-at.md) | **key 首次调用时刻**：落 `upstream_keys.first_used_at`（不落 `key_runtime` —— 镜像会重写、重启归零）；写入方 = 用量攒批 flush 事务里的 `markKeyFirstUsed`（`WHERE first_used_at IS NULL`，同批取最早，**只写一次**）；**不递增 `revision`、不进 `change_log`**（使用态 ≠ 配置）；升级时从现存 `usage_logs` 一次性回填 `MIN(ts)`，之后**永不重算**（保留期裁剪会让重算值越算越晚）；裁光 ⇒ `NULL` = 「未调用」，不编时刻 | 动 `usage-sink` flush / `markKeyFirstUsed` / §3 `firstUsedAt` / 保留期与首次时间的口径 / 做第二批「试调一次」时 |
 
 ## 维护纪律
 

@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.22.1**　｜
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.23.0**　｜
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -720,6 +720,7 @@
   "lastFailureReason": null,
   "lastFailureAt": null,
   "todayTokens": 84213,
+  "firstUsedAt": "2026-10-01T05:12:00.000Z",
   "depleted": false,
   "depletedAt": null,
   "depletedReason": null,
@@ -745,6 +746,7 @@
 | `consecutiveFailures` | int | 连续失败次数，决定冷却档位 |
 | `lastFailureReason` | 枚举 \| `null` | `AUTH_INVALID` \| `RATE_LIMITED` \| `INSUFFICIENT_BALANCE` \| `UPSTREAM_ERROR` \| `NETWORK` |
 | `todayTokens` | int | 自然日（UTC）累计 token |
+| `firstUsedAt` | ISO8601 \| `null` | **v1.23.0 新增**。这把 key **第一次被网关实际使用**的时刻（取自用量落库路径；`null` = 从未调用过）。**只写一次**（语义 = MIN，更晚的时刻不覆盖），**不递增 `revision`、不进 `change_log`** —— 使用态 ≠ 配置，网关不需要为它重载选路配置。升级时对存量 key 从现存 `usage_logs` 一次性回填 `MIN(ts)`；日志已被保留期裁光的存量 key 回 `null`（**宁可显示「未调用」，不编造"现存最早一条"** —— 裁剪会让那个值越算越晚，见 §6 保留期）。管理端只读，`PATCH /api/keys/:id` 不收该字段 |
 | `depleted` | `bool` | **v1.17.0 新增**。**透支锁存**（§20）：这把 key 被查到付不起账（余额 < 0.1 元 / 套餐余量 = 0 / 其账号欠费），网关**按此标记排除出选路**。**与 `enabled` / `health` 正交**：`enabled=true` + `health="healthy"` + `depleted=true` 是合法组合（没停用、没冷却，只是没钱）。`false` 是缺省 / 老 key 的值 |
 | `depletedAt` | ISO8601 \| `null` | **v1.17.0 新增**。**首次**发现它付不起账的时刻。**只写一次**（§20.3：反复刷新不推新），可当审计用。`null` = 未锁存 |
 | `depletedReason` | `"balance"` \| `"account"` \| `null` | **v1.17.0 新增**。`"balance"` = 自己的余额 / 套餐余量耗尽（看 `category` 分是哪一种）；`"account"` = 其所属账号欠费级联（§20.6）。`null` = 未锁存 |
@@ -4062,6 +4064,19 @@ spec 三条判据：新库自带、老库真被 ALTER 到、重复跑不抛 dupl
 | ⑨ | 容量口径 | 所有容量数字（`capacity` / `reserveForData` / 每轮 token 数 / §15.5 的 ≈14 min 与重开门槛）都是**「单出口」口径**：出口 > 1 时**逐出口各自成立，不得跨出口加总** |
 
 > **§15.5 连带（v1.8.0 已同批落）**：「27 个账号一轮刷新 ≈ 1 分钟」按 ⑥ 重算为 **≈14 min**（`ceil(54/4)×60s`，单出口口径），0.6s 降为账号级内层纪律，重开门槛（ADR-0017 补遗 6）登记为 §15.5 脚注。本表是那三处改动的唯一口径源。
+>
+> **v1.23.0（2026-11-03，Key「首次调用时刻」—— 业主要求「每个 key 加一个首次调用功能」，第一批：时间列）**：
+> ① **§3 Key 对象新增 `firstUsedAt`**（ISO8601 \| `null`）：这把 key 第一次被网关实际使用的时刻；
+> `null` = 从未调用过。**只写一次**（语义 = MIN，更晚不覆盖），写入方 = 用量批量落库路径
+> （`src/wiring/usage-sink.ts` 的 flush 事务 → `markKeyFirstUsed`，`WHERE first_used_at IS NULL`），
+> 热路径零同步写不变（§5）。**不递增 `revision`、不进 `change_log`**：使用态 ≠ 配置，
+> 网关选路不消费它，为它通知配置同步只会白热一轮轮询。
+> ② **升级回填一次性**：补列当场从现存 `usage_logs` 取每把 key 的 `MIN(ts)`；日志已被保留期
+> 裁光的存量 key 回 `null` —— **不重算、不逐次启动重扫**：保留期裁剪会让重算值越算越晚
+> （「现存最早」≠「真首次」），只有补列那一次能把它钉住。落笔依据 **ADR-0048**。
+> ③ **零端点新增、零请求/响应形状破坏**（纯非破坏加字段）；前端渲染纪律：`null` 渲染
+> 「未调用」，不许显示 `—` / `0`（与 `balance` 的 0/null 同族纪律）。第二批「试调一次」
+> 端点（probe）另行成文，本版不含。
 >
 > **v1.22.1（2026-11-03，`refresh` 补齐掩码认领键 —— ADR-0046 的回填腿在生产真库上"调了但没写"）**：
 > 落笔依据 **ADR-0047**（触发 = 基建部署机只读取证：业主点了一次「刷新」，任务 `succeeded` 277ms、

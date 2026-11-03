@@ -235,6 +235,16 @@ export interface KeyDto {
   lastFailureReason: FailureReasonCode | null;
   lastFailureAt: string | null;
   todayTokens: number;
+  /**
+   * 契约 §3 `firstUsedAt`（v1.23.0 / ADR-0048）：这把 key **第一次被网关实际使用**的时刻
+   * （ISO8601 UTC，取自用量落库路径）。
+   *
+   * `null` = 从未调用过 —— 存量 key 若升级时日志已被保留期裁光，也回 `null`：
+   * **宁可显示「未调用」，也不编造"现存最早一条"**（裁剪会让那个值越算越晚，见 §6 保留期）。
+   * 写入方只写一次（语义 = MIN），管理端只读（`PATCH` 不收）；与 `balance` 同族纪律：
+   * **`null` 不等于 `0`**，前端渲染「未调用」，不许画 `—` / `0` / 空串。
+   */
+  firstUsedAt: string | null;
   revision: number;
   createdAt: string;
   updatedAt: string;

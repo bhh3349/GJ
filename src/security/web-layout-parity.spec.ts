@@ -380,8 +380,10 @@ describe('web 排版防回退锁（2026-10-12 事故）', () => {
     // 只看用户真能读到的字符：JSX 文本节点与 `title` 属性值。注释、dataIndex、placeholder 不受影响
     // （placeholder 是输入提示，长度另说，这里不锁，免得把「选择上游」这类正常提示一起判死）。
     //
-    // 并行车道豁免：这两个文件由其他人在改，锁不跨车道（合流后由该车道自己补锁）。
-    const EXEMPT = new Set(['pages/KeysPage.tsx', 'pages/upstreams/SupplierAccountsPage.tsx']);
+    // 并行车道豁免：曾把 Key 两页留给前端工程师自己补锁，2026-11-03 已摘掉 ——
+    // 他的瘦身单（dev/web-fe cb597e7）把这两页的按钮压到 ≤4 单位、端点路径全部移出 title，
+    // 所以豁免失效，锁重新覆盖全站（含这两页）。留空集合是为了让"下次再需要豁免"有唯一落点。
+    const EXEMPT = new Set<string>();
 
     const COPY_JARGON = /\/api\/|\/v1\//;
 

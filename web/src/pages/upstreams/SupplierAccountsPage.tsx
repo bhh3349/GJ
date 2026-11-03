@@ -1057,7 +1057,7 @@ export default function SupplierAccountsPage() {
                 navigate('/upstreams');
               }}
             >
-              返回上游管理
+              返回
             </Button>
           </Space>
         }

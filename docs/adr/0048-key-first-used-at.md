@@ -60,6 +60,28 @@ UPDATE upstream_keys SET first_used_at = ? WHERE id = ? AND first_used_at IS NUL
 `GET /api/keys` 列表与 `GET /api/keys/:id` 详情的 Key 对象新增 `firstUsedAt: string | null`（ISO8601 UTC）。
 纯非破坏加字段：零新端点、零枚举、零改名、`PATCH` 不收该字段。
 
+## 口径补记（路由者核代码后钉死，2026-11-03）
+
+四条事实决定了「首次调用」只能这么定义：
+
+1. **`usage_logs` 只有一个写口**：`appendUsageLog` 仅 `src/wiring/usage-sink.ts` 的 flush 事务一处调用，
+   `INSERT INTO usage_logs` 全仓只有 `src/db/repo/logs.ts` 一处；助手直调路径只记内存指标、不落行。
+   ⇒ 挂在 flush 事务里补写，覆盖全部真实调用，不存在漏写的第二条路。
+2. **`key_id` 记的是「真正被用上」的那把**：非流式成功行取 `candidate.keyId`、流式取成交流的 `ctx.keyId`；
+   中途失败的尝试**不写行**（只进 `attemptTrail`）。
+3. **空 `key_id` 行真实存在**（引擎全失败终态的 5 处 `keyId: ''`）：sink 的 `toInput` 已把 `'' → null`，
+   `markKeyFirstUsed` 侧再跳过 `null` —— 既不进批、也不污染批内去重统计。
+4. **批内同 key 多行只来自不同请求**：一次请求最多一行（成功 / 4xx 透传 / 出口 429 / 流式收尾三选一），
+   所以「同批取最早」等价于「按时间取最早」，`WHERE first_used_at IS NULL` 天然幂等。
+
+由此确定**口径 = 「用过」，不是「首次成功」**：既然失败尝试根本不落行，那么"有一行"就已经意味着
+"请求真的发出去过一次"。上游 4xx 透传、出口 429 归因、流式 499 收尾这些行**都算用过** ——
+它们都是真实发出过的请求，只是没成功。"这把 key 到底能不能用"是**第二批「试调一次」**要回答的问题，
+不该让本字段兼职：否则一把因客户端 ESC 断流而中断的 key 会显示"没用过"，而那明显是假话。
+
+**代价（明确接受）**：只被尝试、从未落行的 key（引擎在它身上就失败且终态无行）永远不会有 `first_used_at`
+—— 这类 key 在面板上显示「未调用」是**诚实的**：它确实没成功用上过，也确实没留下调用记录。
+
 ## 备选方案
 
 - **A. 不落列，每次从 `usage_logs` 聚合 `MIN(ts)`** —— 否决：保留期裁剪后得到的是"现存最早"，

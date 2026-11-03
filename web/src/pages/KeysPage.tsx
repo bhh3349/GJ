@@ -155,7 +155,7 @@ function AmountCell({ row }: { row: UpstreamKey }) {
     const tokenKnown = plan.totalTokens !== null || plan.remainingTokens !== null;
     if (!moneyKnown && !tokenKnown) {
       return (
-        <Tooltip title="台账未同步（未知 ≠ 0）：账号池「刷新余额」会回填">
+        <Tooltip title="刷新会回填掩码；仍显示未同步就点「同步套餐余量」">
           <Tag
             bordered={false}
             style={{
@@ -427,7 +427,7 @@ export default function KeysPage() {
     setProbingIds((prev) => ({ ...prev, [row.id]: true }));
     try {
       const res = await keysApi.probe(row.id);
-      const where = res.kind === 'chat' ? `${res.model ?? 'chat'}（打了一次 chat）` : '/v1/models（不烧 token）';
+      const where = res.kind === 'chat' ? `${res.model ?? 'chat'}（打了一次 chat）` : '模型列表接口（不烧 token）';
       const label = res.ok ? '可用' : PROBE_LABEL[res.probeCode ?? 'UPSTREAM_ERROR'];
       const detail = [
         `${label} · ${where}`,
@@ -501,8 +501,8 @@ export default function KeysPage() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           <span>
             {picked
-              ? `逐把真打上游（勾选的 ${targets.length} 把，前端并发 2）。`
-              : `逐把真打上游（当前页全部启用的 ${targets.length} 把，前端并发 2）。`}
+              ? `逐把真打上游（勾选的 ${targets.length} 把）。`
+              : `逐把真打上游（当前页全部启用的 ${targets.length} 把）。`}
           </span>
           <span style={{ color: tokens.color.textSecondary }}>
             只读观测：不写用量、不动健康态；单把失败不中断，结果逐行 ✓ / ✗。
@@ -1207,7 +1207,7 @@ export default function KeysPage() {
 
       {list.error && list.data ? (
         <div style={{ marginBottom: tokens.space.md }}>
-          <ErrorState error={list.error} onRetry={list.reload} title="刷新失败，以下为上一次成功的数据" />
+          <ErrorState error={list.error} onRetry={list.reload} title="刷新失败，下方为旧数据" />
         </div>
       ) : null}
 

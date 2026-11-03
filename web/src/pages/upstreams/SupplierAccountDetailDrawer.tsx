@@ -23,7 +23,7 @@
  *   额度 / 套餐 / 余额全在账号那边，账号没了这把 key 打出去只有 402/404 —— 留着比删掉更坏。
  *   所以 409 `ACCOUNT_HAS_KEYS` 的二次确认必须把"会删掉几把 key"写明白，它是与删上游
  *   （ADR-0016 物理删子树）**方向相同**的一个删除（旧版本这里是反的）。
- * - **废号池**（§21.4，v1.19.0）：`scrapped=true` 时抽屉顶部给一条醒目提示 + 「移出废号池」。
+ * - **废号池**（§21.4，v1.19.0）：`scrapped=true` 时抽屉顶部给一条醒目提示 + 「出池」。
  *   出池是**同步**端点（200 回改完的那一行）、**不收 `revision`**，一次恢复名下 key 的启用与锁；
  *   确认文案必须预告「判据仍成立下一轮刷新会再次进池」—— 不预告会被读成按钮失灵。
  * - **重置套餐 key**（§15.13）是任务型端点（`202 {taskId}`）：本抽屉只提交并打开父层结果浮层，
@@ -237,7 +237,7 @@ export function SupplierAccountDetailDrawer({
       okText: '移出',
       cancelText: '取消',
       onOk: async () => {
-        const result = await run('unscrap', () => supplierAccountsApi.unscrap(accountId), '已移出废号池');
+        const result = await run('unscrap', () => supplierAccountsApi.unscrap(accountId), '已出池');
         if (result === null) return;
         detail.reload();
         onChanged();
@@ -518,7 +518,7 @@ export function SupplierAccountDetailDrawer({
                       unscrap();
                     }}
                   >
-                    移出废号池
+                    出池
                   </Button>
                 </div>
               }

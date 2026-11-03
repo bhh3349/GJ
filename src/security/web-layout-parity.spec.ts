@@ -393,8 +393,12 @@ describe('web 排版防回退锁（2026-10-12 事故）', () => {
       // 不能用 \u4e00-\u9fa5 数长度 —— 「我已保存，关闭」里的全角逗号不算汉字，会少算一位。
       const units = (t: string): number =>
         (t.replace(/\s+/g, '').match(/[\u4e00-\u9fa5]|[A-Za-z0-9]+|./gu) ?? []).length;
-      const longButtons = [...source.matchAll(/>([^<>{}]{1,40})<\/Button>/g)]
-        .map((m) => (m[1] ?? '').trim())
+      // 判据不看**原始跨度**：JSX 里的缩进与换行属于排版，不属于文案。
+      // 旧写法 `>([^<>{}]{1,40})</Button>` 把缩进一起数进 40 字符上限，多行深缩进的按钮光缩进就超了，
+      // 于是整块漏扫（2026-11-03 画师实证：`导出对账 CSV` 在 22/24 空格缩进下原始跨度 56，判据返回 0 条）。
+      // 现在先取 Button 的纯文本子节点、再把空白折叠成一个空格 —— 缩进多深都不影响判定。
+      const longButtons = [...source.matchAll(/>([^<>{}]*)<\/Button>/g)]
+        .map((m) => (m[1] ?? '').replace(/\s+/g, ' ').trim())
         .filter((t) => /[\u4e00-\u9fa5]/.test(t) && units(t) > 4);
       const apiInTitle = [...source.matchAll(/title=(?:"([^"]*)"|\{`([^`]*)`\})/g)]
         .map((m) => m[1] ?? m[2] ?? '')
@@ -420,6 +424,18 @@ describe('web 排版防回退锁（2026-10-12 事故）', () => {
     const caught = copyOffenders(sample);
     expect(caught.longButtons).toEqual(['我已保存，关闭']);
     expect(caught.apiInTitle).toHaveLength(1);
+    // 深层缩进变异样本（画师 2026-11-03 实证的盲区形态）：按钮写成多行、22/24 空格缩进。
+    // 旧判据在这份样本上返回 0 条（原始跨度 56 > 40）—— 这行断言就是盲区本体，留作反证。
+    const deepIndent = [
+      '                      <Button',
+      '                        size="small"',
+      '                        icon={<DownloadOutlined />}',
+      '                      >',
+      '                        导出对账 CSV',
+      '                      </Button>',
+    ].join('\n');
+    expect([...deepIndent.matchAll(/>([^<>{}]{1,40})<\/Button>/g)]).toHaveLength(0);
+    expect(copyOffenders(deepIndent).longButtons).toEqual(['导出对账 CSV']);
     // 负腿：4 字以内按钮、以及数据型 title（掩码 / 时刻 / 计数）不得被误伤。
     expect(copyOffenders('<Button>解除透支</Button>').longButtons).toEqual([]);
     expect(copyOffenders('<ErrorState title="刷新失败，下方为旧数据" />').apiInTitle).toEqual([]);

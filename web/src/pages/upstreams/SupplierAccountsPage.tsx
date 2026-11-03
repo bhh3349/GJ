@@ -260,7 +260,7 @@ const SUBSCRIPTION_COLUMNS: ColumnsType<SupplierSubscription> = [
           ratio={ratio}
           hint={
             ratio === null
-              ? '算不出剩余占比（总额或已用缺失，或总额为 0）—— 不画一根 0% 的假条。'
+              ? '剩余占比算不出（总额或已用缺失，或总额为 0）'
               : `剩余占总额 ${Math.round(ratio * 100)}%（总额 ${formatCents(total)}）`
           }
           value={<BalanceText value={remaining} />}
@@ -572,7 +572,7 @@ export default function SupplierAccountsPage() {
     setBindSaving(true);
     try {
       await supplierAccountsApi.setEgress(target.id, { egressId, revision: target.revision });
-      message.success('绑定已保存（网关会据此重建这批 key 的出口归属；流量真换路仍待装配层接线）');
+      message.success('绑定已保存（流量真换路要等装配）');
       setBindTarget(null);
       accounts.reload();
       pool.reload();
@@ -667,7 +667,7 @@ export default function SupplierAccountsPage() {
     },
     {
       title: (
-        <Tooltip title="上游侧的连接事实：能不能登录、会话是否还在。与右边的「健康」正交 —— 这一列不说钱的事。">
+        <Tooltip title="能不能登录、会话是否还在。与「健康」互不影响。">
           <span>状态</span>
         </Tooltip>
       ),
@@ -706,7 +706,7 @@ export default function SupplierAccountsPage() {
     {
       // 契约依据（§20.1 的第四轴）留在注释里 —— 用户可见文案不带开发术语。
       title: (
-        <Tooltip title="按「要不要动手」判，第一个命中即停：登录失败 / 会话过期 / 未查询 → 余额未知 → 耗尽 → 偏低 → 正常。与「透支」正交。">
+        <Tooltip title="按「要不要动手」判：登录失败 / 会话过期 / 未查询 → 余额未知 → 耗尽 → 偏低 → 正常。与「透支」互不影响。">
           <span>健康</span>
         </Tooltip>
       ),
@@ -757,7 +757,7 @@ export default function SupplierAccountsPage() {
        * 进池显示原因徽标；不在池中显示「—」（不是"未知"：这列本来就只有两种状态）。
        */
       title: (
-        <Tooltip title="废号池：套餐余量与账号余额同时见底（或套餐已过期且余额见底）的账号会被锁进这里，名下 key 一并停用。只有人工「移出废号池」能出池。它与左边的「健康」「透支」是彼此独立的轴。">
+        <Tooltip title="套餐余量与账号余额同时见底（或套餐过期且余额见底）的账号会进池，名下 key 一并停用；只有人工出池能解除。">
           <span>废号</span>
         </Tooltip>
       ),
@@ -820,7 +820,7 @@ export default function SupplierAccountsPage() {
             </Text>
           </Text>
           {row.unlimitedKeyCount > 0 ? (
-            <Tooltip title="unlimited=1：上游侧无限额度（余额落 NULL）。它显示为徽标，绝不渲染成金额或负数。">
+            <Tooltip title="上游侧无限额度，显示为徽标，不计金额。">
               <Tag
                 bordered={false}
                 style={{
@@ -1152,7 +1152,7 @@ export default function SupplierAccountsPage() {
                       }}
                     />
                     {/* 废号池三态（§21.4 v1.19.0）：与左边状态、本地筛都是正交的筛选轴。 */}
-                    <Tooltip title="废号池 = 套餐余量与账号余额同时见底的号（或套餐已过期且余额见底），名下 key 已全部停用。进池是粘性标记，只有人工移出才出池。">
+                    <Tooltip title="废号池 = 套餐余量与账号余额同时见底的号（或套餐过期且余额见底），名下 key 已全部停用；进池是粘性标记，只有人工移出才出池。">
                       <Segmented
                         size="small"
                         disabled={localRows !== null}
@@ -1178,7 +1178,7 @@ export default function SupplierAccountsPage() {
                         caps?.sessionImport === true
                           ? '粘贴 Cookie 导入：每行一枚 tr_session。值只用于本次导入并加密落库，不回显、不进日志。'
                           : caps?.passwordLogin === false
-                            ? '该供应商只有会话鉴权，且没有可用的 Cookie 导入入口；请在操作员本机执行离线会话导入（支持 SUPPLIER_SESSION_BATCH_FILE 批量文件）。'
+                            ? '该供应商只有会话鉴权，且没有可用的 Cookie 导入入口；请在操作员本机执行离线会话导入（批量文件用法见部署文档）。'
                             : undefined
                       }
                     >
@@ -1227,7 +1227,7 @@ export default function SupplierAccountsPage() {
                         </Button>
                       ),
                     )}
-                    <Tooltip title="对账表，不分页导出全部账号（分页导出拿到的「账号总数」取决于点第几页，那不是对账表）。表里不含密码、不含会话、不含任何 key 明文或掩码，所以它只能用来对账，不能用来重建账号。">
+                    <Tooltip title="对账表：不分页导出全部账号。">
                       <Button
                         size="small"
                         icon={<DownloadOutlined />}
@@ -1236,7 +1236,7 @@ export default function SupplierAccountsPage() {
                           void exportCsv();
                         }}
                       >
-                        导出对账 CSV
+                        导出
                       </Button>
                     </Tooltip>
                     {selected.length > 0 ? (
@@ -1250,7 +1250,7 @@ export default function SupplierAccountsPage() {
                     <ErrorState
                       error={accounts.error}
                       onRetry={accounts.reload}
-                      title="刷新失败，以下为上一次成功的数据"
+                      title="刷新失败，下方为旧数据"
                     />
                   ) : null}
 
@@ -1470,19 +1470,9 @@ export default function SupplierAccountsPage() {
                 </Text>
               }
             />
-            <Alert
-              type="info"
-              showIcon
-              style={{ background: tokens.tint.info, border: 'none' }}
-              message="保存后会发生什么"
-              description={
-                <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-                  ① 网关会按这个账号名下<Text strong style={{ color: tokens.color.textSecondary }}>每一把 key</Text>重建出口归属（重建会清掉 token-plan key 的
-                  乐观扣减，直到下次同步回填）；② 绑定只决定「用哪个出口的预算桶」，<Text strong style={{ color: tokens.color.textSecondary }}>流量真从那个 IP
-                  出去需要装配层接线</Text>，尚未落地；③ 选同一个出口再保存 = 空操作，服务端不会推版本。
-                </Text>
-              }
-            />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              绑定只决定预算桶；流量真换路要等装配。
+            </Text>
             {egress.error && egress.data === null ? (
               <Text type="secondary" style={{ fontSize: 12 }}>
                 出口清单没取回来（{describeError(egress.error).message}），下拉里可能只有宿主出口。

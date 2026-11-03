@@ -61,7 +61,7 @@ export default function UsersPage() {
   const remove = (row: UserDto) => {
     modal.confirm({
       title: `删除用户「${row.username}」？`,
-      content: '删除会立即吊销他的全部会话，且不可恢复。历史调用日志按组保留。',
+      content: '删除后立即吊销他全部会话，不可恢复。',
       okText: '删除',
       okButtonProps: { danger: true },
       cancelText: '取消',
@@ -134,7 +134,7 @@ export default function UsersPage() {
           loading={isPending(`group:${row.username}`)}
           // 一个组都没有时下拉是空的（"未分配"不是选项）—— 这时缺的那一步是去建组。
           notFoundContent={
-            (groups.data?.items ?? []).length === 0 ? '还没有用户组，先去「用户组」建一个' : undefined
+            (groups.data?.items ?? []).length === 0 ? '还没有用户组。' : undefined
           }
           onChange={(next: string | undefined) => {
             // 清空（× 或退格）落到 `undefined` —— 那正是"退回未分配"，
@@ -203,19 +203,17 @@ export default function UsersPage() {
         type="info"
         showIcon
         style={{ marginBottom: tokens.space.md, background: tokens.tint.info, border: 'none' }}
-        message="普通用户登录后只能看到消费面（接入地址、本组 key 掩码、本组用量、模型列表）"
+        message="普通用户只能看到消费面"
         description={
           <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-            账号口令只在你创建时显示一次，之后连管理面也取不回 —— 需要时只能删了重建。
-            归属组可以直接在表里改（改完立刻生效，他不用重新登录）；角色建好后不能改，
-            要换角色同样走删除重建。
+            口令只显示一次，关掉就取不回；角色不能改，只能删了重建。
           </Text>
         }
       />
 
       {list.error !== null && list.data !== null ? (
         <div style={{ marginBottom: tokens.space.md }}>
-          <ErrorState error={list.error} onRetry={list.reload} title="刷新失败，以下为上一次成功的数据" />
+          <ErrorState error={list.error} onRetry={list.reload} title="刷新失败，下方为旧数据" />
         </div>
       ) : null}
 
@@ -247,7 +245,7 @@ export default function UsersPage() {
             emptyText: (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="还没有用户。新建的第一个账号如果是普通用户，他就能登录消费面了。"
+                description="还没有用户。"
               />
             ),
           }}

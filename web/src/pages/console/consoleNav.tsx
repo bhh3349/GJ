@@ -32,25 +32,25 @@ export const consoleNavItems: readonly ConsoleNavItem[] = [
     path: '/console',
     label: '接入与 key',
     icon: <ApiOutlined />,
-    description: 'API 地址与本组的 key 掩码',
+    description: '地址与 key 掩码',
   },
   {
     path: '/console/keys',
     label: '我的 key',
     icon: <KeyOutlined />,
-    description: '签发 / 改名 / 吊销自己的 key',
+    description: '签发 / 改名 / 吊销',
   },
   {
     path: '/console/usage',
     label: '我的用量',
     icon: <BarChartOutlined />,
-    description: '本组的请求数、tokens 与错误',
+    description: '本组用量与错误',
   },
   {
     path: '/console/models',
     label: '模型广场',
     icon: <AppstoreOutlined />,
-    description: '可以调用的模型列表',
+    description: '可调用的模型',
   },
 ] as const;
 

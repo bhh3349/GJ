@@ -87,7 +87,7 @@ export function BalanceTestResultView({ result, action }: BalanceTestResultViewP
 
       <div>
         <Text type="secondary" style={{ display: 'block', marginBottom: tokens.space.xs, fontSize: 12 }}>
-          上游原始响应（已抹除 key、截断 8KB，只读）
+          上游原始响应（只读）
         </Text>
         <pre
           style={{

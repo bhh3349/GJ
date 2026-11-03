@@ -44,9 +44,9 @@ export function PasswordRevealModal({ reveal, onClose }: PasswordRevealModalProp
     if (text === '') return;
     try {
       await navigator.clipboard.writeText(text);
-      message.success('已复制到剪贴板');
+      message.success('已复制');
     } catch {
-      message.error('浏览器不允许写入剪贴板，请手动选中上面这串复制');
+      message.error('浏览器不允许复制，请手动选中上面这串');
     }
   };
 
@@ -54,7 +54,7 @@ export function PasswordRevealModal({ reveal, onClose }: PasswordRevealModalProp
     <Modal
       open={reveal !== null}
       title="登录口令（仅此一次）"
-      okText="我已保存，关闭"
+      okText="已保存"
       cancelButtonProps={{ style: { display: 'none' } }}
       onOk={onClose}
       onCancel={onClose}
@@ -100,11 +100,11 @@ export function PasswordRevealModal({ reveal, onClose }: PasswordRevealModalProp
 
       <Space size={tokens.space.sm} align="center" wrap style={{ marginBottom: tokens.space.sm }}>
         <Button size="small" icon={<CopyOutlined />} onClick={() => void copy()}>
-          复制这串口令
+          复制
         </Button>
         {reveal?.role === 'user' ? (
           <Text type="secondary" style={{ fontSize: 12 }}>
-            他登录后进的是消费面，看不到这一页。
+            他只能看到消费面。
           </Text>
         ) : null}
       </Space>
@@ -116,8 +116,7 @@ export function PasswordRevealModal({ reveal, onClose }: PasswordRevealModalProp
         message="现在不抄，之后就拿不到了"
         description={
           <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-            库里只存口令散列，管理面此后也只显示账号名。这串关掉就取不回；
-            也没有"重置口令"这个功能 —— 要换只能删掉这个账号重建一个。
+            关掉就取不回。
           </Text>
         }
       />

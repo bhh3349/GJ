@@ -241,12 +241,10 @@ export default function UpstreamsPage() {
       dataIndex: 'keyCount',
       width: 110,
       render: (_: unknown, row) => (
-        <Tooltip title={`已启用 ${row.enabledKeyCount} / 共 ${row.keyCount}`}>
-          <Text style={{ fontVariantNumeric: 'tabular-nums' }}>
-            {row.enabledKeyCount}
-            <Text type="secondary"> / {row.keyCount}</Text>
-          </Text>
-        </Tooltip>
+        <Text style={{ fontVariantNumeric: 'tabular-nums' }}>
+          {row.enabledKeyCount}
+          <Text type="secondary"> / {row.keyCount}</Text>
+        </Text>
       ),
     },
     {
@@ -260,7 +258,7 @@ export default function UpstreamsPage() {
           <Text type="secondary" style={{ fontSize: 11 }}>
             {row.balanceUnknownKeyCount > 0
               ? `${row.balanceUnknownKeyCount} 个未知未计入合计`
-              : '已知余额全部纳入合计'}
+              : '已知余额全部计入'}
             {row.unlimitedKeyCount > 0 ? ` · 无限额度 ${row.unlimitedKeyCount} 个不计金额` : ''}
             {row.tokenPlanKeyCount > 0 ? ` · 套餐类 ${row.tokenPlanKeyCount} 个不计金额` : ''}
           </Text>
@@ -283,19 +281,15 @@ export default function UpstreamsPage() {
         }
         if (row.balancePreset) {
           return (
-            <Tooltip title="内置余额查询来源（只读、可推导）。不配模板也能自动查询余额。">
-              <Tag bordered={false} style={{ background: tokens.tint.success, color: tokens.color.success }}>
-                内置 · {row.balancePreset.label}
-              </Tag>
-            </Tooltip>
+            <Tag bordered={false} style={{ background: tokens.tint.success, color: tokens.color.success }}>
+              内置 · {row.balancePreset.label}
+            </Tag>
           );
         }
         return (
-          <Tooltip title="未配置模板查询，也未识别到内置来源：该上游的余额只能手动录入。">
-            <Tag bordered={false} style={{ background: tokens.tint.neutral, color: tokens.color.textSecondary }}>
-              仅手动
-            </Tag>
-          </Tooltip>
+          <Tag bordered={false} style={{ background: tokens.tint.neutral, color: tokens.color.textSecondary }}>
+            仅手动
+          </Tag>
         );
       },
     },
@@ -329,11 +323,7 @@ export default function UpstreamsPage() {
       ),
     },
     {
-      title: (
-        <Tooltip title="自动同步为只读展示；开关与间隔由服务端配置决定，管理面没有写入口。">
-          <span>自动同步</span>
-        </Tooltip>
-      ),
+      title: '自动同步',
       key: 'autoSync',
       width: 156,
       render: (_: unknown, row) => {
@@ -342,11 +332,9 @@ export default function UpstreamsPage() {
         // 状态取不到就说取不到 —— 不把它渲染成「已关闭」（缺省不是证据）。
         if (!sync) {
           return syncStatus.error ? (
-            <Tooltip title="自动同步状态加载失败，这一列暂时未知（不代表该上游已关闭自动同步）。">
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                未知
-              </Text>
-            </Tooltip>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              未知
+            </Text>
           ) : (
             <Text type="secondary" style={{ fontSize: 12 }}>
               …
@@ -355,18 +343,16 @@ export default function UpstreamsPage() {
         }
         if (!sync.auto.enabled) {
           return (
-            <Tooltip title="自动同步整体已关闭。手动「查余额」不受影响。">
-              <Tag
-                bordered={false}
-                style={{
-                  marginInlineEnd: 0,
-                  background: tokens.tint.neutral,
-                  color: tokens.color.textSecondary,
-                }}
-              >
-                已关闭
-              </Tag>
-            </Tooltip>
+            <Tag
+              bordered={false}
+              style={{
+                marginInlineEnd: 0,
+                background: tokens.tint.neutral,
+                color: tokens.color.textSecondary,
+              }}
+            >
+              已关闭
+            </Tag>
           );
         }
         return (
@@ -376,17 +362,9 @@ export default function UpstreamsPage() {
               <Text style={{ fontSize: 11, color: tokens.color.info }}>同步中</Text>
             ) : null}
             {state && state.consecutiveFailures > 0 ? (
-              <Tooltip
-                title={
-                  state.nextAttemptAt
-                    ? `连续失败进入指数退避，下次自动尝试 ${formatIso(state.nextAttemptAt)}。手动查询仍可立即发起。`
-                    : '连续失败中；任一次拿到值即归零。'
-                }
-              >
-                <Text style={{ fontSize: 11, color: tokens.color.warning }}>
-                  {`连续失败 ${formatCount(state.consecutiveFailures)} 次`}
-                </Text>
-              </Tooltip>
+              <Text style={{ fontSize: 11, color: tokens.color.warning }}>
+                {`连续失败 ${formatCount(state.consecutiveFailures)} 次`}
+              </Text>
             ) : null}
             {state?.lastSyncedAt ? (
               <Text type="secondary" style={{ fontSize: 11 }}>
@@ -415,29 +393,21 @@ export default function UpstreamsPage() {
             的按钮，等于把一次拒绝做成一个功能。
           */}
           {hasSupplierAccountPanel(row.supplier) ? (
-            <Tooltip title="供应商账号池：账号、key、套餐统一管理">
-              <Button
-                size="small"
-                type="link"
-                style={{ padding: 0 }}
-                onClick={() => {
-                  navigate(`/upstreams/${row.id}/accounts`);
-                }}
-              >
-                账号池
-              </Button>
-            </Tooltip>
+            <Button
+              size="small"
+              type="link"
+              style={{ padding: 0 }}
+              onClick={() => {
+                navigate(`/upstreams/${row.id}/accounts`);
+              }}
+            >
+              账号池
+            </Button>
           ) : null}
           <Button size="small" type="link" style={{ padding: 0 }} onClick={() => openEdit(row)}>
             编辑
           </Button>
-          <Tooltip
-            title={
-              balanceReadiness(row).queryable
-                ? '按当前生效的查询方式逐把查该上游全部 key 的余额'
-                : balanceReadiness(row).reason
-            }
-          >
+          <Tooltip title={balanceReadiness(row).queryable ? undefined : balanceReadiness(row).reason}>
             <Button
               size="small"
               type="link"
@@ -481,7 +451,7 @@ export default function UpstreamsPage() {
         size="small"
         allowClear
         style={{ width: 220 }}
-        placeholder="搜索名称 / Base URL"
+        placeholder="搜名称 / URL"
         onSearch={(value) => {
           setQ(value);
           setPage(1);
@@ -502,16 +472,14 @@ export default function UpstreamsPage() {
       />
       <Text type="secondary" style={{ fontSize: 12 }}>共 {formatCount(list.data?.total ?? 0)} 个</Text>
       {syncStatus.data ? (
-        <Tooltip title="自动同步的间隔与开关由服务端决定，这里只展示。">
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            {syncStatus.data.auto.enabled
-              ? `自动同步：每 ${syncStatus.data.auto.intervalMinutes} 分钟 ±${formatPercent(
-                  syncStatus.data.auto.jitterRatio,
-                  0,
-                )}（退避上限 ${syncStatus.data.auto.backoffCapMinutes} 分钟）`
-              : '自动同步：已关闭（仅手动查询）'}
-          </Text>
-        </Tooltip>
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          {syncStatus.data.auto.enabled
+            ? `自动同步：每 ${syncStatus.data.auto.intervalMinutes} 分钟 ±${formatPercent(
+                syncStatus.data.auto.jitterRatio,
+                0,
+              )}（退避上限 ${syncStatus.data.auto.backoffCapMinutes} 分钟）`
+            : '自动同步：已关闭（仅手动查询）'}
+        </Text>
       ) : null}
     </div>
   );
@@ -531,7 +499,7 @@ export default function UpstreamsPage() {
               刷新
             </Button>
             <Button type="primary" size="small" icon={<PlusOutlined />} onClick={openCreate}>
-              添加供应商
+              添加
             </Button>
           </Space>
         }
@@ -550,7 +518,7 @@ export default function UpstreamsPage() {
 
       {list.error && list.data ? (
         <div style={{ marginBottom: tokens.space.md }}>
-          <ErrorState error={list.error} onRetry={list.reload} title="刷新失败，以下为上一次成功的数据" />
+          <ErrorState error={list.error} onRetry={list.reload} title="刷新失败，下方为旧数据" />
         </div>
       ) : null}
 
@@ -599,9 +567,7 @@ export default function UpstreamsPage() {
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
                 description={
-                  q || enabled !== undefined
-                    ? '当前筛选条件下没有上游。'
-                    : '还没有上游。先添加一个 Base URL，再往下面挂 key。'
+                  q || enabled !== undefined ? '当前筛选下没有上游' : '还没有上游'
                 }
               />
             ),

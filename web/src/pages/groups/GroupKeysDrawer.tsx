@@ -118,7 +118,7 @@ export function GroupKeysDrawer({
     if (group === null) return;
     modal.confirm({
       title: '吊销这把 key？',
-      content: `${row.maskedKey} 会立即失效且不可恢复（吊销是硬删，没有回收站）。用它的客户端会开始收到 401。`,
+      content: `${row.maskedKey} 会立即失效且不可恢复，用它的客户端会开始收到 401。`,
       okText: '吊销',
       okButtonProps: { danger: true },
       cancelText: '取消',
@@ -170,7 +170,7 @@ export function GroupKeysDrawer({
         <Space size={tokens.space.sm}>
           <Popconfirm
             title="重置这把 key？"
-            description="旧 key 立即失效，替换成一把新的 —— 用旧 key 的客户端要立刻换成新的。"
+            description="旧 key 立即失效，客户端需换成新 key。"
             okText="重置"
             cancelText="取消"
             onConfirm={() => reset(row)}
@@ -227,21 +227,20 @@ export function GroupKeysDrawer({
               void issue();
             }}
           >
-            签发新 key
+             签发 key
           </Button>
         </Space>
       }
     >
       <Paragraph type="secondary" style={{ fontSize: 12 }}>
-        同一个组下的多把 key <Text strong>共用同一份配额池</Text>（RPM / TPM / 日配额），
-        所以多签发一把不是"多一份额度"。
+        这个组的多把 key 共用同一份配额池（RPM / TPM / 日配额）。
       </Paragraph>
 
       {keys.error !== null && keys.data === null ? (
         <ErrorState
           error={keys.error}
           onRetry={keys.reload}
-          title="key 列表读取失败（`GET /api/groups/:id/keys`）"
+          title="key 列表读取失败"
         />
       ) : keys.loading ? (
         <LoadingState tip="正在读取该组的 key…" minHeight={200} />
@@ -257,7 +256,7 @@ export function GroupKeysDrawer({
             emptyText: (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="这个组一把 key 都没有。没有 key 就打不通 /v1，点下面的「签发新 key」。"
+                description="还没有 key，打不通 /v1。"
               />
             ),
           }}
@@ -269,19 +268,13 @@ export function GroupKeysDrawer({
         showIcon
         style={{ marginTop: tokens.space.md, background: tokens.tint.warning, border: 'none' }}
         icon={<KeyOutlined />}
-        message="完整 key 只在签发 / 重置那一刻显示一次（本站这把 key 以 gw- 开头）"
-        description={
-          <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-            库里只存摘要，这个列表永远只有掩码 —— <Text strong style={{ color: tokens.color.textSecondary }}>没有任何端点能取回明文</Text>，
-            所以这里也没有"显示明文"按钮。重置会立刻废掉旧 key；共用的那把要换，就走重置（而不是先吊销、再签发）。
-          </Text>
-        }
+        message="完整 key 只在签发 / 重置时显示一次，关掉就取不回。"
       />
 
       {baseUrl ? (
         <div style={{ marginTop: tokens.space.md }}>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            客户端 Base URL（结尾的 /v1 不能省）：
+            客户端 Base URL（/v1 不能省）：
           </Text>
           <div style={{ marginTop: tokens.space.xs }}>
             <Text

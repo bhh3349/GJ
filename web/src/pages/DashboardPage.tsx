@@ -213,20 +213,15 @@ export default function DashboardPage() {
         title="仪表盘"
         extra={
           <div style={{ display: 'flex', alignItems: 'center', gap: tokens.space.md }}>
-            <Tooltip title="时间窗口由后端下发，前端不用本地时间自算 QPS。">
-              <span>
-                <Segmented
-                  size="small"
-                  value={window}
-                  options={WINDOWS.map((item) => ({ label: item, value: item }))}
-                  onChange={(value) => {
-                    setWindow(value as StatsWindow);
-                  }}
-                />
-              </span>
-            </Tooltip>
-            <Tooltip title={sourceLabel}>
-              <Button
+            <Segmented
+              size="small"
+              value={window}
+              options={WINDOWS.map((item) => ({ label: item, value: item }))}
+              onChange={(value) => {
+                setWindow(value as StatsWindow);
+              }}
+            />
+            <Button
                 size="small"
                 icon={<ReloadOutlined />}
                 loading={refreshing || health.refreshing}
@@ -236,16 +231,15 @@ export default function DashboardPage() {
                   snapshots.reload();
                 }}
               >
-                刷新
-              </Button>
-            </Tooltip>
+              刷新
+            </Button>
           </div>
         }
       />
 
       {error ? (
         <div style={{ marginBottom: tokens.space.md }}>
-          <ErrorState error={error} onRetry={reload} title="刷新失败，以下为上一次成功的数据" />
+          <ErrorState error={error} onRetry={reload} title="刷新失败，下方为旧数据" />
         </div>
       ) : null}
 
@@ -264,7 +258,7 @@ export default function DashboardPage() {
           value={successRate === null || noTraffic ? '—' : formatPercent(successRate)}
           caption={
             noTraffic
-              ? '窗口内无流量（后端的 successRate=1 是约定，不是实测）'
+              ? '窗口内无流量'
               : `${formatCount(requests)} 次请求 · ${formatCount(data?.errors ?? traffic?.errors ?? 0)} 次失败`
           }
           tone={
@@ -294,11 +288,11 @@ export default function DashboardPage() {
           caption={
             latency === null
               ? health.error
-                ? '观测面加载失败 —— 延迟未知'
+                ? '观测面加载失败'
                 : '等待数据'
-              : `${formatCount(latency.samples)} 个样本（取真实分位，不做插值）`
+              : `${formatCount(latency.samples)} 个样本`
           }
-          hint="取自真实调用日志的端到端耗时：p50 = 一半请求快于这个值，p99 = 99% 的请求快于这个值。窗口内没有样本时显示「—」，不是 0ms。"
+          hint="无样本显示 —，不是 0。"
         />
         <StatCard
           label="窗口内 token"
@@ -319,7 +313,6 @@ export default function DashboardPage() {
         <Panel
           size="sm"
           title="key 池健康"
-          hint="网关侧的 key 运行态，管理端只读；数值每秒同步一次。冷却与连续失败由网关判定，不由这里决定。"
           extra={
             keyPool ? (
               <Text type="secondary" style={{ fontSize: 12 }}>
@@ -335,9 +328,6 @@ export default function DashboardPage() {
               <HealthLine label="健康" count={keyPool?.healthy ?? counts.healthy} color={tokens.color.success} />
               <HealthLine label="冷却中" count={keyPool?.cooling ?? counts.cooling} color={tokens.color.warning} />
               <HealthLine label="已禁用" count={keyPool?.disabled ?? counts.disabled} color={tokens.color.textTertiary} />
-              <Text type="secondary" style={{ fontSize: 11, marginTop: tokens.space.xs }}>
-                健康态由网关决定，管理端只读；下面是当前窗口内出现过的 key 明细。
-              </Text>
             </div>
           )}
         </Panel>
@@ -345,7 +335,6 @@ export default function DashboardPage() {
         <Panel
           size="sm"
           title="服务与存储"
-          hint="运行时长是本次进程启动至今的时间，重启即归零。数据库那一格是真跑一次查询的结果，不是「连接对象还在」。"
         >
           <div style={{ display: 'grid', gap: tokens.space.sm }}>
             <MetaLine
@@ -376,7 +365,7 @@ export default function DashboardPage() {
             <MetaLine
               label="库文件 / WAL"
               value={db ? `${formatBytes(db.fileSizeBytes)} / ${formatBytes(db.walSizeBytes)}` : '—'}
-              hint="取不到是「—」（如 :memory: 库），不是 0。"
+              hint="取不到是 —，不是 0。"
             />
           </div>
         </Panel>
@@ -384,7 +373,6 @@ export default function DashboardPage() {
         <Panel
           size="sm"
           title="错误事件分型"
-          hint="只列窗口内真正发生过的类型，没发生的不补 0。分两档归因：调用方与配额侧为提醒，系统侧为故障。"
           extra={
             events ? (
               <Text type="secondary" style={{ fontSize: 12 }}>
@@ -396,12 +384,11 @@ export default function DashboardPage() {
           {events && eventBuckets.length === 0 ? (
             <div style={{ display: 'grid', gap: tokens.space.sm }}>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                窗口内没有错误事件 —— 这是「没有发生过」，不是「没查到」。
+                窗口内没有错误事件
               </Text>
               <MetaLine
                 label="累计丢弃"
                 value={formatCount(events.dropped)}
-                hint="本次进程启动以来，因队列溢出或落库失败而累计丢弃的事件数。丢事件不许静默，所以这一格常驻。"
                 tone={events.dropped > 0 ? 'warning' : 'default'}
               />
             </div>
@@ -412,7 +399,7 @@ export default function DashboardPage() {
                   key={bucket.category}
                   label={categoryLabel(bucket.category)}
                   value={formatCount(bucket.count)}
-                  hint={`${bucket.category} · severity=${bucket.severity} · 最近 ${formatIso(bucket.lastAt)}`}
+                  hint={`最近 ${formatIso(bucket.lastAt)}`}
                   tone={bucket.severity === 'error' ? 'error' : 'warning'}
                 />
               ))}
@@ -421,7 +408,7 @@ export default function DashboardPage() {
                   label="累计丢弃"
                   value={formatCount(events.dropped)}
                   tone="warning"
-                  hint="进程启动以来累计，不是窗口内。"
+                  hint="进程内累计，非窗口内"
                 />
               ) : null}
             </div>
@@ -437,7 +424,6 @@ export default function DashboardPage() {
       <div className="panel-grid-wide">
         <Panel
           title="流量与延迟趋势"
-          description="每 60 秒存一条的服务健康快照 —— 是当时算出来的历史，不会事后重算。"
           extra={
             <Segmented
               size="small"
@@ -457,7 +443,7 @@ export default function DashboardPage() {
           ) : (snapshots.data?.items.length ?? 0) === 0 ? (
             <div style={{ minHeight: 260, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <Text type="secondary" style={{ fontSize: 13 }}>
-                还没有健康快照 —— 服务启动后每 60s 落一条。
+                还没有健康快照
               </Text>
             </div>
           ) : (
@@ -480,7 +466,7 @@ export default function DashboardPage() {
 
         <Panel
           title="Key 明细"
-          description={`${formatCount(keyRows.length)} 把 key 出现在本窗口的观测里`}
+          description={`${formatCount(keyRows.length)} 把`}
           gap={false}
           size="sm"
           style={{ display: 'flex', flexDirection: 'column' }}
@@ -511,12 +497,11 @@ export default function DashboardPage() {
         <Panel
           size="sm"
           title="余额总览"
-          hint="合计只统计「余额类」key；余额未知的按未知单独计数、不当 0 累加；套餐类 key 不进金额合计。"
         >
           <div style={{ display: 'grid', gap: tokens.space.md }}>
             <div>
               <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
-                全局合计（balance 类 key）
+                余额类 key 合计
               </Text>
               <span style={{ fontSize: 24, fontWeight: 600, letterSpacing: '-0.02em' }}>
                 <BalanceText value={balanceTotal} strong />
@@ -526,31 +511,24 @@ export default function DashboardPage() {
               label="未知余额的 key"
               value={formatCount(balanceUnknown)}
               tone={balanceUnknown && balanceUnknown > 0 ? 'warning' : 'default'}
-              hint="余额未知不等于 0，不计入合计。"
             />
-            <MetaLine label="不计金额的套餐类 key" value={formatCount(tokenPlanCount)} />
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              要看余额从哪来、什么时候查的、有没有漂移，去下面的余额同步观测区或统计页。
-            </Text>
+            <MetaLine label="套餐类 key" value={formatCount(tokenPlanCount)} />
           </div>
         </Panel>
 
         <Panel
           size="sm"
           title="网关调用侧"
-          description="转发系统的第一性问题：能不能服务、服务得怎么样。"
         >
           <div style={{ display: 'grid', gap: tokens.space.md }}>
             <MetaLine
               label="本窗口请求"
               value={formatCount(requests)}
-              hint="与统计页同一份口径。两处偶有不一致时，本页以实时帧与总览为准。"
             />
             <MetaLine
               label="可服务 key"
               value={keyPool ? `${formatCount(keyPool.healthy)} / ${formatCount(keyPool.total)}` : '—'}
               tone={keyPool && keyPool.healthy === 0 ? 'error' : 'default'}
-              hint="只有「启用 + 不在冷却 + 余额大于 0」的 key 才会被网关选中对外服务。"
             />
             <MetaLine
               label="助手流量"
@@ -559,7 +537,6 @@ export default function DashboardPage() {
                   ? `${formatCount(health.data.assistant.requests)} 次 · ${formatCount(health.data.assistant.errors)} 次失败`
                   : '—'
               }
-              hint="内置助手单独计量：它的失败会拉低 key 健康，但不计入业务 QPS 与成功率。这是本次进程内的累计，重启归零。"
             />
           </div>
         </Panel>

@@ -23,7 +23,6 @@ import {
   Space,
   Switch,
   Tag,
-  Tooltip,
   Typography,
 } from 'antd';
 import dayjs, { type Dayjs } from 'dayjs';
@@ -173,7 +172,7 @@ export default function StatsPage() {
     return `有 ${bad.length} 条序列的点数与时间轴不等长：${bad
       .slice(0, 3)
       .map((item) => item.label)
-      .join('、')}${bad.length > 3 ? ' 等' : ''}。图表按后端返回原样绘制，未做补桶。`;
+      .join('、')}${bad.length > 3 ? ' 等' : ''}。`;
   }, [usage.data]);
 
   const metricOptions = METRIC_ORDER.map((value) => ({ label: METRIC_LABEL[value], value }));
@@ -184,25 +183,17 @@ export default function StatsPage() {
         title="统计"
         extra={
           <Space>
-            <Tooltip
-              title={
-                usingCustomRange
-                  ? '使用自定义区间时不做自动刷新：绝对窗口不随时间推移变化。'
-                  : `每 ${AUTO_REFRESH_MS / 1000} 秒按当前时刻重算窗口并重查（页面不可见时暂停）。`
-              }
-            >
-              <Space size={6}>
-                <Switch
-                  size="small"
-                  checked={autoRefresh && !usingCustomRange}
-                  disabled={usingCustomRange}
-                  onChange={setAutoRefresh}
-                />
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  自动刷新
-                </Text>
-              </Space>
-            </Tooltip>
+            <Space size={6}>
+              <Switch
+                size="small"
+                checked={autoRefresh && !usingCustomRange}
+                disabled={usingCustomRange}
+                onChange={setAutoRefresh}
+              />
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                自动刷新
+              </Text>
+            </Space>
             <Button
               size="small"
               icon={<ReloadOutlined />}
@@ -308,20 +299,18 @@ export default function StatsPage() {
           }))}
           onChange={(value: string | undefined) => setGroupId(value)}
         />
-        <Tooltip title="按模型名精确匹配">
-          <Input.Search
-            size="small"
-            allowClear
-            style={{ width: 190 }}
-            placeholder="模型名"
-            onSearch={(value) => setModel(value)}
-          />
-        </Tooltip>
+        <Input.Search
+          size="small"
+          allowClear
+          style={{ width: 190 }}
+          placeholder="模型名（精确）"
+          onSearch={(value) => setModel(value)}
+        />
       </div>
 
       {usage.error && usage.data ? (
         <div style={{ marginBottom: tokens.space.md }}>
-          <ErrorState error={usage.error} onRetry={usage.reload} title="刷新失败，以下为上一次成功的数据" />
+          <ErrorState error={usage.error} onRetry={usage.reload} title="刷新失败，下方为旧数据" />
         </div>
       ) : null}
 
@@ -338,7 +327,6 @@ export default function StatsPage() {
           value={usage.data ? formatCount(totals.requests) : '—'}
           caption={usage.data ? `${formatIso(usage.data.from)} → ${formatIso(usage.data.to)}` : '等待数据'}
           loading={usage.loading}
-          hint="各序列各坐标点求和；统计口径完全来自后端返回的时间轴。"
         />
         <StatCard
           label="tokens"
@@ -349,9 +337,8 @@ export default function StatsPage() {
         <StatCard
           label="成本"
           value={usage.data ? formatCents(totals.costCents) : '—'}
-          caption="价格未知的模型不计入（未知 ≠ 0）"
+          caption="价格未知不计入"
           loading={usage.loading}
-          hint="按模型档案的单价（分 / 1k tokens）折算；上游没给价格的模型不参与累加。"
         />
         <StatCard
           label="错误数"
@@ -398,25 +385,21 @@ export default function StatsPage() {
               options={metricOptions}
               onChange={(value) => setMetric(value as UsageMetric)}
             />
-            <Tooltip title="把各序列按桶累加叠起来；关掉就是各条独立趋势。">
-              <Space size={6}>
-                <Switch size="small" checked={stacked} onChange={setStacked} />
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  堆叠
-                </Text>
-              </Space>
-            </Tooltip>
+            <Space size={6}>
+              <Switch size="small" checked={stacked} onChange={setStacked} />
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                堆叠
+              </Text>
+            </Space>
           </Space>
           <Space size={tokens.space.md} wrap>
             {usage.data && usage.data.bucket !== bucket ? (
-              <Tooltip title="数据量大时后端可能自动降低粒度，以实际回显为准。">
-                <Tag
-                  bordered={false}
-                  style={{ marginInlineEnd: 0, background: tokens.tint.info, color: tokens.color.info }}
-                >
-                  后端回显粒度 {BUCKET_LABEL[usage.data.bucket]}
-                </Tag>
-              </Tooltip>
+              <Tag
+                bordered={false}
+                style={{ marginInlineEnd: 0, background: tokens.tint.info, color: tokens.color.info }}
+              >
+                后端回显粒度 {BUCKET_LABEL[usage.data.bucket]}
+              </Tag>
             ) : null}
             <Text type="secondary" style={{ fontSize: 12 }}>
               {GROUP_BY_LABEL[groupBy]} · 粒度 {BUCKET_LABEL[effectiveBucket]}
@@ -429,7 +412,7 @@ export default function StatsPage() {
             type="warning"
             showIcon
             style={{ marginBottom: tokens.space.md }}
-            message={`含估算用量 ${formatCount(usage.data.isEstimatedTokenCount)} 条（按字符估算，非上游真实报数）`}
+            message={`含估算用量 ${formatCount(usage.data.isEstimatedTokenCount)} 条`}
           />
         ) : null}
 
@@ -450,7 +433,7 @@ export default function StatsPage() {
                   setBucket(PRESET_BUCKET['7d']);
                 }}
               >
-                看最近 7 天
+                近 7 天
               </Button>
             }
           />

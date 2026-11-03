@@ -18,7 +18,7 @@ export function RouteErrorPage() {
       subTitle={message}
       extra={
         <Button type="primary" onClick={() => navigate('/dashboard')}>
-          回到仪表盘
+          回仪表盘
         </Button>
       }
     />

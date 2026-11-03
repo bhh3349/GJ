@@ -149,7 +149,7 @@ export default function ConsoleUsagePage() {
     if (!data) return null;
     const bad = data.series.filter((item) => item.points.length !== data.axis.length);
     if (bad.length === 0) return null;
-    return `有 ${bad.length} 条序列的点数与时间轴不等长。图表按后端返回原样绘制，未做补桶。`;
+    return `有 ${bad.length} 条序列与时间轴不等长，按原样绘制。`;
   }, [usage.data]);
 
   const metricOptions = METRIC_ORDER.map((value) => ({ label: METRIC_LABEL[value], value }));
@@ -163,8 +163,8 @@ export default function ConsoleUsagePage() {
             <Tooltip
               title={
                 usingCustomRange
-                  ? '使用自定义区间时不做自动刷新：绝对窗口不随时间推移变化。'
-                  : `每 ${AUTO_REFRESH_MS / 1000} 秒按当前时刻重算窗口并重查（页面不可见时暂停）。`
+                  ? '自定义区间不自动刷新。'
+                  : `每 ${AUTO_REFRESH_MS / 1000} 秒刷新一次。`
               }
             >
               <Space size={6}>
@@ -197,8 +197,7 @@ export default function ConsoleUsagePage() {
         type="info"
         showIcon
         style={{ marginBottom: tokens.space.md }}
-        message="这里统计的是你所在组的全部用量"
-        description="配额与用量按组共享（同组多人共用同一批 key 与配额），不是某个人的单独账单。"
+        message="统计的是本组全部用量，不是个人账单。"
       />
 
       {/*
@@ -254,7 +253,7 @@ export default function ConsoleUsagePage() {
         <DatePicker.RangePicker
           size="small"
           showTime={{ format: 'HH:mm' }}
-          placeholder={['自定义开始', '自定义结束']}
+          placeholder={['开始', '结束']}
           value={customRange}
           onChange={(values) => {
             const start = values?.[0];
@@ -262,16 +261,11 @@ export default function ConsoleUsagePage() {
             setCustomRange(start && end ? [start, end] : null);
           }}
         />
-        {usingCustomRange ? (
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            自定义区间（自动刷新已让位：绝对窗口不随时间推移变化）
-          </Text>
-        ) : null}
       </div>
 
       {usage.error && usage.data ? (
         <div style={{ marginBottom: tokens.space.md }}>
-          <ErrorState error={usage.error} onRetry={usage.reload} title="刷新失败，以下为上一次成功的数据" />
+          <ErrorState error={usage.error} onRetry={usage.reload} title="刷新失败，下方为旧数据" />
         </div>
       ) : null}
 
@@ -310,7 +304,7 @@ export default function ConsoleUsagePage() {
 
       {shapeWarning ? (
         <div style={{ marginBottom: tokens.space.md }}>
-          <Alert type="warning" showIcon message="序列与时间轴长度不一致" description={shapeWarning} />
+          <Alert type="warning" showIcon message={shapeWarning} />
         </div>
       ) : null}
 
@@ -340,18 +334,16 @@ export default function ConsoleUsagePage() {
               options={metricOptions}
               onChange={(value) => setMetric(value as UsageMetric)}
             />
-            <Tooltip title="把各序列按桶累加叠起来；关掉就是各条独立趋势。">
-              <Space size={6}>
-                <Switch size="small" checked={stacked} onChange={setStacked} />
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  堆叠
-                </Text>
-              </Space>
-            </Tooltip>
+            <Space size={6}>
+              <Switch size="small" checked={stacked} onChange={setStacked} />
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                堆叠
+              </Text>
+            </Space>
           </Space>
           <Space size={tokens.space.md} wrap>
             {usage.data && usage.data.bucket !== bucket ? (
-              <Tooltip title="数据量大时后端可能自动降低粒度，以实际回显为准。">
+              <Tooltip title="后端按数据量自动降粒度。">
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   后端回显粒度 {BUCKET_LABEL[usage.data.bucket]}
                 </Text>
@@ -368,7 +360,7 @@ export default function ConsoleUsagePage() {
             type="warning"
             showIcon
             style={{ marginBottom: tokens.space.md }}
-            message={`含估算用量 ${formatCount(usage.data.isEstimatedTokenCount)} 条（按字符估算，非上游真实报数）`}
+            message={`含估算用量 ${formatCount(usage.data.isEstimatedTokenCount)} 条（按字符估算）`}
           />
         ) : null}
 
@@ -389,7 +381,7 @@ export default function ConsoleUsagePage() {
                   setBucket(PRESET_BUCKET['7d']);
                 }}
               >
-                看最近 7 天
+                近 7 天
               </Button>
             }
           />

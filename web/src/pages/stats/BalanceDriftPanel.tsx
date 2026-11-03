@@ -13,7 +13,7 @@
  *    （窗口内、上限 20 条）**不是一回事**，两者分开标注，别混成一个数。
  * 3. 余额**上升不告警**（充值 / 上游按周期重置都正常），后端也不会给这样的 alert。
  */
-import { Empty, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { Empty, Space, Table, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 
 import type { BalanceDrift, BalanceDriftAlert, BalanceDriftCode, BalanceSyncUpstreamState } from '@/api/types';
@@ -58,14 +58,12 @@ export function BalanceDriftPanel({ drift, upstreams }: BalanceDriftPanelProps) 
       render: (code: BalanceDriftCode) => {
         const meta = DRIFT_CODE_TEXT[code];
         return (
-          <Tooltip title={meta.explain}>
-            <Tag
-              bordered={false}
-              style={{ marginInlineEnd: 0, background: tokens.tint.warning, color: tokens.color.warning }}
-            >
-              {meta.label}
-            </Tag>
-          </Tooltip>
+          <Tag
+            bordered={false}
+            style={{ marginInlineEnd: 0, background: tokens.tint.warning, color: tokens.color.warning }}
+          >
+            {meta.label}
+          </Tag>
         );
       },
     },
@@ -89,11 +87,7 @@ export function BalanceDriftPanel({ drift, upstreams }: BalanceDriftPanelProps) 
       ),
     },
     {
-      title: (
-        <Tooltip title="该窗口内本网关的 token 用量（上游级，不按 key 过滤）。本地无单价，所以它只用来区分「零 / 非零」，不与金额比较。">
-          <span>窗口内 tokens</span>
-        </Tooltip>
-      ),
+      title: '窗口内 tokens',
       dataIndex: 'usedTokens',
       width: 130,
       align: 'right',
@@ -146,7 +140,7 @@ export function BalanceDriftPanel({ drift, upstreams }: BalanceDriftPanelProps) 
               image={Empty.PRESENTED_IMAGE_SIMPLE}
               description={
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  {`窗口（自 ${formatIso(drift.since)} 起）内没有漂移提示。`}
+                  {`自 ${formatIso(drift.since)} 起没有漂移提示。`}
                 </Text>
               }
             />

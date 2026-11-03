@@ -166,11 +166,9 @@ export function SubscriptionExpiryTimeline({
           {`${formatCount(soonCount)} 条 ${EXPIRING_WITHIN_DAYS} 天内到期 · 已过期 ${formatCount(expiredCount)} 条`}
         </Text>
         {unknownCount > 0 ? (
-          <Tooltip title="上游没给 end_at —— 没有时刻就放不到某一天，硬塞进「今天」就是替供应商下结论。">
-            <Text type="secondary" style={{ fontSize: 11 }}>
-              {`${formatCount(unknownCount)} 条无到期时间（不上轴）`}
-            </Text>
-          </Tooltip>
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            {`${formatCount(unknownCount)} 条无到期时间`}
+          </Text>
         ) : null}
         {selectedDay !== null ? (
           <Text
@@ -184,18 +182,14 @@ export function SubscriptionExpiryTimeline({
             }}
             style={{ fontSize: 11, color: tokens.color.primary, cursor: 'pointer', userSelect: 'none' }}
           >
-            清掉这一天的筛选
+            清除筛选
           </Text>
-        ) : (
-          <Text type="secondary" style={{ fontSize: 11 }}>
-            点一根柱只看那天到期
-          </Text>
-        )}
+        ) : null}
       </div>
 
       {buckets.length === 0 ? (
         <Text type="secondary" style={{ fontSize: 12 }}>
-          台账里没有一条带到期时间的套餐。
+          没有带到期时间的套餐。
         </Text>
       ) : (
         <div style={{ display: 'flex', alignItems: 'flex-end', gap: 3, overflowX: 'auto', paddingBottom: 2 }}>

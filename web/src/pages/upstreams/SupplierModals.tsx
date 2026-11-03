@@ -118,7 +118,7 @@ export function SupplierImportModal({
     <Modal
       open={open}
       title={sessionImport ? '批量导入 Cookie' : '批量导入账号'}
-      okText="提交导入"
+      okText="导入"
       cancelText="取消"
       confirmLoading={isPending('import')}
       onOk={() => {
@@ -253,7 +253,7 @@ export function SupplierCreateKeysModal({
     <Modal
       open={open}
       title="新建 key"
-      okText="提交建 key"
+      okText="创建"
       cancelText="取消"
       confirmLoading={isPending('keys')}
       onOk={() => {
@@ -304,7 +304,7 @@ export function SupplierCreateKeysModal({
               <Select
                 mode="tags"
                 style={{ width: '100%' }}
-                placeholder="输入模型名后回车，如 gpt-4o-mini"
+                placeholder="模型名，回车添加"
                 tokenSeparators={[',', ' ']}
               />
             </Form.Item>
@@ -315,11 +315,6 @@ export function SupplierCreateKeysModal({
             showIcon
             style={{ marginBottom: tokens.space.md, background: tokens.tint.info, border: 'none' }}
             message={`${supplierLabel(supplier)} 的 key 没有额度与模型白名单`}
-            description={
-              <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-                这家上游建 key 只收名称；额度与白名单由上游侧决定，网关不代填。建出的 key 在池内按「无限额度」记账。
-              </Text>
-            }
           />
         )}
 
@@ -332,7 +327,7 @@ export function SupplierCreateKeysModal({
           不写就会有人等一个永远不出现的"一次性明文"浮层，然后以为建 key 失败了。
         */}
         <Text type="secondary" style={{ fontSize: 12 }}>
-          建好的 key 明文不经浏览器：服务端取回后当场加密入池，回执浮层里只给掩码。要明文请到上游站点取。
+          这里只有掩码，没有明文
         </Text>
       </Form>
     </Modal>

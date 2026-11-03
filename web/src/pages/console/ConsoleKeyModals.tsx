@@ -58,17 +58,17 @@ export function ConsoleKeyRevealModal({ reveal, onClose }: ConsoleKeyRevealModal
     if (text === '') return;
     try {
       await navigator.clipboard.writeText(text);
-      message.success('已复制到剪贴板');
+      message.success('已复制');
     } catch {
-      message.error('浏览器不允许写入剪贴板，请手动选中上面这串复制');
+      message.error('请手动选中上面这串复制');
     }
   };
 
   return (
     <Modal
       open={reveal !== null}
-      title="你的新 key（仅此一次）"
-      okText="我已保存，关闭"
+      title="你的新 key"
+      okText="已保存"
       cancelButtonProps={{ style: { display: 'none' } }}
       onOk={onClose}
       onCancel={onClose}
@@ -78,8 +78,8 @@ export function ConsoleKeyRevealModal({ reveal, onClose }: ConsoleKeyRevealModal
     >
       <Paragraph type="secondary" style={{ marginBottom: tokens.space.xs }}>
         {reveal?.label === null || reveal?.label === undefined
-          ? '你刚签发的这把 key（没有起名字）。'
-          : `你刚签发的这把 key：「${reveal.label}」。`}
+          ? '刚签发的 key（未命名）'
+          : `刚签发的 key：「${reveal.label}」`}
       </Paragraph>
 
       <div
@@ -112,7 +112,7 @@ export function ConsoleKeyRevealModal({ reveal, onClose }: ConsoleKeyRevealModal
             void copy();
           }}
         >
-          复制这串 key
+          复制
         </Button>
         <Text type="secondary" style={{ fontSize: 12 }}>
           掩码：{reveal?.maskedKey ?? '—'}
@@ -130,7 +130,7 @@ export function ConsoleKeyRevealModal({ reveal, onClose }: ConsoleKeyRevealModal
           }}
         >
           <Text type="secondary" style={{ fontSize: 12 }}>
-            客户端 Base URL（结尾的 /v1 不能省）：
+            Base URL（/v1 不能省）
           </Text>
           <div style={{ marginTop: tokens.space.xs }}>
             <Text
@@ -147,13 +147,7 @@ export function ConsoleKeyRevealModal({ reveal, onClose }: ConsoleKeyRevealModal
         type="warning"
         showIcon
         style={{ background: tokens.tint.warning, border: 'none' }}
-        message="现在不复制，之后就拿不到了"
-        description={
-          <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-            服务端只保存摘要，任何页面都不会再显示它 —— 也没有「再查看一次」这个按钮。
-            关掉这一帧就取不回；要换只能再签一把（或吊销这把重签）。
-          </Text>
-        }
+        message="只显示一次，关闭后取不回"
       />
     </Modal>
   );
@@ -207,7 +201,7 @@ export function ConsoleKeyRenameModal({ target, onClose, onSubmit, pending }: Co
   return (
     <Modal
       open={target !== null}
-      title="给这把 key 起个名字"
+      title="改名"
       okText="保存"
       cancelText="取消"
       confirmLoading={pending}
@@ -219,9 +213,7 @@ export function ConsoleKeyRenameModal({ target, onClose, onSubmit, pending }: Co
       width={480}
     >
       <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: tokens.space.sm }}>
-        这把 key 的掩码是 <Text code>{target?.maskedKey ?? ''}</Text>。名字只有你自己看得到
-        （它不进任何请求，也不影响这把 key 能不能用）。一个组下的 key 共用同一份配额池，
-        所以名字就是"哪把是给哪个客户端的"这个问题的唯一答案。
+        这把 key 的掩码是 <Text code>{target?.maskedKey ?? ''}</Text>。
       </Paragraph>
       <Form<RenameFormValues> form={form} layout="vertical" requiredMark="optional">
         <Form.Item
@@ -230,7 +222,7 @@ export function ConsoleKeyRenameModal({ target, onClose, onSubmit, pending }: Co
           rules={[{ max: 100, message: '名称最长 100 个字符' }]}
           extra="留空即去掉名字。"
         >
-          <Input placeholder="如 家里的台式机" maxLength={100} allowClear />
+          <Input placeholder="如 台式机" maxLength={100} allowClear />
         </Form.Item>
       </Form>
     </Modal>

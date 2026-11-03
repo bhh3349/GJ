@@ -13,7 +13,7 @@
  * 金额一律走 `BalanceText`，`null` 显示「未知」而不是 ¥0.00。
  */
 import { ReloadOutlined } from '@ant-design/icons';
-import { Button, Empty, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { Button, Empty, Space, Table, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import { useState } from 'react';
 
@@ -78,17 +78,13 @@ const keyColumns: ColumnsType<BalanceKeyRow> = [
     render: (_: unknown, row) =>
       row.unlimited === true ? (
         // 无限额度走单独一档：它既不是「未计入」（那是未知），也不是「已计入」。
-        <Tooltip title="无限额度 key：上游不限额、不返回金额，因此不参与任何金额合计 —— 它也不算「未知」。">
-          <Tag bordered={false} style={{ marginInlineEnd: 0, background: tokens.tint.info, color: tokens.color.info }}>
-            不计金额
-          </Tag>
-        </Tooltip>
+        <Tag bordered={false} style={{ marginInlineEnd: 0, background: tokens.tint.info, color: tokens.color.info }}>
+          不计金额
+        </Tag>
       ) : row.balance === null ? (
-        <Tooltip title="该 key 未录入余额，或上游查询不到。未知 ≠ 0，不计入合计。">
-          <Tag bordered={false} style={{ marginInlineEnd: 0, background: tokens.tint.warning, color: tokens.color.warning }}>
-            未计入
-          </Tag>
-        </Tooltip>
+        <Tag bordered={false} style={{ marginInlineEnd: 0, background: tokens.tint.warning, color: tokens.color.warning }}>
+          未计入
+        </Tag>
       ) : (
         <Tag bordered={false} style={{ marginInlineEnd: 0, background: tokens.tint.success, color: tokens.color.success }}>
           已计入
@@ -134,25 +130,13 @@ export function BalancePanel() {
       title: '未知 key',
       dataIndex: 'balanceUnknownKeyCount',
       width: 110,
-      render: (_: unknown, row) => (
-        <Tooltip title="余额未知的 key 数量。未知不得补 0 计入合计，所以这里必须单独可见。">
-          <span>
-            <CountCell value={row.balanceUnknownKeyCount} tone="warning" />
-          </span>
-        </Tooltip>
-      ),
+      render: (_: unknown, row) => <CountCell value={row.balanceUnknownKeyCount} tone="warning" />,
     },
     {
       title: '套餐类 key',
       dataIndex: 'tokenPlanKeyCount',
       width: 120,
-      render: (_: unknown, row) => (
-        <Tooltip title="token-plan 类 key：不参与任何金额合计。">
-          <span>
-            <CountCell value={row.tokenPlanKeyCount} tone="default" />
-          </span>
-        </Tooltip>
-      ),
+      render: (_: unknown, row) => <CountCell value={row.tokenPlanKeyCount} tone="default" />,
     },
   ];
 
@@ -175,7 +159,7 @@ export function BalancePanel() {
           <ErrorState
             error={balance.error}
             onRetry={balance.reload}
-            title="刷新失败，以下为上一次成功的数据"
+            title="刷新失败，下方为旧数据"
           />
         </div>
       ) : null}
@@ -204,7 +188,7 @@ export function BalancePanel() {
           >
             <div>
               <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
-                全局合计（balance 类 key）
+                全局合计
               </Text>
               <span style={{ fontSize: 22, fontWeight: 600 }}>
                 <BalanceText value={global?.totalBalance ?? null} strong />
@@ -214,21 +198,15 @@ export function BalancePanel() {
               <Text type="secondary" style={{ fontSize: 12 }}>
                 计金额 key <CountCell value={global?.balanceKeyCount} tone="default" />
               </Text>
-              <Tooltip title="余额未知的 key 数量（未知 ≠ 0，不计入合计）">
-                <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-                  未知 key <CountCell value={global?.balanceUnknownKeyCount} tone="warning" />
-                </Text>
-              </Tooltip>
-              <Tooltip title="无限额度 key：不参与金额合计，也不算未知（与「未知 key」在 balanceKeyCount 内互不重叠）">
-                <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-                  无限额度 key <CountCell value={global?.unlimitedKeyCount} tone="default" />
-                </Text>
-              </Tooltip>
-              <Tooltip title="token-plan 类 key 不计入任何金额合计">
-                <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-                  套餐类 key <CountCell value={global?.tokenPlanKeyCount} tone="default" />
-                </Text>
-              </Tooltip>
+              <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
+                未知 key <CountCell value={global?.balanceUnknownKeyCount} tone="warning" />
+              </Text>
+              <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
+                无限额度 key <CountCell value={global?.unlimitedKeyCount} tone="default" />
+              </Text>
+              <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
+                套餐类 key <CountCell value={global?.tokenPlanKeyCount} tone="default" />
+              </Text>
               {global?.currency ? (
                 <Tag
                   bordered={false}
@@ -260,7 +238,7 @@ export function BalancePanel() {
                   locale={{
                     emptyText: (
                       <Text type="secondary" style={{ fontSize: 12 }}>
-                        该上游没有可用于金额统计的 key。
+                        该上游没有计金额的 key。
                       </Text>
                     ),
                   }}

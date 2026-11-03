@@ -306,7 +306,7 @@ export function ErrorSummaryPanel({
               {value}
             </Text>
             {row.attempts === 0 ? (
-              <Tooltip title="0 次真实上游尝试：请求没发出去，不计任何 key 健康">
+              <Tooltip title="请求没发出去。">
                 <Tag
                   bordered={false}
                   style={{
@@ -343,11 +343,9 @@ export function ErrorSummaryPanel({
         width: COLUMN_WIDTHS.model,
         render: (value: string | null) =>
           value === null ? (
-            <Tooltip title="未过鉴权的请求没有模型，不是缺数据">
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                无
-              </Text>
-            </Tooltip>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              无
+            </Text>
           ) : (
             <Text style={{ fontFamily: tokens.font.mono, fontSize: 12 }}>{value}</Text>
           ),
@@ -363,7 +361,7 @@ export function ErrorSummaryPanel({
       {
         // v1.17.2 / ADR-0042：来源三腿合一个紧凑格 —— 上游 key 掩码之外，这行还有
         // "谁打来的（IP）/ 哪把网关 key（客户端腿）/ 哪把废 key 在撞库（指纹）"三个事实。
-        // 空值全收进 tooltip，表格只摆有值的，不为 401 行常摆一列空。
+        // 表格只摆有值的，不为 401 行常摆一列空。
         title: '来源',
         dataIndex: 'sourceIp',
         width: COLUMN_WIDTHS.source,
@@ -380,22 +378,14 @@ export function ErrorSummaryPanel({
             );
           }
           return (
-            <Tooltip
-              title={
-                `客户端 key：${row.clientKeyMasked ?? '—'}（401 恒无）\n` +
-                `废 key 指纹：${row.invalidKeyFingerprint ?? '—'}（仅 401 带 Bearer）\n` +
-                `来源 IP：${row.sourceIp ?? '—'}`
-              }
-            >
-              <Text style={{ fontFamily: tokens.font.mono, fontSize: 12, wordBreak: 'break-all' }}>
-                {bits.join(' · ')}
-              </Text>
-            </Tooltip>
+            <Text style={{ fontFamily: tokens.font.mono, fontSize: 12, wordBreak: 'break-all' }}>
+              {bits.join(' · ')}
+            </Text>
           );
         },
       },
       {
-        title: '归因（原文，不截断）',
+        title: '归因',
         dataIndex: 'message',
         width: COLUMN_WIDTHS.message,
         render: (value: string | null, row) => {
@@ -433,7 +423,7 @@ export function ErrorSummaryPanel({
         width: COLUMN_WIDTHS.copy,
         fixed: 'right',
         render: (_: unknown, row) => (
-          <Tooltip title="复制这一行（含完整归因、请求号与窗口）">
+          <Tooltip title="复制">
             <Button
               size="small"
               type="text"
@@ -444,8 +434,8 @@ export function ErrorSummaryPanel({
                 void navigator.clipboard
                   .writeText(rowToText(row, range ?? { from: row.ts, to: row.ts }))
                   .then(
-                    () => toast.success('已复制这一行'),
-                    () => toast.error('浏览器拒绝了剪贴板写入，可直接选中文字复制'),
+                    () => toast.success('已复制'),
+                    () => toast.error('请手动选中复制'),
                   );
               }}
             />
@@ -510,10 +500,10 @@ export function ErrorSummaryPanel({
               key={category}
               title={
                 countsFailed
-                  ? '计数窗口取数失败 —— 这一排暂时不可点，下面的表不受影响'
+                  ? '取数失败，本排不可点'
                   : count === 0
-                    ? `${category} · 该窗口内没发生过`
-                    : `${categoryLabel(category)} · ${categoryHint(category) ?? ''} 点一下：按这个分型问助手`
+                    ? `${categoryLabel(category)} · 窗口内没发生过`
+                    : `${categoryLabel(category)} · 点一下问助手`
               }
             >
               <button
@@ -604,15 +594,11 @@ export function ErrorSummaryPanel({
           emptyText: (
             <EmptyState
               minHeight={160}
-              title="窗口内没有错误事件 —— 这是「没发生过」，不是「没查到」"
+              title="窗口内没有错误事件"
             />
           ),
         }}
       />
-
-      <Text type="secondary" style={{ fontSize: 11 }}>
-        点一行 = 把这一行的条件（分型 / 级别 / 模型 / 请求号 / 窗口）交给助手；归因原文可直接选中复制或点行末复制。面板不替你写问题。
-      </Text>
     </div>
   );
 }

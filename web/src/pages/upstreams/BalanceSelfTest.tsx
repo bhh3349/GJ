@@ -165,7 +165,7 @@ export function BalanceSelfTest({ open, upstreamId, initial, onClose }: BalanceS
         <Form.Item name="keyId" label="测试用 Key" style={{ width: 320 }}>
           <Select
             allowClear
-            placeholder="自动（第一把可用余额 key）"
+            placeholder="自动选一把"
             options={keys.map((k) => ({
               label: k.label ? `${k.label} · ${k.maskedKey}` : k.maskedKey,
               value: k.id,

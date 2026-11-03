@@ -93,18 +93,16 @@ export function SupplierBatchDrawer({
       width: 150,
       render: (ok: boolean, row) => (
         <Space size={4}>
-          <Tooltip title={row.ok ? '这一行做成了' : '这一行做了但没成 —— 原因看「码」与「说明」两列'}>
-            <Tag
-              bordered={false}
-              style={{
-                marginInlineEnd: 0,
-                background: ok ? tokens.tint.success : tokens.tint.error,
-                color: ok ? tokens.color.success : tokens.color.error,
-              }}
-            >
-              {ok ? '成功' : '失败'}
-            </Tag>
-          </Tooltip>
+          <Tag
+            bordered={false}
+            style={{
+              marginInlineEnd: 0,
+              background: ok ? tokens.tint.success : tokens.tint.error,
+              color: ok ? tokens.color.success : tokens.color.error,
+            }}
+          >
+            {ok ? '成功' : '失败'}
+          </Tag>
           {/* §15.13：成功 + `message` 非空 = 新 key 已入池，但旧 key 未按掩码认领、未自动禁用。 */}
           {ok && row.message !== null ? (
             <Tooltip title={row.message}>
@@ -120,11 +118,7 @@ export function SupplierBatchDrawer({
       ),
     },
     {
-      title: (
-        <Tooltip title="掩码。这一行没能从上游响应里解析出账号时为 null —— 那种行显示为「未解析出账号」，不补一个空字符串（空字符串看起来像「没有账号」，而事实是「没认出来」）。">
-          <span>账号</span>
-        </Tooltip>
-      ),
+      title: '账号',
       dataIndex: 'identifier',
       width: 150,
       render: (value: string | null) =>
@@ -150,11 +144,7 @@ export function SupplierBatchDrawer({
         ),
     },
     {
-      title: (
-        <Tooltip title="供应商错误码原样或本系统错误码，不做翻译，便于检索排查。">
-          <span>码</span>
-        </Tooltip>
-      ),
+      title: '码',
       dataIndex: 'code',
       width: 210,
       render: (value: string | null) =>
@@ -179,11 +169,7 @@ export function SupplierBatchDrawer({
         ),
     },
     {
-      title: (
-        <Tooltip title="上游明文全程不经浏览器：服务端取回后当场加密落库，出口只有这条掩码。">
-          <span>key（掩码）</span>
-        </Tooltip>
-      ),
+      title: 'key（掩码）',
       dataIndex: 'keyMasked',
       width: 140,
       render: (value: string | null, row) =>
@@ -194,18 +180,14 @@ export function SupplierBatchDrawer({
         ) : (
           <Text
             style={{ fontFamily: tokens.font.mono, fontSize: 11 }}
-            copyable={row.keyId ? { text: row.keyId, tooltips: ['复制内部 key id（不是明文 key）', '已复制 id'] } : false}
+            copyable={row.keyId ? { text: row.keyId, tooltips: ['复制 key id', '已复制'] } : false}
           >
             {value}
           </Text>
         ),
     },
     {
-      title: (
-        <Tooltip title="上游侧的单号（tokenNo）。与掩码一起用于对账。">
-          <span>单号</span>
-        </Tooltip>
-      ),
+      title: '单号',
       dataIndex: 'tokenNo',
       width: 90,
       align: 'right',
@@ -240,13 +222,13 @@ export function SupplierBatchDrawer({
       }
     >
       {taskError ? (
-        <ErrorState error={taskError} onRetry={onRetryTask} title="任务状态查询失败（结果未知，不代表没跑完）" />
+        <ErrorState error={taskError} onRetry={onRetryTask} title="任务状态查询失败" />
       ) : null}
 
       {!task && !taskError ? (
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
-          description={<Text type="secondary">已提交，正在取任务状态…</Text>}
+          description={<Text type="secondary">正在取任务状态…</Text>}
         />
       ) : null}
 
@@ -279,14 +261,12 @@ export function SupplierBatchDrawer({
               trailColor={tokens.color.border}
             />
           ) : (
-            <Tooltip title="服务端还没枚举出总条数，这里只表示「还在跑」，不编造百分比。">
-              <Space size={tokens.space.sm} align="center">
-                <Spin size="small" indicator={<SyncOutlined spin style={{ color: tokens.color.primary }} />} />
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  总数尚未枚举完，不显示百分比
-                </Text>
-              </Space>
-            </Tooltip>
+            <Space size={tokens.space.sm} align="center">
+              <Spin size="small" indicator={<SyncOutlined spin style={{ color: tokens.color.primary }} />} />
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                总数尚未枚举完
+              </Text>
+            </Space>
           )}
         </div>
       ) : null}
@@ -295,12 +275,7 @@ export function SupplierBatchDrawer({
         <Alert
           type="warning"
           showIcon
-          message="任务已到终态，但结果不是本页认识的批量形状"
-          description={
-            <Text style={{ fontSize: 12 }}>
-              这个任务可能来自别的入口（如全量模型同步），请到对应的页面看它的结论。
-            </Text>
-          }
+          message="结果不是本页认识的批量形状"
         />
       ) : null}
 
@@ -351,12 +326,6 @@ export function SupplierBatchDrawer({
               showIcon
               style={{ background: tokens.tint.neutral, border: 'none' }}
               message="这一批只给掩码，没有明文可复制"
-              description={
-                <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-                  上游 key 由服务端取回后当场加密入池，明文不进浏览器，此后管理面也取不回。
-                  要拿明文只能去上游站点的 key 列表；网关侧发流量不需要它 —— 用的是已经加进账号池的这一把。
-                </Text>
-              }
             />
           ) : null}
 
@@ -372,7 +341,7 @@ export function SupplierBatchDrawer({
               )} 行`}
               description={
                 <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-                  逐行明细没有分页，没有「下一页」可点。要看全：按 `ids` 分批重发，或用上方的「导出对账 CSV」把台账带出去。上面的计数是<Text strong style={{ fontSize: 12 }}>全量</Text>的，不受截断影响。
+                  上面的计数是全量的，不受截断影响。
                 </Text>
               }
             />
@@ -409,9 +378,7 @@ export function SupplierBatchDrawer({
                   image={Empty.PRESENTED_IMAGE_SIMPLE}
                   description={
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      {onlyProblem && items.length > 0
-                        ? '这批没有失败的行。'
-                        : '这批没有逐行明细（可能全部被跳过）。'}
+                      {onlyProblem && items.length > 0 ? '没有失败的行' : '没有逐行明细'}
                     </Text>
                   }
                 />

@@ -12,7 +12,7 @@
  * - **在途禁用**：一轮打完后才允许换，避免回答与选择框对不上。
  */
 import { ReloadOutlined } from '@ant-design/icons';
-import { Select, Tag, Tooltip, Typography } from 'antd';
+import { Select, Tag, Typography } from 'antd';
 import { useMemo } from 'react';
 
 import { modelsApi, upstreamsApi } from '@/api/endpoints';
@@ -72,23 +72,21 @@ export function AssistantModelSelect({ value, onChange, disabled = false }: Assi
 
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: tokens.space.sm }}>
-      <Tooltip title="选中的模型只对本轮生效；不选则使用服务端配置的缺省模型">
-        <Select
-          size="small"
-          showSearch
-          allowClear
-          optionFilterProp="label"
-          style={{ width: 240 }}
-          placeholder={loading ? '正在读取可选模型…' : '缺省模型（服务端配置）'}
-          value={value ?? undefined}
-          disabled={disabled || loading}
-          options={options}
-          onChange={(next) => onChange(next ?? null)}
-          notFoundContent={
-            loading ? '加载中…' : failed ? '可选模型加载失败' : '无可选模型（模型档案里没有已启用的模型）'
-          }
-        />
-      </Tooltip>
+      <Select
+        size="small"
+        showSearch
+        allowClear
+        optionFilterProp="label"
+        style={{ width: 240 }}
+        placeholder={loading ? '正在读取可选模型…' : '缺省模型'}
+        value={value ?? undefined}
+        disabled={disabled || loading}
+        options={options}
+        onChange={(next) => onChange(next ?? null)}
+        notFoundContent={
+          loading ? '加载中…' : failed ? '可选模型加载失败' : '无可选模型'
+        }
+      />
 
       {stale ? (
         <Tag
@@ -105,15 +103,13 @@ export function AssistantModelSelect({ value, onChange, disabled = false }: Assi
       ) : null}
 
       {failed && !loading ? (
-        <Tooltip title="重新拉取可选模型">
-          <Text
-            style={{ fontSize: 11, color: tokens.color.textTertiary, cursor: 'pointer' }}
-            onClick={reload}
-          >
-            <ReloadOutlined style={{ marginInlineEnd: 4 }} />
-            重试
-          </Text>
-        </Tooltip>
+        <Text
+          style={{ fontSize: 11, color: tokens.color.textTertiary, cursor: 'pointer' }}
+          onClick={reload}
+        >
+          <ReloadOutlined style={{ marginInlineEnd: 4 }} />
+          重试
+        </Text>
       ) : null}
     </div>
   );

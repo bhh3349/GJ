@@ -109,7 +109,7 @@ export default function LoginPage() {
             message={failure.message}
             description={
               failure.code === 'TOO_MANY_ATTEMPTS'
-                ? '登录失败次数过多，请等待倒计时结束后重试。'
+                ? '请等待倒计时结束。'
                 : undefined
             }
           />
@@ -143,7 +143,7 @@ export default function LoginPage() {
               loading={submitting}
               disabled={countdown > 0}
             >
-              {countdown > 0 ? `登录过于频繁，${countdown}s 后可重试` : '登录'}
+              {countdown > 0 ? `${countdown}s 后重试` : '登录'}
             </Button>
           </Form.Item>
         </Form>

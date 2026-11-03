@@ -76,11 +76,9 @@ function asProbeCounters(value: unknown): ModelSyncProbeCounters | null {
 function PriceLine({ model }: { model: ModelProfile }) {
   if (model.price === null) {
     return (
-      <Tooltip title="上游未提供价格。未知 ≠ 0，成本统计不会把它当免费累加。">
-        <Text type="secondary" italic style={{ fontSize: 12 }}>
-          价格未知
-        </Text>
-      </Tooltip>
+      <Text type="secondary" italic style={{ fontSize: 12 }}>
+        价格未知
+      </Text>
     );
   }
   return (
@@ -128,9 +126,8 @@ export default function ModelsPage() {
     const probe = asProbeCounters(finished.result);
     if (probe !== null && probe.failed > 0) {
       message.warning(
-        `能力自动补探：探测 ${probe.probed} 个、失败 ${probe.failed} 个` +
-          (probe.skipped > 0 ? `、跳过 ${probe.skipped} 个` : '') +
-          '，失败不改同步任务成败。',
+        `能力补探：探测 ${probe.probed} 个、失败 ${probe.failed} 个` +
+          (probe.skipped > 0 ? `、跳过 ${probe.skipped} 个` : ''),
       );
     }
     list.reload();
@@ -200,17 +197,15 @@ export default function ModelsPage() {
             </Button>
           </div>
           {task.task.progress === null ? (
-            <Tooltip title="后端尚未枚举出总条数，这里只表示「还在跑」，不编造百分比。">
-              <Space size={6} style={{ marginTop: tokens.space.sm }}>
-                <Spin
-                  size="small"
-                  indicator={<SyncOutlined spin style={{ color: tokens.color.primary }} />}
-                />
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  同步中（总条数未知，不显示百分比）
-                </Text>
-              </Space>
-            </Tooltip>
+            <Space size={6} style={{ marginTop: tokens.space.sm }}>
+              <Spin
+                size="small"
+                indicator={<SyncOutlined spin style={{ color: tokens.color.primary }} />}
+              />
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                同步中
+              </Text>
+            </Space>
           ) : (
             <Progress
               percent={progressPercent ?? 0}
@@ -328,7 +323,7 @@ export default function ModelsPage() {
 
       {list.error && list.data ? (
         <div style={{ marginBottom: tokens.space.md }}>
-          <ErrorState error={list.error} onRetry={list.reload} title="刷新失败，以下为上一次成功的数据" />
+          <ErrorState error={list.error} onRetry={list.reload} title="刷新失败，下方为旧数据" />
         </div>
       ) : null}
 
@@ -364,6 +359,18 @@ export default function ModelsPage() {
         >
           {models.map((model) => {
             const available = model.availableKeyIds.length;
+            const keyTag = (
+              <Tag
+                bordered={false}
+                style={{
+                  marginInlineEnd: 0,
+                  background: available === 0 ? tokens.tint.error : tokens.tint.success,
+                  color: available === 0 ? tokens.color.error : tokens.color.success,
+                }}
+              >
+                可用 key {available}
+              </Tag>
+            );
             return (
               <Card
                 key={model.id}
@@ -442,24 +449,11 @@ export default function ModelsPage() {
                     <Text type="secondary" style={{ fontSize: 12 }}>
                       {model.contextLength === null ? '上下文未知' : `${formatCompact(model.contextLength)} ctx`}
                     </Text>
-                    <Tooltip
-                      title={
-                        available === 0
-                          ? '当前没有可服务的 key（全部冷却、禁用或余额不足）——该模型不会出现在 /v1/models'
-                          : '启用、非冷却、余额大于 0 的 key 数量'
-                      }
-                    >
-                      <Tag
-                        bordered={false}
-                        style={{
-                          marginInlineEnd: 0,
-                          background: available === 0 ? tokens.tint.error : tokens.tint.success,
-                          color: available === 0 ? tokens.color.error : tokens.color.success,
-                        }}
-                      >
-                        可用 key {available}
-                      </Tag>
-                    </Tooltip>
+                    {available === 0 ? (
+                      <Tooltip title="无可用 key，该模型不可调用">{keyTag}</Tooltip>
+                    ) : (
+                      keyTag
+                    )}
                   </div>
                   <Text type="secondary" style={{ fontSize: 11 }}>
                     {upstreamName.get(model.upstreamId) ?? model.upstreamId} · 同步于{' '}

@@ -35,7 +35,7 @@ import { tokens } from '@/theme/tokens';
 import { formatIso } from '@/utils/format';
 import { gatewayUrlsOf } from '@/utils/gatewayUrl';
 
-const { Text, Link } = Typography;
+const { Text } = Typography;
 
 export default function ConsoleAccessPage() {
   const access = useResource<AccessInfo>((signal) => accessInfoApi.get({ signal }), []);
@@ -99,8 +99,8 @@ export default function ConsoleAccessPage() {
       <div style={{ display: 'grid', gap: tokens.space.lg }}>
         <Panel
           title="API 地址"
-          description="把 OpenAI 兼容客户端（ChatGPT-Next-Web、LobeChat、Cursor 等）的 Base URL 填成这个地址。"
-          hint="地址由服务端自报的端口 + 公网 host 拼成；host 取 PUBLIC_HOST 配置，没配则用你当前打开本页的地址。结尾的 /v1 是网关路径的一部分，整串照抄，不要截短。"
+          description="填进客户端的 Base URL。"
+          hint="结尾的 /v1 不能省。"
         >
           {gatewayUrl === null ? (
             <EmptyState title="无法确定对外地址" minHeight={80} />
@@ -119,11 +119,8 @@ export default function ConsoleAccessPage() {
                 </Button>
               </Space>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                密钥（API Key）用下面列表里的任意一把 —— 以 <Text code>gw-</Text> 开头的完整串
-                （这是本站自己签发的网关 key，刻意与上游的 <Text code>sk-</Text> 区分开）。
-                要新的一把，去{' '}
-                <RouterLink to="/console/keys">我的 key</RouterLink>{' '}
-                自己签发 —— 完整 key 会在签发那一刻显示一次，之后只剩掩码。
+                密钥用下面任一把以 <Text code>gw-</Text> 开头的完整 key。要新的去{' '}
+                <RouterLink to="/console/keys">我的 key</RouterLink> 签发。
               </Text>
             </Space>
           )}
@@ -131,9 +128,8 @@ export default function ConsoleAccessPage() {
 
         <Panel
           title="我的 key"
-          description="以下是你所在组的全部 key。为安全起见只显示掩码。"
+          description="本组的全部 key，只显示掩码。"
           extra={<Tag icon={<KeyOutlined />} color="default">{keys.data?.keys.length ?? 0} 把</Tag>}
-          hint="签发 / 改名 / 吊销在「我的 key」那一页。这里只回答「我要填进客户端的那个地址是什么」。"
         >
           {keys.error !== null && keys.data === null ? (
             <ErrorState error={keys.error} onRetry={keys.reload} title="key 列表读取失败" />
@@ -144,10 +140,10 @@ export default function ConsoleAccessPage() {
               type="info"
               showIcon
               message="你还没有被分配到组"
-              description="组由管理员分配。分配之后，本页会显示该组下的 key，用量页也会显示对应数据。"
+              description="等待管理员分配。"
             />
           ) : keys.data.keys.length === 0 ? (
-            <EmptyState title="你的组还没有 key（管理员创建后会出现在这里）" minHeight={140} />
+            <EmptyState title="你的组还没有 key" minHeight={140} />
           ) : (
             <Table<ConsoleKeys['keys'][number]>
               size="small"
@@ -194,37 +190,13 @@ export default function ConsoleAccessPage() {
             type="warning"
             showIcon
             style={{ marginTop: tokens.space.md }}
-            message="完整 key 只在签发那一刻显示一次"
+            message="完整 key 只显示一次"
             description={
               <Text style={{ fontSize: 12 }}>
-                服务端只保存摘要，这一页永远只有掩码 —— 没有任何端点能取回明文。
-                要新的一把（或旧的那把丢了），去{' '}
-                <RouterLink to="/console/keys">我的 key</RouterLink> 自己签发；
-                同一把不用了就把它吊销。
+                只显示掩码，明文取不回。
               </Text>
             }
           />
-        </Panel>
-
-        <Panel title="怎么用" size="sm">
-          <Space direction="vertical" size={tokens.space.xs}>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              1. 复制上面的 API 地址，填进客户端设置。
-            </Text>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              2. 密钥填完整 key（在「我的 key」里自己签发，只有那一刻能抄），
-              模型名填「模型广场」里列出的任意一个。
-            </Text>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              3. 有疑问先看用量页：请求是否到达、错误出现在哪个模型，那里都记着。
-            </Text>
-            {access.data !== null && access.data.adminWebDistEnabled ? (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                当前页面由 <Link href={window.location.origin} target="_blank" rel="noreferrer">同一服务</Link> 托管，
-                地址栏即是本服务的入口。
-              </Text>
-            ) : null}
-          </Space>
         </Panel>
       </div>
     </>

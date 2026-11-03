@@ -68,15 +68,13 @@ export function SupplierPoolFilters({
           </Text>
         ) : (
           <Text type="secondary" style={{ fontSize: 12 }}>
-            {`${formatCount(total)} 件 · 点一条就把下面的账号表筛成那几条`}
+            {`${formatCount(total)} 件`}
           </Text>
         )}
         {partial ? (
-          <Tooltip title="这一块按取回的账号算。池子比一页上限还大时，计数只覆盖取回的部分，不是全池。">
-            <Text style={{ fontSize: 11, color: tokens.color.warning }}>
-              {`只覆盖取回的 ${formatCount(coveredCount)} / ${formatCount(accountTotal)} 个账号`}
-            </Text>
-          </Tooltip>
+          <Text style={{ fontSize: 11, color: tokens.color.warning }}>
+            {`只覆盖取回的 ${formatCount(coveredCount)} / ${formatCount(accountTotal)} 个账号`}
+          </Text>
         ) : null}
         {active !== null ? (
           <Text
@@ -95,7 +93,7 @@ export function SupplierPoolFilters({
               userSelect: 'none',
             }}
           >
-            清掉筛选
+            清除筛选
           </Text>
         ) : null}
       </div>

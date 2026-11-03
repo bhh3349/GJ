@@ -8,7 +8,7 @@
  * 把后两种读成一种，就等于把「未知」写成「不支持」—— 正是 ADR-0009 一直在防的假数据。
  * `manual` 值另有徽标：探测**永不覆盖**它。
  */
-import { Tag, Tooltip, Typography } from 'antd';
+import { Tag, Typography } from 'antd';
 
 import type { ModelCapability, ModelProfile } from '@/api/types';
 import { tokens } from '@/theme/tokens';
@@ -50,19 +50,17 @@ export function CapabilityRow({ model, fontSize = 12 }: CapabilityRowProps) {
         ))}
         {/* 来源徽标只标「机器问过」；人工值不需要一顶帽子，标出来反而像在质疑管理员。 */}
         {capabilitiesSource === 'probe' ? (
-          <Tooltip title="由上游实测得出。人工修改过之后，探测不会再覆盖它。">
-            <Tag
-              bordered={false}
-              style={{
-                marginInlineEnd: 0,
-                fontSize: fontSize - 2,
-                background: tokens.tint.neutral,
-                color: tokens.color.textTertiary,
-              }}
-            >
-              实测
-            </Tag>
-          </Tooltip>
+          <Tag
+            bordered={false}
+            style={{
+              marginInlineEnd: 0,
+              fontSize: fontSize - 2,
+              background: tokens.tint.neutral,
+              color: tokens.color.textTertiary,
+            }}
+          >
+            实测
+          </Tag>
         ) : null}
       </div>
     );
@@ -70,19 +68,15 @@ export function CapabilityRow({ model, fontSize = 12 }: CapabilityRowProps) {
 
   if (capabilitiesSource === 'probe') {
     return (
-      <Tooltip title="已向上游问过，四项都没通过。这是结论，不是缺失。">
-        <Text type="secondary" italic style={{ fontSize }}>
-          已探测 · 均不支持
-        </Text>
-      </Tooltip>
+      <Text type="secondary" italic style={{ fontSize }}>
+        已探测 · 均不支持
+      </Text>
     );
   }
 
   return (
-    <Tooltip title="还没有问过上游，也没有人工填写。「未知」不等于「不支持」。">
-      <Text type="secondary" italic style={{ fontSize }}>
-        能力未知
-      </Text>
-    </Tooltip>
+    <Text type="secondary" italic style={{ fontSize }}>
+      能力未知
+    </Text>
   );
 }

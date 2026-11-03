@@ -185,7 +185,7 @@ function keyColumns({ onToggle, isPending }: KeyColumnProps): ColumnsType<Upstre
       dataIndex: 'enabled',
       width: 84,
       render: (_: unknown, row) => (
-        <Tooltip title={row.deletedAt ? '该 key 已删除，不再参与路由' : '管理端只写启用状态；健康态由网关决定'}>
+        <Tooltip title={row.deletedAt ? '已删除的 key 不能再启用' : undefined}>
           <Switch
             size="small"
             checked={row.enabled}
@@ -452,9 +452,6 @@ export default function SupplierDetailPage() {
           <Field label="无限额度的 key">{formatCount(row.unlimitedKeyCount)}</Field>
           <Field label="不计金额的套餐类 key">{formatCount(row.tokenPlanKeyCount)}</Field>
         </Space>
-        <div style={{ marginTop: tokens.space.sm, fontSize: 11, color: tokens.color.textTertiary }}>
-          账号级与 key 级是合计的拆解，两者不相加；未知余额与无限额度的 key 都不计入合计。
-        </div>
       </Card>
 
       <Card
@@ -462,13 +459,7 @@ export default function SupplierDetailPage() {
         title="余额查询与自动同步"
         extra={
           <Space size={tokens.space.sm}>
-            <Tooltip
-              title={
-                balanceReadiness(row).queryable
-                  ? '按当前生效的查询方式逐把查该上游全部 key 的余额'
-                  : balanceReadiness(row).reason
-              }
-            >
+            <Tooltip title={balanceReadiness(row).queryable ? undefined : balanceReadiness(row).reason}>
               <Button
                 size="small"
                 loading={isPending('refresh') || task.running}
@@ -501,17 +492,13 @@ export default function SupplierDetailPage() {
                 </Tag>
               </Tooltip>
             ) : row.balancePreset ? (
-              <Tooltip title="内置余额查询来源（只读、可推导）。不配模板也能自动查询余额。">
-                <Tag bordered={false} style={{ background: tokens.tint.success, color: tokens.color.success }}>
-                  {`内置 · ${row.balancePreset.label}`}
-                </Tag>
-              </Tooltip>
+              <Tag bordered={false} style={{ background: tokens.tint.success, color: tokens.color.success }}>
+                {`内置 · ${row.balancePreset.label}`}
+              </Tag>
             ) : (
-              <Tooltip title="未配置模板查询，也未识别到内置来源：该上游的余额只能手动录入。">
-                <Tag bordered={false} style={{ background: tokens.tint.neutral, color: tokens.color.textSecondary }}>
-                  仅手动
-                </Tag>
-              </Tooltip>
+              <Tag bordered={false} style={{ background: tokens.tint.neutral, color: tokens.color.textSecondary }}>
+                仅手动
+              </Tag>
             )}
           </Field>
           <Field label="自动同步">
@@ -521,18 +508,14 @@ export default function SupplierDetailPage() {
                   {`每 ${auto.intervalMinutes} 分钟 ±${formatPercent(auto.jitterRatio, 0)}（退避上限 ${auto.backoffCapMinutes} 分钟）`}
                 </Text>
               ) : (
-                <Tooltip title="自动同步整体已关闭。手动「查余额」不受影响。">
-                  <Tag bordered={false} style={{ background: tokens.tint.neutral, color: tokens.color.textSecondary }}>
-                    已关闭
-                  </Tag>
-                </Tooltip>
+                <Tag bordered={false} style={{ background: tokens.tint.neutral, color: tokens.color.textSecondary }}>
+                  已关闭
+                </Tag>
               )
             ) : supplySync.error ? (
-              <Tooltip title="自动同步状态加载失败，这一格暂时未知（不代表该上游已关闭自动同步）。">
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  未知
-                </Text>
-              </Tooltip>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                未知
+              </Text>
             ) : (
               <Text type="secondary" style={{ fontSize: 12 }}>
                 …
@@ -558,17 +541,9 @@ export default function SupplierDetailPage() {
             ) : syncState?.inFlight ? (
               <Text style={{ fontSize: 12, color: tokens.color.info }}>同步中</Text>
             ) : syncState && syncState.consecutiveFailures > 0 ? (
-              <Tooltip
-                title={
-                  syncState.nextAttemptAt
-                    ? `连续失败进入指数退避，下次自动尝试 ${formatIso(syncState.nextAttemptAt)}。手动查询仍可立即发起。`
-                    : '连续失败中；任一次拿到值即归零。'
-                }
-              >
-                <Text style={{ color: tokens.color.warning, fontSize: 12 }}>
-                  {`连续失败 ${formatCount(syncState.consecutiveFailures)} 次`}
-                </Text>
-              </Tooltip>
+              <Text style={{ color: tokens.color.warning, fontSize: 12 }}>
+                {`连续失败 ${formatCount(syncState.consecutiveFailures)} 次`}
+              </Text>
             ) : (
               <Text type="secondary" style={{ fontSize: 12 }}>
                 正常
@@ -576,9 +551,6 @@ export default function SupplierDetailPage() {
             )}
           </Field>
         </Space>
-        <div style={{ marginTop: tokens.space.sm, fontSize: 11, color: tokens.color.textTertiary }}>
-          自动同步的开关与间隔由服务端配置决定，管理面没有写入口；手动「查余额」随时可用。
-        </div>
       </Card>
 
       <Space wrap>
@@ -594,7 +566,7 @@ export default function SupplierDetailPage() {
           </Button>
         ) : null}
         <Button size="small" danger onClick={() => remove(row)}>
-          删除这个上游
+          删除上游
         </Button>
       </Space>
     </div>
@@ -603,7 +575,7 @@ export default function SupplierDetailPage() {
   const keysPane = (
     <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.md }}>
       {keys.error && keys.data ? (
-        <ErrorState error={keys.error} onRetry={keys.reload} title="刷新失败，以下为上一次成功的数据" />
+        <ErrorState error={keys.error} onRetry={keys.reload} title="刷新失败，下方为旧数据" />
       ) : null}
       {keys.loading ? (
         <LoadingState tip="正在加载 key 列表…" minHeight={240} />
@@ -619,7 +591,7 @@ export default function SupplierDetailPage() {
           pagination={false}
           scroll={{ x: 960 }}
           locale={{
-            emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="这个上游还没有 key。" />,
+            emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有 key" />,
           }}
         />
       )}
@@ -631,7 +603,7 @@ export default function SupplierDetailPage() {
           navigate('/keys');
         }}
       >
-        去 Key 管理做新增、删除与批量操作
+        Key 管理
       </Button>
     </div>
   );
@@ -665,7 +637,7 @@ export default function SupplierDetailPage() {
               navigate('/upstreams');
             }}
           >
-            全部供应商
+            回列表
           </Button>
         }
       />
@@ -692,11 +664,6 @@ export default function SupplierDetailPage() {
           showIcon
           style={{ marginBottom: tokens.space.md, background: tokens.tint.neutral, border: 'none' }}
           message="这个上游是通用型，没有账号池"
-          description={
-            <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-              要开通账号池，请编辑该上游、把「供应商」选成对应值。
-            </Text>
-          }
         />
       ) : null}
 

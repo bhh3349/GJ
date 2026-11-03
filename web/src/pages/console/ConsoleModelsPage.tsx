@@ -88,9 +88,9 @@ const CAPABILITY_TEXT: Record<string, string> = {
  * 半真半假的清单 —— 而用户没法从清单上分辨哪条是真的。真要列，得等它们真的实现。
  */
 const ENDPOINTS: readonly { method: 'GET' | 'POST'; path: string; summary: string }[] = [
-  { method: 'GET', path: '/v1/models', summary: '列出你能用的模型（本页数据就是这个接口的返回）' },
-  { method: 'POST', path: '/v1/chat/completions', summary: '对话补全，`messages` 必填；支持 `stream: true` 流式' },
-  { method: 'POST', path: '/v1/embeddings', summary: '向量化，`input` 必填' },
+  { method: 'GET', path: '/v1/models', summary: '列出可用模型' },
+  { method: 'POST', path: '/v1/chat/completions', summary: '对话补全，messages 必填' },
+  { method: 'POST', path: '/v1/embeddings', summary: '向量化，input 必填' },
 ];
 
 /** 一行「标签 + 等宽值 + 复制」。地址与模型名都用它，两处的读法因此一致。 */
@@ -214,30 +214,24 @@ export default function ConsoleModelsPage() {
       <div style={{ display: 'grid', gap: tokens.space.lg, marginBottom: tokens.space.lg }}>
         <Panel
           title="接入地址"
-          description="把这一串填进 OpenAI 兼容客户端（ChatGPT-Next-Web、LobeChat、Cursor 等）的 Base URL。"
-          hint="地址由服务端自报的端口 + 公网 host 拼成（与「接入与 key」那一页同一个公式）。结尾的 /v1 是网关路径的一部分，整串照抄，不要截短。"
+          description="填进客户端的 Base URL。"
+          hint="少了结尾的 /v1 会 404。"
         >
           {baseUrl === null ? (
             <EmptyState title="无法确定对外地址" minHeight={80} />
           ) : (
-            <CopyRow
-              label="Base URL"
-              value={baseUrl}
-              hint="客户端设置里的「接口地址 / API Base」。少了结尾的 /v1 会直接 404。"
-            />
+            <CopyRow label="Base URL" value={baseUrl} />
           )}
           <Paragraph type="secondary" style={{ fontSize: 12, marginTop: tokens.space.sm, marginBottom: 0 }}>
-            密钥（API Key）填 <Text code>gw-</Text> 开头的完整串 —— 那是本站自己签发的网关 key
-            （刻意与上游的 <Text code>sk-</Text> 区分开）。手上有哪几把、要不要新签一把，
-            去「我的 key」那一页。
+            密钥填 <Text code>gw-</Text> 开头的完整 key。
           </Paragraph>
         </Panel>
 
         <Panel
           title="接口说明"
-          description="网关目前实现了下面这三个接口，除此之外的路径一律 404（或 501「未实现」）。"
+          description="只有这三个接口，其余路径 404。"
           extra={<Tag color="default">{ENDPOINTS.length} 个</Tag>}
-          hint="请求头只有一种形式：Authorization: Bearer <你的网关 key>。没有 x-api-key、没有 ?api_key= 这类兼容写法 —— 那些一律当成没带凭据。"
+          hint="只认 Authorization: Bearer，其它写法当没带凭据。"
         >
           <Space direction="vertical" size={tokens.space.sm} style={{ width: '100%' }}>
             {ENDPOINTS.map((item) => (
@@ -266,32 +260,26 @@ export default function ConsoleModelsPage() {
               </div>
             ))}
           </Space>
-          <Paragraph type="secondary" style={{ fontSize: 12, marginTop: tokens.space.md, marginBottom: 0 }}>
-            鉴权只有一种：请求头 <Text code>Authorization: Bearer &lt;你的网关 key&gt;</Text>。
-            兼容 <Text code>/v1/chat/completions</Text> 的客户端除了模型名以外不用改任何设置 ——
-            模型名从下面那张表里抄。
-          </Paragraph>
         </Panel>
       </div>
 
       <Panel
         title="可用模型"
-        description="调用时 model 字段填这里的名称。列表与网关实际准入的集合一致。"
+        description="model 填这里的名称。"
         extra={
           <Tag color={filtering ? 'orange' : 'default'}>
             {filtering ? `已筛选 ${visible.length} / 共 ${all.length}` : `${all.length} 个可用`}
           </Tag>
         }
-        hint="授权与启用都由管理员设置；这里列出的每一个都能直接调用，没有「列出来但其实不能用」的模型。搜索与类型只收窄这一屏的显示，不改变服务端给你的集合。"
       >
         {models.error !== null && models.data !== null ? (
           <div style={{ marginBottom: tokens.space.md }}>
-            <ErrorState error={models.error} onRetry={models.reload} title="刷新失败，以下为上一次成功的数据" />
+            <ErrorState error={models.error} onRetry={models.reload} title="刷新失败，下方为旧数据" />
           </div>
         ) : null}
 
         {all.length === 0 ? (
-          <EmptyState title="当前没有可用的模型（请联系管理员）" minHeight={200} />
+          <EmptyState title="当前没有可用模型" minHeight={200} />
         ) : (
           <>
             <div
@@ -308,7 +296,7 @@ export default function ConsoleModelsPage() {
                 allowClear
                 style={{ width: 260 }}
                 prefix={<SearchOutlined style={{ color: tokens.color.textTertiary }} />}
-                placeholder="搜模型名（如 gpt-4o）"
+                placeholder="搜模型名"
                 value={keyword}
                 onChange={(event) => setKeyword(event.target.value)}
               />
@@ -332,7 +320,7 @@ export default function ConsoleModelsPage() {
                       setTypeFilter('all');
                     }}
                   >
-                    清除筛选（共 {all.length} 个）
+                    清除筛选
                   </Button>
                 }
               />

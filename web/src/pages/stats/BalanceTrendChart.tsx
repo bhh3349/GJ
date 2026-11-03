@@ -98,7 +98,7 @@ function buildOption(series: readonly BalanceSyncSeries[], built: Built): EChart
         const index = typeof rawIndex === 'number' ? rawIndex : -1;
         const stamp = index >= 0 ? axis[index] : undefined;
         const head =
-          stamp === undefined ? '—' : `${dayjs(stamp).format('YYYY-MM-DD HH:mm')}（快照时刻 · 本地）`;
+          stamp === undefined ? '—' : `${dayjs(stamp).format('YYYY-MM-DD HH:mm')}（本地）`;
 
         const body = rows
           .map((row) => {

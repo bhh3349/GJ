@@ -105,7 +105,7 @@ export function UserFormModal({ open, groups, onClose, onSaved, onCreated }: Use
     >
       <Form<UserFormValues> form={form} layout="vertical" requiredMark="optional">
         <Form.Item name="username" label="账号" rules={[{ required: true, message: '请输入账号' }]}>
-          <Input placeholder="用于登录的用户名" maxLength={USERNAME_MAX} showCount />
+          <Input placeholder="用户名" maxLength={USERNAME_MAX} showCount />
         </Form.Item>
 
         <Form.Item
@@ -113,24 +113,24 @@ export function UserFormModal({ open, groups, onClose, onSaved, onCreated }: Use
           label="登录口令"
           extra={
             <Text type="secondary" style={{ fontSize: 12 }}>
-              至少 {PASSWORD_MIN} 位。创建后只显示一次，请当场保存。
+              创建后只显示一次。
             </Text>
           }
           rules={[{ required: true, message: '请设置登录口令' }]}
         >
-          <Input.Password placeholder="至少 8 位" maxLength={PASSWORD_MAX} autoComplete="new-password" />
+          <Input.Password placeholder={`至少 ${PASSWORD_MIN} 位`} maxLength={PASSWORD_MAX} autoComplete="new-password" />
         </Form.Item>
 
         <Form.Item name="displayName" label="显示名">
-          <Input placeholder="选填，便于你和用户本人辨认" maxLength={64} />
+          <Input placeholder="选填" maxLength={64} />
         </Form.Item>
 
         <Form.Item name="role" label="角色" rules={[{ required: true }]}>
           <Select
             onChange={(value: UserRole) => setRole(value)}
             options={[
-              { value: 'user', label: '普通用户 —— 只能看消费面（接入地址、本组 key 掩码、本组用量、模型列表）' },
-              { value: 'admin', label: '管理员 —— 管理面全部权限' },
+              { value: 'user', label: '普通用户' },
+              { value: 'admin', label: '管理员' },
             ]}
           />
         </Form.Item>
@@ -141,25 +141,22 @@ export function UserFormModal({ open, groups, onClose, onSaved, onCreated }: Use
             showIcon
             style={{ marginBottom: tokens.space.md, background: tokens.tint.warning, border: 'none' }}
             message="管理员账号等同于把整个网关交出去"
-            description="他能改上游凭据、签发 key、删除用户，也能删掉包括你在内的所有账号。给共同使用者请用普通用户。"
+            description="他能删掉包括你在内的所有账号。"
           />
         ) : null}
 
         <Form.Item name="groupId" label="归属组">
           <Select
             allowClear
-            placeholder="未分配（该用户进消费面会看到提示）"
+            placeholder="未分配"
             options={groups.map((g) => ({ value: g.id, label: g.name }))}
-            notFoundContent={groups.length === 0 ? '还没有用户组，先去「用户组」建一个' : undefined}
+            notFoundContent={groups.length === 0 ? '还没有用户组。' : undefined}
           />
         </Form.Item>
 
         <Space size={tokens.space.xs} direction="vertical" style={{ width: '100%' }}>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            同组的多个用户共享同一批 key、同一个配额池与同一份用量统计。
-          </Text>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            角色建好后不能改 —— 要换角色只能删掉重建。
+            角色建好后不能改，只能删了重建。
           </Text>
         </Space>
       </Form>

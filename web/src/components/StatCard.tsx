@@ -66,7 +66,7 @@ export function StatCard({
       >
         <span style={{ fontSize: 12, color: tokens.color.textSecondary }}>{label}</span>
         {stale && !loading ? (
-          <Tooltip title="实时通道已断开，此数值为断开前的最后一帧，不是当前值。">
+          <Tooltip title="实时通道已断开，数值停在断开前。">
             <span style={{ fontSize: 11, color: tokens.color.warning }}>非实时</span>
           </Tooltip>
         ) : null}

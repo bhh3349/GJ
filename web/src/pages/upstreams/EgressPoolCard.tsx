@@ -18,7 +18,7 @@
  * 断线期间不把旧帧当实时值：非 ready 时表头显式标注"快照可能已过期"。
  * 依旧**不从 REST 取出口状态**（`egress_id` 不进任何 DTO，§15.12 锚 3）。
  */
-import { Alert, Empty, Space, Table, Tag, Tooltip, Typography } from 'antd';
+import { Alert, Empty, Space, Table, Tag, Typography } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
 import dayjs from 'dayjs';
 import type { ReactNode } from 'react';
@@ -60,11 +60,7 @@ export function EgressPoolCard() {
       title: '出口',
       dataIndex: 'name',
       width: 160,
-      render: (value: string, node) => (
-        <Tooltip title={`egressId: ${node.egressId}（不透明键，前端不解析）`}>
-          <Text style={{ fontSize: 12, fontWeight: 600 }}>{value}</Text>
-        </Tooltip>
-      ),
+      render: (value: string) => <Text style={{ fontSize: 12, fontWeight: 600 }}>{value}</Text>,
     },
     {
       title: '探活态',
@@ -141,9 +137,7 @@ export function EgressPoolCard() {
       dataIndex: 'lastHeartbeatAt',
       width: 100,
       render: (value: string | null) => (
-        <Tooltip title={value ?? '冷启动，尚无真证据'}>
-          <Text style={{ fontFamily: tokens.font.mono, fontSize: 12 }}>{formatTime(value)}</Text>
-        </Tooltip>
+        <Text style={{ fontFamily: tokens.font.mono, fontSize: 12 }}>{formatTime(value)}</Text>
       ),
     },
   ];
@@ -190,7 +184,7 @@ export function EgressPoolCard() {
           style={{ background: tokens.tint.neutral, border: 'none' }}
           message={
             <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-              尚未收到实时帧。收不到帧只说明通道未接线，出口数量未知。
+              尚未收到实时帧，出口数量未知。
             </Text>
           }
         />
@@ -239,7 +233,7 @@ export function EgressPoolCard() {
               color: tokens.color.warning,
             }}
           >
-            连接 {live.status} · 快照可能已过期
+            快照可能已过期
           </Tag>
         ) : null}
       </Space>
@@ -251,8 +245,7 @@ export function EgressPoolCard() {
           style={{ marginBottom: tokens.space.md, background: tokens.tint.error, border: 'none' }}
           message={
             <Text style={{ fontSize: 12, color: tokens.color.error }}>
-              有出口的实测 IP 与登记期望值不符 —— 可能「填了代理但流量仍走宿主 IP」。
-              这是该静默故障唯一的告警点，不可忽略。
+              实测 IP 与期望不符：流量可能仍走宿主 IP。
             </Text>
           }
         />

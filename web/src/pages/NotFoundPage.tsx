@@ -9,7 +9,7 @@ export function NotFoundPage() {
       subTitle="页面不存在"
       extra={
         <Link to="/dashboard">
-          <Button type="primary">回到仪表盘</Button>
+          <Button type="primary">回仪表盘</Button>
         </Link>
       }
     />

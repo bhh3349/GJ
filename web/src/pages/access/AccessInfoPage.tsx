@@ -110,10 +110,10 @@ export function AccessInfoPage() {
     if (value === '') return;
     try {
       await navigator.clipboard.writeText(value);
-      message.success('已复制，交给部署的人填进配置文件');
+      message.success('已复制');
     } catch {
       setCopyFallbackOpen(true);
-      message.error('浏览器不允许写入剪贴板，请手动记录');
+      message.error('请手动记录');
     }
   };
 
@@ -172,7 +172,7 @@ export function AccessInfoPage() {
         <div style={{ marginBottom: tokens.space.md }}>
           <Panel title="对外地址未配置">
             <EmptyState
-              title="现在用的是当前浏览器所在机器的名字，换机器就变了"
+              title="未配置，用的是当前浏览器主机名。"
               action={
                 <Button
                   size="small"
@@ -180,12 +180,12 @@ export function AccessInfoPage() {
                     navigator.clipboard
                       .writeText('PUBLIC_HOST')
                       .then(
-                        () => message.success('已复制，交给部署的人填进配置文件'),
-                        () => message.error('浏览器不允许复制，记下这个名字：PUBLIC_HOST'),
+                        () => message.success('已复制'),
+                        () => message.error('请手动记录 PUBLIC_HOST'),
                       );
                   }}
                 >
-                  复制配置项名字
+                  复制名字
                 </Button>
               }
               minHeight={120}
@@ -204,24 +204,22 @@ export function AccessInfoPage() {
       >
         <Panel
           title="网关地址"
-          description="外部程序（ChatGPT-Next-Web、LobeChat、Cursor 等）的 Base URL 填这一行 —— 结尾的 /v1 是地址的一部分，不能省。"
+          description="Base URL 填这一行，/v1 不能省。"
         >
           <InfoRow
             label="API 地址"
             value={gatewayUrl ?? '—'}
-            {...(externalHost === null
-              ? {}
-              : { hint: '配置了对外地址就用它，没配置就用你当前浏览器的机器名。结尾的 /v1 是网关路径的一部分，缺了它客户端会收到 404' })}
+            {...(externalHost === null ? {} : { hint: '缺了结尾的 /v1 会 404。' })}
           />
           <InfoRow
             label="服务根"
             value={gatewayUrls?.root ?? '—'}
-            hint="不带 /v1 的那个地址：管理页面与 /api/* 在这里，能打开本页就说明它是通的。客户端的 Base URL 用上面那一行"
+            hint="管理页面与 /api/* 用这个。"
           />
           <InfoRow
             label="绑定地址"
             value={access.gateway.hostGateway}
-            hint="这是服务监听的网卡范围，不是给人访问的地址，别把它填进程序配置"
+            hint="监听范围，不能填进配置。"
           />
           <InfoRow label="端口" value={String(access.gateway.portGateway)} />
         </Panel>
@@ -230,8 +228,8 @@ export function AccessInfoPage() {
           title="管理后台"
           description={
             access.adminWebDistEnabled
-              ? '后台页面与数据由同一个服务提供，你当前打开的就是它'
-              : '后台页面文件不由管理服务托管，当前是开发或另行托管静态文件的部署'
+              ? '后台页面与数据同源。'
+              : '后台页面不由本服务托管。'
           }
         >
           <InfoRow
@@ -242,7 +240,7 @@ export function AccessInfoPage() {
           <InfoRow
             label="绑定地址"
             value={access.admin.hostAdmin}
-            hint="这是服务监听的网卡范围，不是给人访问的地址"
+            hint="监听范围，不是访问地址。"
           />
           <InfoRow label="端口" value={String(access.admin.portAdmin)} />
         </Panel>
@@ -251,7 +249,7 @@ export function AccessInfoPage() {
       <div style={{ marginTop: tokens.space.md }}>
         <Panel
           title="调用密钥从「用户组」签发"
-          description="密钥明文只在签发那一刻显示一次，这里不放任何密钥；建组或重置后当场保存"
+          description="明文只显示一次，这里不放密钥。"
           extra={
             <Button type="primary" onClick={() => navigate('/groups')}>
               去用户组
@@ -260,7 +258,7 @@ export function AccessInfoPage() {
         >
           {copyFallbackOpen ? (
             <Text type="secondary" style={{ fontSize: 12 }}>
-              复制失败时手动记录：对外地址的配置项名字是 PUBLIC_HOST，值就是上面那串。
+              手动记录 PUBLIC_HOST。
             </Text>
           ) : null}
         </Panel>

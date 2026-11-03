@@ -87,8 +87,7 @@ export function ConsoleQuotaPanel() {
   return (
     <Panel
       title="本组额度"
-      description="额度按组共享：同组的每一把 key 都花这一份池子。"
-      hint="数字与管理面「用户组」里同一个组的那几格同源（服务端同一次计算），所以两边必须一字不差。"
+      description="同组共用这一份额度。"
       extra={
         quota.data?.assigned === true ? (
           <Tag
@@ -100,13 +99,12 @@ export function ConsoleQuotaPanel() {
       }
     >
       {quota.error !== null && quota.data === null ? (
-        <ErrorState error={quota.error} onRetry={quota.reload} title="额度读取失败（`GET /api/console/quota`）" />
+        <ErrorState error={quota.error} onRetry={quota.reload} title="额度读取失败" />
       ) : quota.loading ? (
         <LoadingState tip="正在读取额度…" minHeight={120} />
       ) : quota.data === null || quota.data.assigned === false ? (
         <Text type="secondary" style={{ fontSize: 12 }}>
-          你还没有被分配到用户组，所以没有配额可言 —— 分配之后这里会显示该组的
-          RPM / TPM / 日配额与今日已用量。
+          未分配用户组，无配额。
         </Text>
       ) : (
         <div
@@ -126,13 +124,13 @@ export function ConsoleQuotaPanel() {
           {/* RPM / TPM 是**每分钟**的窗口，服务端的限流器实时判它们，不累加到"已用"里 ——
               所以这里只写上限，不画进度条（画了就得现编一个"这一分钟用了多少"的数）。 */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-            <Text style={{ fontSize: 12 }}>RPM（每分钟请求）</Text>
+            <Text style={{ fontSize: 12 }}>RPM</Text>
             <Text strong style={{ fontSize: 18 }}>
               {quota.data.rpm === null ? '不限' : formatCompact(quota.data.rpm)}
             </Text>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-            <Text style={{ fontSize: 12 }}>TPM（每分钟 token）</Text>
+            <Text style={{ fontSize: 12 }}>TPM</Text>
             <Text strong style={{ fontSize: 18 }}>
               {quota.data.tpm === null ? '不限' : formatCompact(quota.data.tpm)}
             </Text>

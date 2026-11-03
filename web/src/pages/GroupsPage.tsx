@@ -40,11 +40,7 @@ const { Text } = Typography;
 /** `null`（不限）与 `0`（全部拒绝）用两种观感，不能都渲染成数字。 */
 function QuotaCell({ value }: { value: QuotaValue }) {
   if (value === null) {
-    return (
-      <Tooltip title="未设置上限（不限）">
-        <Text type="secondary">不限</Text>
-      </Tooltip>
-    );
+    return <Text type="secondary">不限</Text>;
   }
   return <Text style={{ fontVariantNumeric: 'tabular-nums' }}>{formatCount(value)}</Text>;
 }
@@ -108,7 +104,7 @@ export default function GroupsPage() {
       title: `删除用户组「${row.name}」？`,
       content:
         row.keyCount > 0
-          ? `该组下有 ${row.keyCount} 把网关 key，删除后立即失效；历史调用日志保留（30 天）。`
+          ? `组下 ${row.keyCount} 把 key 立即失效，删除后不可恢复。`
           : '删除后不可恢复。',
       okText: '删除',
       okButtonProps: { danger: true },
@@ -178,9 +174,7 @@ export default function GroupsPage() {
       render: (_: unknown, row) => {
         if (row.dailyQuota === null) {
           return (
-            <Tooltip title="未设置日配额（null = 不限）">
-              <Text type="secondary">不限 · 今日已用 {formatCount(row.dailyQuotaUsed)}</Text>
-            </Tooltip>
+            <Text type="secondary">不限 · 今日已用 {formatCount(row.dailyQuotaUsed)}</Text>
           );
         }
         // 后端给的是真实累计值；这里只做呈现，不自己推算，也不做乐观预估。
@@ -216,11 +210,9 @@ export default function GroupsPage() {
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
             {names === null ? (
-              <Tooltip title="未设置授权（null = 不限）：本组可用全部已启用模型">
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  不限
-                </Text>
-              </Tooltip>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                不限
+              </Text>
             ) : (
               <Tooltip title={names.join('、')}>
                 <Text style={{ fontSize: 12 }}>{formatCount(names.length)} 个模型</Text>
@@ -308,7 +300,7 @@ export default function GroupsPage() {
               void issueKey(row);
             }}
           >
-            签发新 key
+            签发 key
           </Button>
           <Button size="small" type="link" danger style={{ padding: 0 }} onClick={() => remove(row)}>
             删除
@@ -324,7 +316,7 @@ export default function GroupsPage() {
         title="用户组"
         extra={
           <Button type="primary" size="small" icon={<PlusOutlined />} onClick={openCreate}>
-            新建用户组
+            新建
           </Button>
         }
       />
@@ -354,7 +346,7 @@ export default function GroupsPage() {
 
       {list.error && list.data ? (
         <div style={{ marginBottom: tokens.space.md }}>
-          <ErrorState error={list.error} onRetry={list.reload} title="刷新失败，以下为上一次成功的数据" />
+          <ErrorState error={list.error} onRetry={list.reload} title="刷新失败，下方为旧数据" />
         </div>
       ) : null}
 
@@ -388,8 +380,8 @@ export default function GroupsPage() {
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
                 description={
                   q
-                    ? '当前搜索条件下没有用户组。'
-                    : '还没有用户组。新建一个组会自动签发第一把网关 key。'
+                    ? '没有符合条件的用户组。'
+                    : '还没有用户组。'
                 }
               />
             ),

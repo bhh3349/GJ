@@ -59,9 +59,9 @@ export function GatewayKeyRevealModal({ reveal, onClose }: GatewayKeyRevealModal
     if (text === '') return;
     try {
       await navigator.clipboard.writeText(text);
-      message.success('已复制到剪贴板');
+      message.success('已复制');
     } catch {
-      message.error('浏览器不允许写入剪贴板，请手动选中上面这串复制');
+      message.error('浏览器不允许复制，请手动选中上面这串');
     }
   };
 
@@ -69,7 +69,7 @@ export function GatewayKeyRevealModal({ reveal, onClose }: GatewayKeyRevealModal
     <Modal
       open={reveal !== null}
       title="网关 key（仅此一次）"
-      okText="我已保存，关闭"
+      okText="已保存"
       cancelButtonProps={{ style: { display: 'none' } }}
       onOk={onClose}
       onCancel={onClose}
@@ -103,7 +103,7 @@ export function GatewayKeyRevealModal({ reveal, onClose }: GatewayKeyRevealModal
 
       <Space size={tokens.space.sm} align="center" wrap style={{ marginBottom: tokens.space.sm }}>
         <Button size="small" icon={<CopyOutlined />} onClick={() => { void copy(); }}>
-          复制这串 key
+          复制
         </Button>
         <Text type="secondary" style={{ fontSize: 12 }}>
           掩码：{reveal?.maskedKey ?? '—'}
@@ -121,7 +121,7 @@ export function GatewayKeyRevealModal({ reveal, onClose }: GatewayKeyRevealModal
           }}
         >
           <Text type="secondary" style={{ fontSize: 12 }}>
-            客户端 Base URL（结尾的 /v1 不能省）：
+            客户端 Base URL（/v1 不能省）：
           </Text>
           <div style={{ marginTop: tokens.space.xs }}>
             <Text
@@ -141,8 +141,7 @@ export function GatewayKeyRevealModal({ reveal, onClose }: GatewayKeyRevealModal
         message="现在不复制，之后就拿不到了"
         description={
           <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-            库里只存摘要，管理面此后只显示掩码。这串关掉就取不回；要新的只能再签发一把，
-            或重置（重置会让旧 key 立即失效）。
+            关掉就取不回。
           </Text>
         }
       />
@@ -242,7 +241,7 @@ export function GroupFormModal({
     <Modal
       open={open}
       title={editing ? `编辑用户组 · ${editing.name}` : '新建用户组'}
-      okText={editing ? '保存' : '创建并签发 key'}
+      okText={editing ? '保存' : '创建'}
       cancelText="取消"
       confirmLoading={isPending('save')}
       onOk={() => {

@@ -10,7 +10,7 @@
  * - `manual` 来源受保护：探测**永不覆盖**人工值，此时按钮改为提示，不让管理员白等一轮请求。
  */
 import { ExperimentOutlined, SaveOutlined } from '@ant-design/icons';
-import { Alert, App, Button, Space, Tag, Tooltip, Typography } from 'antd';
+import { Alert, App, Button, Tag, Typography } from 'antd';
 import { useEffect, useState } from 'react';
 
 import { modelsApi } from '@/api/endpoints';
@@ -43,19 +43,15 @@ function SupportedTag({ item }: { item: ModelProbeItem }) {
   }
   if (item.supported === false) {
     return (
-      <Tooltip title={`上游明确拒绝（状态码 ${item.status ?? '—'}）：这是模型的属性，不是 key 的故障。`}>
-        <Tag bordered={false} style={{ marginInlineEnd: 0, background: tokens.tint.error, color: tokens.color.error }}>
-          不支持
-        </Tag>
-      </Tooltip>
+      <Tag bordered={false} style={{ marginInlineEnd: 0, background: tokens.tint.error, color: tokens.color.error }}>
+        不支持
+      </Tag>
     );
   }
   return (
-    <Tooltip title={item.reason ? `判不出：${REASON_LABEL[item.reason] ?? item.reason}` : '判不出'}>
-      <Tag bordered={false} style={{ marginInlineEnd: 0, background: tokens.tint.neutral, color: tokens.color.textSecondary }}>
-        未判定
-      </Tag>
-    </Tooltip>
+    <Tag bordered={false} style={{ marginInlineEnd: 0, background: tokens.tint.neutral, color: tokens.color.textSecondary }}>
+      未判定
+    </Tag>
   );
 }
 
@@ -93,9 +89,8 @@ export function ModelProbePanel({ model, onSaved }: ModelProbePanelProps) {
       title: '把探测结果写入档案？',
       content:
         yetToWrite.length === 0
-          ? '本次探测没有新结论可写（已有的能力位不会被抹掉）。'
-          : `将新增 ${yetToWrite.map((item) => CAPABILITY_LABEL[item.capability]).join('、')}。` +
-            '人工填写过的能力永不被覆盖；「不支持」与「未判定」从不写库。',
+          ? '本次没有新结论可写。'
+          : `将新增 ${yetToWrite.map((item) => CAPABILITY_LABEL[item.capability]).join('、')}。`,
       okText: '写入档案',
       cancelText: '取消',
       onOk: async () => {
@@ -134,9 +129,6 @@ export function ModelProbePanel({ model, onSaved }: ModelProbePanelProps) {
           <Text strong style={{ fontSize: 13 }}>
             能力探测
           </Text>
-          <Text type="secondary" style={{ fontSize: 12, display: 'block' }}>
-            向上游发能力专属小请求，用响应判断。不写调用日志、不影响 key 健康。
-          </Text>
         </div>
         <Button
           size="small"
@@ -158,7 +150,7 @@ export function ModelProbePanel({ model, onSaved }: ModelProbePanelProps) {
       </div>
 
       <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
-        {model.lastProbedAt == null ? '从未探测过' : `最近探测 ${formatIso(model.lastProbedAt)}`}
+        {model.lastProbedAt == null ? '从未探测' : `最近探测 ${formatIso(model.lastProbedAt)}`}
         {result === null ? '' : ` · 本次 ${formatIso(result.probedAt)}（${result.requests} 次上游请求）`}
       </Text>
 
@@ -183,7 +175,7 @@ export function ModelProbePanel({ model, onSaved }: ModelProbePanelProps) {
               type="info"
               showIcon
               style={{ marginTop: tokens.space.sm }}
-              message="该模型的能力由人工填写，探测不会覆盖，以上仅供参考。"
+              message="人工填写的值不会被覆盖。"
             />
           ) : result.applied.length > 0 ? (
             <Text type="success" style={{ fontSize: 12, display: 'block', marginTop: tokens.space.sm }}>
@@ -191,24 +183,20 @@ export function ModelProbePanel({ model, onSaved }: ModelProbePanelProps) {
             </Text>
           ) : trueCount === 0 ? (
             <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: tokens.space.sm }}>
-              本次没有探测到受支持的能力，没有可写入的项。
+              本次没有可写入的项。
             </Text>
           ) : (
-            <Space style={{ marginTop: tokens.space.sm }}>
-              <Button
-                size="small"
-                type="primary"
-                icon={<SaveOutlined />}
-                loading={isPending('probe-apply')}
-                disabled={!hasNewToWrite}
-                onClick={confirmApply}
-              >
-                写入档案
-              </Button>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                只写「支持」的项；确认后再落库。
-              </Text>
-            </Space>
+            <Button
+              size="small"
+              type="primary"
+              icon={<SaveOutlined />}
+              loading={isPending('probe-apply')}
+              disabled={!hasNewToWrite}
+              onClick={confirmApply}
+              style={{ marginTop: tokens.space.sm }}
+            >
+              写入档案
+            </Button>
           )}
         </div>
       )}

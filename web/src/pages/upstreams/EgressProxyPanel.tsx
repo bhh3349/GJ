@@ -96,26 +96,26 @@ const RETIRE_REASON_TEXT: Record<EgressRetiredReason, string> = {
 
 function statusTag(row: EgressProxy) {
   const active = row.status === 'active';
+  const tag = (
+    <Tag
+      bordered={false}
+      style={{
+        marginInlineEnd: 0,
+        background: active ? tokens.tint.success : tokens.tint.neutral,
+        color: active ? tokens.color.success : tokens.color.textSecondary,
+      }}
+    >
+      {active ? '在池' : '已退役'}
+    </Tag>
+  );
+  if (active) return tag;
   return (
     <Tooltip
-      title={
-        active
-          ? 'active：可被账号绑定、可用于出站。'
-          : `retired：${row.retiredReason ? RETIRE_REASON_TEXT[row.retiredReason] : '未记原因'}${
-              row.retiredAt ? ` · ${formatIso(row.retiredAt)}` : ''
-            }。退役不删行 —— 历史用量与统计仍挂在它上面。`
-      }
+      title={`${
+        row.retiredReason ? RETIRE_REASON_TEXT[row.retiredReason] : '未记原因'
+      }${row.retiredAt ? ` · ${formatIso(row.retiredAt)}` : ''}`}
     >
-      <Tag
-        bordered={false}
-        style={{
-          marginInlineEnd: 0,
-          background: active ? tokens.tint.success : tokens.tint.neutral,
-          color: active ? tokens.color.success : tokens.color.textSecondary,
-        }}
-      >
-        {active ? '在池' : '已退役'}
-      </Tag>
+      {tag}
     </Tooltip>
   );
 }
@@ -123,16 +123,14 @@ function statusTag(row: EgressProxy) {
 function testTag(row: EgressProxy) {
   if (row.lastTestOk === null) {
     return (
-      <Tooltip title="从未探活过。未知 ≠ 失败 —— 这一格不说它通不通。">
-        <Text type="secondary" style={{ fontSize: 12 }}>
-          未测
-        </Text>
-      </Tooltip>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        未测
+      </Text>
     );
   }
   const ok = row.lastTestOk;
   return (
-    <Tooltip title={row.lastTestAt ? `最近探活 ${formatIso(row.lastTestAt)}` : '无时间戳'}>
+    <Tooltip title={row.lastTestAt ? formatIso(row.lastTestAt) : undefined}>
       <Tag
         bordered={false}
         style={{
@@ -278,7 +276,7 @@ export function EgressProxyPanel({ refreshSignal }: EgressProxyPanelProps) {
       content: (
         <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
           <Text style={{ fontSize: 12 }}>
-            退役后它不再被选路。仍然可以「回池」复用原条目 —— 不新建行，所以不会白拿一次出口额度。
+            退役后不再被选路，可随时回池。
           </Text>
           <Segmented
             size="small"
@@ -292,10 +290,9 @@ export function EgressProxyPanel({ refreshSignal }: EgressProxyPanelProps) {
             }}
           />
           <Text type="secondary" style={{ fontSize: 12 }}>
-            若这个出口已被账号绑定，服务端会拒绝（无强制退役）—— 需先把账号改到别的在池出口。
             {accountCountOf(row.id) !== null && (accountCountOf(row.id) ?? 0) > 0
-              ? `当前已绑 ${formatCount(accountCountOf(row.id) ?? 0)} 个账号。`
-              : ''}
+              ? `当前已绑 ${formatCount(accountCountOf(row.id) ?? 0)} 个账号，需先改绑才能退役。`
+              : '已被账号绑定时无法退役，需先去账号池改绑。'}
           </Text>
         </div>
       ),
@@ -365,11 +362,7 @@ export function EgressProxyPanel({ refreshSignal }: EgressProxyPanelProps) {
         value ? <Text style={{ fontSize: 12 }}>{value}</Text> : <Text type="secondary">—</Text>,
     },
     {
-      title: (
-        <Tooltip title="代理认证是否已设。明文凭据永不出后端 —— 这里只回答有没有。">
-          <span>凭据</span>
-        </Tooltip>
-      ),
+      title: '凭据',
       dataIndex: 'authSet',
       width: 88,
       render: (value: boolean) => (
@@ -387,40 +380,29 @@ export function EgressProxyPanel({ refreshSignal }: EgressProxyPanelProps) {
       ),
     },
     {
-      title: (
-        <Tooltip title="绑定到这条出口的供应商账号数。绑定只表示这些账号被指派给了它，既不代表流量真的从这里出去，也不代表这条出口是健康的。改绑 / 解绑入口在账号池每一行；仍有账号绑着时，这条出口不能删除。">
-          <span>已绑账号</span>
-        </Tooltip>
-      ),
+      title: '已绑账号',
       key: 'boundAccounts',
       width: 92,
       align: 'right',
       render: (_: unknown, row: EgressProxy) => {
         const n = accountCountOf(row.id);
+        if (n === null) {
+          return (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              —
+            </Text>
+          );
+        }
         return (
-          <Tooltip
-            title={
-              n === null
-                ? '账号清单还没加载完 —— 不显示 0，别把「没读到」当成「没人绑」。'
-                : n === 0
-                  ? '还没有账号绑定这条出口。要固定某个号的出口，去账号池那一行的「绑出口」。'
-                  : `${accountsPartial ? '至少 ' : ''}${formatCount(n)} 个账号绑定这条出口（${accountsPartial ? '账号总数超过单页上限，这是下界' : '解绑请到账号池该账号行'}）。`
-            }
+          <Text
+            style={{
+              fontSize: 12,
+              fontVariantNumeric: 'tabular-nums',
+              color: n === 0 ? tokens.color.textSecondary : tokens.color.textPrimary,
+            }}
           >
-            {n === null ? (
-              <Text type="secondary" style={{ fontSize: 12 }}>—</Text>
-            ) : (
-              <Text
-                style={{
-                  fontSize: 12,
-                  fontVariantNumeric: 'tabular-nums',
-                  color: n === 0 ? tokens.color.textSecondary : tokens.color.textPrimary,
-                }}
-              >
-                {n === 0 ? '0' : `${accountsPartial ? '≥' : ''}${formatCount(n)}`}
-              </Text>
-            )}
-          </Tooltip>
+            {n === 0 ? '0' : `${accountsPartial ? '≥' : ''}${formatCount(n)}`}
+          </Text>
         );
       },
     },
@@ -541,21 +523,14 @@ export function EgressProxyPanel({ refreshSignal }: EgressProxyPanelProps) {
         type="warning"
         showIcon
         style={{ background: tokens.tint.warning, border: 'none', marginBottom: tokens.space.md }}
-        message="出口只支持 HTTP(S) CONNECT 代理 —— socks5:// 这类地址提交时就会被 400 拒下"
-        description={
-          <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-            只收 http:// 或 https:// 开头的地址；socks5:// 等其他协议不会被静默放行，创建 / 保存
-            那一刻就会被服务端以 400 拒下，表单校验也会当场拦截。绑定了出口的账号，数据面出站
-            会真的经由这条代理、从它的 IP 出去；出口通不通看「探活」列的结果。
-          </Text>
-        }
+        message="出口只支持 http:// 或 https:// 代理，socks5:// 会被拒"
       />
 
       {list.error && list.data ? (
         <ErrorState
           error={list.error}
           onRetry={list.reload}
-          title="刷新失败，以下为上一次成功的数据"
+          title="刷新失败，下方为旧数据"
         />
       ) : null}
 
@@ -577,7 +552,7 @@ export function EgressProxyPanel({ refreshSignal }: EgressProxyPanelProps) {
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
                 description={
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    还没有配置出口。未配置时账号走宿主 IP 出站；要固定出口 IP，点「新增出口」填一个代理地址。
+                    还没有配置出口，账号将走宿主 IP 出站。
                   </Text>
                 }
               />
@@ -607,7 +582,7 @@ export function EgressProxyPanel({ refreshSignal }: EgressProxyPanelProps) {
             label="名称"
             rules={[{ required: true, message: '请输入名称' }]}
           >
-            <Input placeholder="如 vps-hk-1（唯一）" style={{ width: 260 }} />
+            <Input placeholder="如 vps-hk-1" style={{ width: 260 }} />
           </Form.Item>
 
           <Form.Item
@@ -630,8 +605,7 @@ export function EgressProxyPanel({ refreshSignal }: EgressProxyPanelProps) {
             ]}
             extra={
               <Text type="secondary" style={{ fontSize: 12 }}>
-                只填 <Text code>scheme://host:port</Text>，不要带 <Text code>user:pass@</Text>、
-                查询串或锚点；内网 / 回环地址会被服务端拒绝。
+                只填 <Text code>scheme://host:port</Text>（内网 / 回环地址会被拒）。
               </Text>
             }
           >
@@ -681,8 +655,8 @@ export function EgressProxyPanel({ refreshSignal }: EgressProxyPanelProps) {
                 extra={
                   <Text type="secondary" style={{ fontSize: 12 }}>
                     {editing.authSet
-                      ? '已设凭据。明文不回显 —— 留空 = 不改；要换就两个都填；要清就勾下面的清除。'
-                      : '当前免认证。两个都填才落凭据（只填一个不生效）。'}
+                      ? '留空 = 不改，两个都填 = 换。'
+                      : '两个都填才生效。'}
                   </Text>
                 }
               >
@@ -706,7 +680,7 @@ export function EgressProxyPanel({ refreshSignal }: EgressProxyPanelProps) {
               ) : null}
               {clearAuth ? (
                 <Text type="warning" style={{ fontSize: 12 }}>
-                  保存后这个出口变成免认证。
+                  保存后变为免认证。
                 </Text>
               ) : null}
             </>

@@ -92,7 +92,7 @@ export default function ConsoleKeysPage() {
   const revoke = (row: ConsoleKeyItem): void => {
     modal.confirm({
       title: '吊销这把 key？',
-      content: `${row.maskedKey} 会立即失效且不可恢复（吊销是硬删，没有回收站）。用它的客户端会开始收到 401。`,
+      content: `${row.maskedKey} 立即失效，不可恢复。`,
       okText: '吊销',
       okButtonProps: { danger: true },
       cancelText: '取消',
@@ -179,7 +179,7 @@ export default function ConsoleKeysPage() {
             <Tooltip
               title={
                 atLimit
-                  ? `已经到 ${limit} 把了。要再签一把，先在下面吊销一把不用的。`
+                  ? `已到 ${limit} 把上限，先吊销一把。`
                   : undefined
               }
             >
@@ -194,7 +194,7 @@ export default function ConsoleKeysPage() {
                   void issue();
                 }}
               >
-                签发新 key
+                签发
               </Button>
             </Tooltip>
           </Space>
@@ -204,7 +204,7 @@ export default function ConsoleKeysPage() {
       <div style={{ display: 'grid', gap: tokens.space.lg }}>
         <Panel
           title="key 列表"
-          description="你所在组的全部 key。为安全起见只显示掩码 —— 完整 key 只在签发那一刻出现一次。"
+          description="本组的全部 key，只显示掩码。"
           extra={
             <Space size={tokens.space.sm}>
               {limit !== null ? (
@@ -218,7 +218,6 @@ export default function ConsoleKeysPage() {
               )}
             </Space>
           }
-          hint="同一个组下的多把 key 共用同一份配额池（RPM / TPM / 日配额），所以多签一把不是多一份额度 —— 名字是分辨它们的唯一办法。"
         >
           {keys.error !== null && keys.data === null ? (
             <ErrorState error={keys.error} onRetry={keys.reload} variant="page" title="key 列表读取失败" />
@@ -229,7 +228,7 @@ export default function ConsoleKeysPage() {
               type="info"
               showIcon
               message="你还没有被分配到用户组"
-              description="组由管理员分配。分配之后这一页就会出现该组的 key，你也可以在这里自己签发 —— 现在签发按钮是灰的，因为签出来的 key 打 /v1 会被判成「组不存在」。"
+              description="等待管理员分配。"
             />
           ) : (
             <Table<ConsoleKeyItem>
@@ -243,7 +242,7 @@ export default function ConsoleKeysPage() {
                 emptyText: (
                   <Empty
                     image={Empty.PRESENTED_IMAGE_SIMPLE}
-                    description="这个组一把 key 都没有。没有 key 就打不通 /v1，点右上角的「签发新 key」。"
+                    description="这个组还没有 key。"
                   />
                 ),
               }}
@@ -252,27 +251,9 @@ export default function ConsoleKeysPage() {
 
           {keys.data?.assigned === true && limit !== null ? (
             <Paragraph type="secondary" style={{ fontSize: 12, marginTop: tokens.space.md, marginBottom: 0 }}>
-              自助签发上限是 <Text strong>{limit}</Text> 把（同一个组的 key 共享同一份配额池，
-              第 {limit + 1} 把不带来任何新额度）。{atLimit ? '已经到顶了：要换 key 请先吊销一把不用的。' : ''}
+              上限 <Text strong>{limit}</Text> 把。{atLimit ? '已到顶，先吊销一把。' : ''}
             </Paragraph>
           ) : null}
-        </Panel>
-
-        <Panel title="关于 key 的三件事" size="sm">
-          <Space direction="vertical" size={tokens.space.xs}>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              1. <Text strong>完整 key 只在签发那一刻显示一次</Text>。服务端只保存摘要，
-              这一页永远只有掩码 —— 也没有任何「显示明文」的按钮，因为没有任何端点能取回它。
-            </Text>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              2. <Text strong>吊销是硬删</Text>，立即生效、不可恢复。如果只是想给同一台设备换一把，
-              就吊销旧的、再签一把新的（这个版本没有「临时停用」）。
-            </Text>
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              3. 一把 key 泄漏了就吊销它 —— 组里其他 key 不受影响（它们只是共用配额，
-              不是共用同一串凭据）。想换个名字点「改名」，不影响任何客户端。
-            </Text>
-          </Space>
         </Panel>
       </div>
 

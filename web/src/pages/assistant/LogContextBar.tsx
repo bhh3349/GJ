@@ -46,7 +46,7 @@ const WINDOW_OPTIONS = [
 ] as const;
 
 const SEVERITY_OPTIONS = [
-  { value: 'warn', label: 'warn（调用方/配额侧）' },
+  { value: 'warn', label: 'warn（调用方）' },
   { value: 'error', label: 'error（系统侧）' },
 ] as const;
 
@@ -115,7 +115,7 @@ export function LogContextBar({ value, onChange, disabled = false }: LogContextB
     >
       <Space size={tokens.space.md} wrap align="center">
         <Text type="secondary" style={{ fontSize: 12 }}>
-          观测上下文
+          上下文
         </Text>
 
         <Select
@@ -145,7 +145,7 @@ export function LogContextBar({ value, onChange, disabled = false }: LogContextB
           mode="multiple"
           allowClear
           maxTagCount="responsive"
-          placeholder="事件分型（可多选）"
+          placeholder="事件分型"
           style={{ minWidth: 240, maxWidth: 360 }}
           value={value.categories}
           options={CATEGORY_OPTIONS}
@@ -158,7 +158,7 @@ export function LogContextBar({ value, onChange, disabled = false }: LogContextB
         <Input
           size="small"
           allowClear
-          placeholder="模型名（精确匹配）"
+          placeholder="模型名"
           style={{ width: 200 }}
           value={value.model}
           disabled={disabled}
@@ -169,7 +169,7 @@ export function LogContextBar({ value, onChange, disabled = false }: LogContextB
         <Input
           size="small"
           allowClear
-          placeholder="请求号（精确匹配）"
+          placeholder="请求号"
           style={{ width: 200 }}
           value={value.requestId}
           disabled={disabled}
@@ -180,7 +180,7 @@ export function LogContextBar({ value, onChange, disabled = false }: LogContextB
           size="small"
           showTime
           allowClear
-          placeholder={['错误事件 from', 'to']}
+          placeholder={['开始', '结束']}
           value={value.range}
           disabled={disabled}
           onChange={(dates) =>

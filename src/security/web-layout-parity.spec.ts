@@ -363,4 +363,55 @@ describe('web 排版防回退锁（2026-10-12 事故）', () => {
     const planCol = src.slice(src.indexOf("title: '套餐'"), src.indexOf("key: 'remaining'"));
     expect(planCol).toMatch(/width: COLUMN_WIDTHS\.plan/);
   });
+
+  it('用户可见文案：按钮纯中文 ≤4 字、错误态标题不带端点路径（业主 2026-11-03）', () => {
+    // 事故本体（业主原话「每个页面都有大片的说明性小文字」）里可被机器判定的两条：
+    //  ① 按钮写成整句：「我已保存，关闭」「回到仪表盘」—— 4 字以上就不是按钮，是句子。
+    //  ② 错误态标题里贴端点路径：「额度读取失败（GET /api/console/quota）」
+    //     —— 用户读不懂也用不上，端点该留在代码里。
+    // 只看用户真能读到的字符：JSX 文本节点与 `title` 属性值。注释、dataIndex、placeholder 不受影响
+    // （placeholder 是输入提示，长度另说，这里不锁，免得把「选择上游」这类正常提示一起判死）。
+    //
+    // 并行车道豁免：这两个文件由其他人在改，锁不跨车道（合流后由该车道自己补锁）。
+    const EXEMPT = new Set(['pages/KeysPage.tsx', 'pages/upstreams/SupplierAccountsPage.tsx']);
+
+    const COPY_JARGON = /\/api\/|\/v1\//;
+
+    function copyOffenders(source: string): { longButtons: string[]; apiInTitle: string[] } {
+      // 按钮判据：JSX 文本节点、含中文、**单位数** >4。单位 = 一个汉字 / 一个 ASCII 词
+      // （「Key 管理」「近 7 天」都是 3 个单位，属正常标签）；空格不计数。
+      // 不能用 \u4e00-\u9fa5 数长度 —— 「我已保存，关闭」里的全角逗号不算汉字，会少算一位。
+      const units = (t: string): number =>
+        (t.replace(/\s+/g, '').match(/[\u4e00-\u9fa5]|[A-Za-z0-9]+|./gu) ?? []).length;
+      const longButtons = [...source.matchAll(/>([^<>{}]{1,40})<\/Button>/g)]
+        .map((m) => (m[1] ?? '').trim())
+        .filter((t) => /[\u4e00-\u9fa5]/.test(t) && units(t) > 4);
+      const apiInTitle = [...source.matchAll(/title=(?:"([^"]*)"|\{`([^`]*)`\})/g)]
+        .map((m) => m[1] ?? m[2] ?? '')
+        .filter((v) => COPY_JARGON.test(v));
+      return { longButtons, apiInTitle };
+    }
+
+    const offenders: string[] = [];
+    for (const file of listWebSources()) {
+      const rel = relative(webSrcRoot, file).replace(/\\/g, '/');
+      if (EXEMPT.has(rel)) continue;
+      const { longButtons, apiInTitle } = copyOffenders(readFileSync(file, 'utf8'));
+      for (const t of longButtons) offenders.push(`${rel} → 按钮「${t}」`);
+      for (const t of apiInTitle) offenders.push(`${rel} → title「${t.slice(0, 40)}」`);
+    }
+    expect(offenders).toEqual([]);
+
+    // 正对照：两个合成违例样本必须被同一条判据抓到（否则判据是摆设）。
+    const sample = [
+      '        <Button>我已保存，关闭</Button>',
+      '        <ErrorState title="额度读取失败（`GET /api/console/quota`）" />',
+    ].join('\n');
+    const caught = copyOffenders(sample);
+    expect(caught.longButtons).toEqual(['我已保存，关闭']);
+    expect(caught.apiInTitle).toHaveLength(1);
+    // 负腿：4 字以内按钮、以及数据型 title（掩码 / 时刻 / 计数）不得被误伤。
+    expect(copyOffenders('<Button>解除透支</Button>').longButtons).toEqual([]);
+    expect(copyOffenders('<ErrorState title="刷新失败，下方为旧数据" />').apiInTitle).toEqual([]);
+  });
 });

@@ -40,7 +40,6 @@ import {
   SUPPLIER_ACCOUNT_KINDS,
   SUPPLIER_LABELS,
   asSupplierKind,
-  supplierLabel,
   type BalanceQueryTemplate,
   type BalanceTestTemplate,
   type SupplierKind,
@@ -321,9 +320,11 @@ export function UpstreamModal({ open, editing, onClose, onSaved }: UpstreamModal
               message="改回「通用」后，这个上游的账号池入口会消失"
               description={
                 <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-                  这个动作只写这一个字段，不会级联删除账号
-                  {editing && editing.accountCount > 0 ? `（当前名下有 ${editing.accountCount} 个账号，它们会保留）` : ''}
-                  ；但管理面上不再显示账号池入口，直到把「供应商」改回 {supplierLabel(editing?.supplier)}。
+                  {`账号与 key 会保留${
+                    editing && editing.accountCount > 0
+                      ? `（名下 ${editing.accountCount} 个账号）`
+                      : ''
+                  }，只是入口消失。`}
                 </Text>
               }
             />
@@ -340,16 +341,14 @@ export function UpstreamModal({ open, editing, onClose, onSaved }: UpstreamModal
               style={{ marginBottom: tokens.space.md }}
               message={`已自动识别为「${editing.balancePreset.label}」`}
               description={
-                editing.balancePreset.effective
-                  ? '当前生效：不配模板也能自动查询余额。'
-                  : '但当前已启用用户模板，将优先使用用户模板。'
+                editing.balancePreset.effective ? '不配模板也生效' : '用户模板优先'
               }
             />
           ) : null}
 
           {editing ? (
             <Button size="small" style={{ marginBottom: tokens.space.md }} onClick={openSelfTest}>
-              自测余额查询
+              自测
             </Button>
           ) : null}
 

@@ -189,7 +189,7 @@ export function ModelDetailDrawer({
 
             <Space size={tokens.space.md} style={{ display: 'flex' }} align="start">
               <Form.Item name="contextLength" label="上下文长度 (tokens)" style={{ flex: 1 }}>
-                <InputNumber min={0} step={1024} style={{ width: '100%' }} placeholder="上游未提供" />
+                <InputNumber min={0} step={1024} style={{ width: '100%' }} placeholder="未提供" />
               </Form.Item>
               <Form.Item name="enabled" label="启用" valuePropName="checked">
                 <Switch />
@@ -209,7 +209,7 @@ export function ModelDetailDrawer({
                 type="warning"
                 showIcon
                 style={{ marginBottom: tokens.space.md }}
-                message="价格将保存为未知（null）"
+                message="价格将保存为未知"
               />
             ) : (
               <Space size={tokens.space.md} style={{ display: 'flex' }} align="start">
@@ -217,7 +217,7 @@ export function ModelDetailDrawer({
                   name="inputPer1k"
                   label="输入价（分 / 1k）"
                   style={{ flex: 1 }}
-                  rules={[{ required: true, message: '填写输入价，或把价格标为未知' }]}
+                  rules={[{ required: true, message: '填写输入价，或标为未知' }]}
                   extra={
                     inputPer1k === null || inputPer1k === undefined
                       ? undefined
@@ -230,7 +230,7 @@ export function ModelDetailDrawer({
                   name="outputPer1k"
                   label="输出价（分 / 1k）"
                   style={{ flex: 1 }}
-                  rules={[{ required: true, message: '填写输出价，或把价格标为未知' }]}
+                  rules={[{ required: true, message: '填写输出价，或标为未知' }]}
                 >
                   <InputNumber min={0} step={1} style={{ width: '100%' }} />
                 </Form.Item>

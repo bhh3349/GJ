@@ -30,7 +30,7 @@ export function ManualRefreshCostBody({ scope, outcome }: ManualRefreshCostBodyP
     <div>
       <Text>{scope}</Text>
       <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>
-        {outcome ?? '执行后等终态，结论按端点各自的形状回显。'}
+        {outcome ?? '执行后等待结果。'}
       </Text>
     </div>
   );

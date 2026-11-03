@@ -19,7 +19,7 @@
  * 前端据此**不多做任何事** —— 只要不把"这轮没有提示"读成"这轮一定健康"就行，
  * 而本组件的文案本来就没这么说。
  */
-import { Alert, Button, Space, Tooltip, Typography } from 'antd';
+import { Alert, Button, Space, Typography } from 'antd';
 import { useState } from 'react';
 
 import type { BalanceDrift, BalanceSyncUpstreamState } from '@/api/types';
@@ -59,14 +59,12 @@ export function BalanceDriftBanner({ drift, upstreams }: BalanceDriftBannerProps
         }}
       >
         <Text type="secondary" style={{ fontSize: 12 }}>
-          {`余额漂移：自 ${formatIso(drift.since)} 起的窗口内无提示。`}
+          {`自 ${formatIso(drift.since)} 起无漂移`}
         </Text>
         {processTotal > 0 ? (
-          <Tooltip title="进程内累计与窗口内条目不是同一个计数：窗口滚动后条目会消失，计数不会。进程内计数在服务重启时归零。">
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {`进程内累计 ${formatCount(processTotal)} 次（均已在当前窗口之外）`}
-            </Text>
-          </Tooltip>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {`进程内累计 ${formatCount(processTotal)} 次`}
+          </Text>
         ) : null}
       </div>
     );

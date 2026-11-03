@@ -157,7 +157,7 @@ export function SupplierAccountDetailDrawer({
       'test',
       () => supplierAccountsApi.test(accountId),
       // 业务性失败是 `200 + ok:false`，所以这里不写"测试成功"——成功的是这次请求，不是这次诊断。
-      '自测已执行（结论看下方）',
+      '自测已执行',
     );
     if (result === null || result.ok) return;
     message.warning(`自测结论：本次未通过（${result.errorCode ?? '见响应'}）`);
@@ -173,7 +173,7 @@ export function SupplierAccountDetailDrawer({
     confirmManualRefresh(modal, {
       title: '重置套餐 key',
       scope: `打谁：仅本账号（${account.identifier}）`,
-      outcome: '执行后等终态，逐行结论见明细浮层；旧套餐 key 会立即失效。',
+      outcome: '旧套餐 key 会立即失效。',
       onOk: async () => {
         const accepted = await run('rotate', () =>
           supplierAccountsApi.rotateKey({ upstreamId: account.upstreamId, ids: [account.id] }),
@@ -194,15 +194,13 @@ export function SupplierAccountDetailDrawer({
   const undeplete = (): void => {
     if (!account) return;
     modal.confirm({
-      title: '解除这个账号的透支锁？',
+      title: '解除透支锁？',
       content: (
         <span>
-          解除后该账号与其名下被「账号连坐」停用的 key 会<strong>回到选路池</strong>；自己余额不足的那些 key
-          仍在池外 —— 它们没钱这件事没变。
-          如果下一次余额刷新显示账号仍然透支（余额见底且套餐也不可用），会<strong>再次自动锁上</strong> —— 那是预期行为，不是故障。
+          解除后账号与连坐停用的 key 重新启用；下次仍透支会<strong>再次锁上</strong>。
         </span>
       ),
-      okText: '解除并启用',
+      okText: '解除',
       cancelText: '取消',
       onOk: async () => {
         const result = await run('undeplete', () => supplierAccountsApi.undeplete(accountId), '透支锁已解除');
@@ -229,16 +227,14 @@ export function SupplierAccountDetailDrawer({
       content: (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           <span>
-            移出后该账号名下被停用的 key 会<strong>恢复启用并解锁</strong>。
+            移出后名下被停用的 key <strong>恢复启用并解锁</strong>。
           </span>
           <span style={{ color: tokens.color.warning }}>
-            但判据没有变：若下一次余额刷新 / 套餐同步时它<strong>仍同时满足「套餐余量见底 + 余额不足 1 元」</strong>，
-            会<strong>再次自动进池</strong> —— 那是判据在工作，不是按钮失灵。要让一个号留在池子外，
-            先给它充上余额或换上有效套餐。
+            判据仍成立时会<strong>再次进池</strong>。
           </span>
         </div>
       ),
-      okText: '移出并启用',
+      okText: '移出',
       cancelText: '取消',
       onOk: async () => {
         const result = await run('unscrap', () => supplierAccountsApi.unscrap(accountId), '已移出废号池');
@@ -255,7 +251,7 @@ export function SupplierAccountDetailDrawer({
     supplierAccountsApi
       .remove(accountId, force)
       .then(() => {
-        message.success('账号已删除（名下池内 key 已一并软删，不再参与路由）');
+        message.success('账号已删除');
         onChanged();
         onClose();
       })
@@ -263,22 +259,16 @@ export function SupplierAccountDetailDrawer({
         if (!force && isApiError(error) && error.code === 'ACCOUNT_HAS_KEYS') {
           const keyCount = readNumber(error.details, 'keyCount') ?? account?.keyCount ?? null;
           modal.confirm({
-            title: '这个账号名下还有 key，确定删除？',
+            title: '删除账号及其名下 key？',
             width: 500,
             content: (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.sm }}>
-                <Text>
-                  {keyCount === null
-                    ? '删除账号会一并删除名下的 key（软删，不可恢复参与路由）。'
-                    : `删除账号会一并删除名下的 ${formatCount(keyCount)} 把 key（软删，之后不再参与路由）。`}
-                </Text>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  账号型 key 的额度、套餐、余额都在账号这一侧 —— 账号没了，key 打出去只会失败，
-                  所以它们跟着走。这是刻意的强绑定，不是顺手删除。
-                </Text>
-              </div>
+              <Text>
+                {keyCount === null
+                  ? '删账号会连同名下 key 一起停用'
+                  : `删账号会连同名下 ${formatCount(keyCount)} 把 key 一起停用`}
+              </Text>
             ),
-            okText: '仍然删除（连 key 一起删）',
+            okText: '仍然删除',
             okButtonProps: { danger: true },
             cancelText: '取消',
             onOk: () => {
@@ -324,9 +314,7 @@ export function SupplierAccountDetailDrawer({
           <RemainingBar
             ratio={ratio}
             hint={
-              ratio === null
-                ? '算不出剩余占比（总额或已用缺失，或总额为 0）—— 不画一根 0% 的假条。'
-                : `剩余占总额 ${Math.round(ratio * 100)}%`
+              ratio === null ? '总额或已用缺失，不算占比' : `剩余占总额 ${Math.round(ratio * 100)}%`
             }
             value={
               <Text style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums' }}>
@@ -347,7 +335,7 @@ export function SupplierAccountDetailDrawer({
       render: (value: string | null) => (
         // 到期是**未来**时刻，必须用 `formatUntil`：`formatRelative` 是过去式专用，
         // 会把「还剩 29 天」读成「29 天前」（业主 2026-11-03 截的就是这一格）。
-        <Tooltip title={value ? formatIso(value) : '上游未给到期时间 —— 不按"永久"渲染'}>
+        <Tooltip title={value ? formatIso(value) : undefined}>
           <Text type="secondary" style={{ fontSize: 12 }}>
             {value ? formatUntil(value) : '未提供'}
           </Text>
@@ -355,11 +343,7 @@ export function SupplierAccountDetailDrawer({
       ),
     },
     {
-      title: (
-        <Tooltip title="三态：自动续费 / 不自动续费 / 上游根本没给这个字段。合并成两态等于把「供应商没告诉我们」当成「不会自动续费」。">
-          <span>续费</span>
-        </Tooltip>
-      ),
+      title: '续费',
       dataIndex: 'autoRenew',
       width: 96,
       render: (value: boolean | null) =>
@@ -421,14 +405,12 @@ export function SupplierAccountDetailDrawer({
           ) : null}
           {/* 废号池是第三根粘性轴（§21.4）：与透支也正交，同样并排画。 */}
           {account?.scrapped ? (
-            <Tooltip title="已进废号池：套餐与余额同时见底（或套餐已过期且余额见底），名下 key 已全部停用。出池只有人工操作。">
-              <Tag
-                bordered={false}
-                style={{ marginInlineEnd: 0, background: tokens.tint.error, color: tokens.color.error }}
-              >
-                {account.scrapReason === null ? '废号池' : `废号池 · ${SCRAP_REASON_TEXT[account.scrapReason]}`}
-              </Tag>
-            </Tooltip>
+            <Tag
+              bordered={false}
+              style={{ marginInlineEnd: 0, background: tokens.tint.error, color: tokens.color.error }}
+            >
+              {account.scrapReason === null ? '废号池' : `废号池 · ${SCRAP_REASON_TEXT[account.scrapReason]}`}
+            </Tag>
           ) : null}
         </Space>
       }
@@ -436,7 +418,7 @@ export function SupplierAccountDetailDrawer({
         <Space size={tokens.space.sm} wrap style={{ width: '100%', justifyContent: 'flex-end' }}>
           {/* §20.5：只在真锁着的时候画 —— 一个恒在的「解除透支」会让人以为它是常规维护动作。 */}
           {account?.depleted ? (
-            <Tooltip title="清账号锁 + 清名下被账号连坐停用的 key，并把它们重新启用；自己余额不足的 key 不会被放回池中。余额回升不会自动解锁，只有这个动作能解。">
+            <Tooltip title="余额回升不会自动解锁">
               <Button
                 size="small"
                 style={{ color: tokens.color.orange, borderColor: tokens.color.orange }}
@@ -450,7 +432,7 @@ export function SupplierAccountDetailDrawer({
             </Tooltip>
           ) : null}
           {account?.credentialSource === 'session' ? (
-            <Tooltip title="该账号是会话型凭据，没有存档密码，无法自动重登。">
+            <Tooltip title="会话型凭据，无法自动重登">
               <span style={{ display: 'inline-block' }}>
                 <Button size="small" disabled>
                   重新登录
@@ -486,10 +468,10 @@ export function SupplierAccountDetailDrawer({
                 rotateKey();
               }}
             >
-              重置套餐 key
+              重置套餐
             </Button>
           ) : null}
-          <Tooltip title="删账号会连同名下池内的 key 一起软删（不再参与路由）—— 账号型 key 的额度 / 套餐 / 余额都在账号这一侧，离开账号没有独立价值。">
+          <Tooltip title="删账号会连同名下 key 一起停用">
             <Button size="small" danger loading={removing} onClick={() => remove(false)}>
               删除账号
             </Button>
@@ -503,7 +485,7 @@ export function SupplierAccountDetailDrawer({
         <ErrorState
           error={detail.error}
           onRetry={detail.reload}
-          title="账号详情加载失败（下面是列表里那一份，可能不是最新的）"
+          title="账号详情加载失败"
         />
       ) : null}
 
@@ -523,11 +505,10 @@ export function SupplierAccountDetailDrawer({
                 <div style={{ display: 'flex', flexDirection: 'column', gap: tokens.space.xs }}>
                   <span style={{ fontSize: 12 }}>
                     原因：{account.scrapReason === null ? '未记录' : SCRAP_REASON_TEXT[account.scrapReason]}。
-                    该账号名下 key 已<strong>全部停用</strong>并被级联锁存，网关不会再选它们。
+                    名下 key 已全部停用。
                   </span>
                   <span style={{ fontSize: 12 }}>
-                    出池只有人工操作；出池后下一轮刷新若判据仍成立会<strong>再次进池</strong> ——
-                    先充余额或换上有效套餐才留得住它。
+                    不会自动出池；判据仍成立会<strong>再次进池</strong>。
                   </span>
                   <Button
                     size="small"
@@ -563,7 +544,7 @@ export function SupplierAccountDetailDrawer({
             label="凭据与会话"
                       >
             <Field label="凭据来源" value={CREDENTIAL_TEXT[account.credentialSource]} />
-            <Field label="会话状态" value={account.hasSession ? '有会话（值不出后端）' : '无会话'} />
+            <Field label="会话状态" value={account.hasSession ? '有会话' : '无会话'} />
             <Field
               label="会话到期"
               value={account.sessionExpiresAt ? formatIso(account.sessionExpiresAt) : '未提供'}
@@ -582,7 +563,7 @@ export function SupplierAccountDetailDrawer({
               value={
                 account.balanceUpdatedAt
                   ? `${formatIso(account.balanceUpdatedAt)}（${formatRelative(account.balanceUpdatedAt)}）`
-                  : '从未成功查到（显示为「未知」，不计入任何合计）'
+                  : '从未成功查到'
               }
             />
           </DetailRow>
@@ -595,32 +576,26 @@ export function SupplierAccountDetailDrawer({
               <Text style={{ fontSize: 12 }}>
                 账号 key {formatCount(account.keyCount)} 把
                 {account.unlimitedKeyCount > 0 ? (
-                  <Tooltip title="unlimited=1：上游给的是无限额度（balance 落 NULL），列表里据此显示「无限」徽标，绝不渲染成一个金额或负数。">
-                    <Tag
-                      bordered={false}
-                      style={{
-                        marginInlineStart: tokens.space.sm,
-                        marginInlineEnd: 0,
-                        fontSize: 11,
-                        background: tokens.tint.info,
-                        color: tokens.color.info,
-                      }}
-                    >
-                      {`其中无限额度 ${formatCount(account.unlimitedKeyCount)}`}
-                    </Tag>
-                  </Tooltip>
+                  <Tag
+                    bordered={false}
+                    style={{
+                      marginInlineStart: tokens.space.sm,
+                      marginInlineEnd: 0,
+                      fontSize: 11,
+                      background: tokens.tint.info,
+                      color: tokens.color.info,
+                    }}
+                  >
+                    {`其中无限额度 ${formatCount(account.unlimitedKeyCount)}`}
+                  </Tag>
                 ) : null}
               </Text>
-              <Tooltip title="只有掩码、未进入 key 池的数量（对账用），不参与网关路由，也不与上面的账号 key 数相加。">
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  {`仅掩码 ${formatCount(account.maskedKeyCount)}`}
-                </Text>
-              </Tooltip>
-              <Tooltip title="套餐余额 = 各套餐「总额 − 已用」的合计（¥）。它不是账号钱包，也不是 key 的余额，三者不相加。">
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  {`套餐 ${formatCount(account.subscriptions.length)} 个${subscriptionSummaryTail}`}
-                </Text>
-              </Tooltip>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {`仅掩码 ${formatCount(account.maskedKeyCount)}`}
+              </Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {`套餐 ${formatCount(account.subscriptions.length)} 个${subscriptionSummaryTail}`}
+              </Text>
             </div>
             <Table<SupplierSubscription>
               rowKey="subNo"
@@ -628,7 +603,7 @@ export function SupplierAccountDetailDrawer({
               columns={subscriptionColumns}
               dataSource={account.subscriptions}
               pagination={false}
-              locale={{ emptyText: <Text type="secondary" style={{ fontSize: 12 }}>这个账号名下没有套餐。</Text> }}
+              locale={{ emptyText: <Text type="secondary" style={{ fontSize: 12 }}>没有套餐</Text> }}
             />
           </DetailRow>
 

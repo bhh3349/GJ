@@ -63,7 +63,7 @@ function Dot({
   const tint = healthTint(health.tone);
   const balanceLine =
     account.balanceCents === null
-      ? '余额未知（不计入任何合计）'
+      ? '余额未知'
       : `余额 ${formatCents(account.balanceCents)}`;
   return (
     <Tooltip
@@ -84,7 +84,7 @@ function Dot({
            */}
           {account.depleted ? (
             <Text style={{ fontSize: 11, color: tokens.color.orange }}>
-              透支锁存：账号余额见底且套餐也不可用，名下 key 一并锁在池外
+              透支锁存 · 名下 key 在池外
             </Text>
           ) : null}
           {/* 废号池是另一根粘性轴（§21.4）：同样额外一行，不改点的颜色 —— 点的颜色只答"能不能干活"。 */}
@@ -93,7 +93,6 @@ function Dot({
               {`已进废号池${account.scrapReason === null ? '' : `（${SCRAP_REASON_TEXT[account.scrapReason]}）`}，名下 key 全部停用`}
             </Text>
           ) : null}
-          <Text style={{ fontSize: 11, opacity: 0.75 }}>{health.hint}</Text>
         </div>
       }
     >
@@ -175,25 +174,21 @@ export function SupplierFleetMatrix({
         <Text style={{ fontSize: 13, fontWeight: 600 }}>舰队点阵</Text>
         {ordered === null ? (
           <Text type={failed ? 'danger' : 'secondary'} style={{ fontSize: 12 }}>
-            {failed ? '整池账号没取回来，所以这里画不出点阵' : '正在取整池账号…'}
+            {failed ? '整池账号没取回来' : '正在取整池账号…'}
           </Text>
         ) : ordered.length === 0 ? (
           <Text type="secondary" style={{ fontSize: 12 }}>
-            这个上游还没有账号 —— 用下面「导入账号」开始
+            还没有账号
           </Text>
         ) : (
-          <Tooltip title="每个点是一个账号，颜色就是下面那一列「健康」（同一个说法）。点一个点，打开那个账号的详情。">
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {`${formatCount(ordered.length)} 个号 · 一个点一个号 · 问题档排左边，点它看详情`}
-            </Text>
-          </Tooltip>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {`${formatCount(ordered.length)} 个号`}
+          </Text>
         )}
         {partial ? (
-          <Tooltip title="这一块按取回的账号画。池子比一页上限还大时，点阵只覆盖取回的部分，不是全池。">
-            <Text style={{ fontSize: 11, color: tokens.color.warning }}>
-              {`只覆盖取回的 ${formatCount(covered)} / ${formatCount(accountTotal)} 个账号`}
-            </Text>
-          </Tooltip>
+          <Text style={{ fontSize: 11, color: tokens.color.warning }}>
+            {`只覆盖取回的 ${formatCount(covered)} / ${formatCount(accountTotal)} 个账号`}
+          </Text>
         ) : null}
       </div>
 

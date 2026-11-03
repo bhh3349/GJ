@@ -88,7 +88,7 @@ export function BalanceSyncSection({ upstreamId, showDrift = true }: BalanceSync
     >
       {sync.error && sync.data ? (
         <div style={{ marginBottom: tokens.space.md }}>
-          <ErrorState error={sync.error} onRetry={sync.reload} title="刷新失败，以下为上一次成功的数据" />
+          <ErrorState error={sync.error} onRetry={sync.reload} title="刷新失败，下方为旧数据" />
         </div>
       ) : null}
 
@@ -108,14 +108,12 @@ export function BalanceSyncSection({ upstreamId, showDrift = true }: BalanceSync
                   运行中
                 </Tag>
               ) : (
-                <Tooltip title="自动同步已关闭，未挂定时器。手动刷新不受影响。">
-                  <Tag
-                    bordered={false}
-                    style={{ marginInlineEnd: 0, background: tokens.tint.neutral, color: tokens.color.textSecondary }}
-                  >
-                    已关闭
-                  </Tag>
-                </Tooltip>
+                <Tag
+                  bordered={false}
+                  style={{ marginInlineEnd: 0, background: tokens.tint.neutral, color: tokens.color.textSecondary }}
+                >
+                  已关闭
+                </Tag>
               )}
             </StatLine>
             <StatLine label="基准间隔">
@@ -140,9 +138,7 @@ export function BalanceSyncSection({ upstreamId, showDrift = true }: BalanceSync
                   <span>{formatUntil(data.nextRunAt)}</span>
                 </Tooltip>
               ) : (
-                <Tooltip title="自动同步已关闭（nextRunAt=null），不是「还没排到」。">
-                  <Text type="secondary">—</Text>
-                </Tooltip>
+                <Text type="secondary">—</Text>
               )}
             </StatLine>
           </Space>

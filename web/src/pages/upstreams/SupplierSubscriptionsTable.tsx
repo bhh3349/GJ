@@ -158,11 +158,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
 
   const columns: ColumnsType<SupplierSubscriptionRow> = [
     {
-      title: (
-        <Tooltip title="掩码。归属来自服务端台账的 accountId；这里不按掩码去猜账号，猜错了会把一份台账记到别人头上。">
-          <span>账号</span>
-        </Tooltip>
-      ),
+      title: '账号',
       key: 'account',
       width: COLUMN_WIDTHS.account,
       onCell: (_row, index) => ({ rowSpan: spans[index ?? 0] ?? 1 }),
@@ -189,7 +185,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
       key: 'plan',
       width: COLUMN_WIDTHS.plan,
       render: (_: unknown, row) => {
-        const plan = row.planTitle ?? row.planSlug ?? '（上游未给套餐名）';
+        const plan = row.planTitle ?? row.planSlug ?? '未提供套餐名';
         return (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0 }}>
             <Text style={oneLine} title={plan}>
@@ -207,11 +203,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
       },
     },
     {
-      title: (
-        <Tooltip title="套餐剩余 = 总额 − 已用；任一端缺失就是「未知」。这不是账号 key 的余额，也不计进任何合计。">
-          <span>套餐剩余</span>
-        </Tooltip>
-      ),
+      title: '套餐剩余',
       key: 'remaining',
       width: COLUMN_WIDTHS.remaining,
       align: 'right',
@@ -224,9 +216,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
           <RemainingBar
             ratio={ratio}
             hint={
-              ratio === null
-                ? '算不出剩余占比（总额或已用缺失，或总额为 0）—— 不画一根 0% 的假条。'
-                : `剩余占总额 ${Math.round(ratio * 100)}%`
+              ratio === null ? '总额或已用缺失，不算占比' : `剩余占总额 ${Math.round(ratio * 100)}%`
             }
             value={<BalanceText value={remaining} />}
             caption={`总 ${formatCents(total)} · 已用 ${formatCents(used)}`}
@@ -235,11 +225,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
       },
     },
     {
-      title: (
-        <Tooltip title="套餐赠送的基础额度剩余（basic_token_total − basic_token_used），单位是 Token 个数 —— 调用基础模型时扣减，1M = 100 万 Token。它不是钱，因此不按钱渲染、不进任何金额合计；任一端缺失即「未知」。这不是账号 key 的余额。">
-          <span>基础额度（Token）</span>
-        </Tooltip>
-      ),
+      title: '基础额度（Token）',
       key: 'tokens',
       width: COLUMN_WIDTHS.tokens,
       align: 'right',
@@ -254,7 +240,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
             ratio={ratio}
             hint={
               ratio === null
-                ? '算不出剩余占比（Token 数缺失或总额为 0）—— 不画一根 0% 的假条。'
+                ? 'Token 数缺失，不算占比'
                 : `剩余占总额 ${Math.round(ratio * 100)}%（总额 ${formatCount(total)} Token，已用 ${formatCount(used)} Token）`
             }
             value={
@@ -280,7 +266,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
       render: (value: string | null) => (
         // 到期是**未来**时刻：`formatRelative` 是过去式专用（`Math.abs` + 一律拼「前」），
         // 复用它会把「还剩 29 天」显示成「29 天前」—— 2026-11-03 业主截图抓到的就是这个。
-        <Tooltip title={value ? formatIso(value) : '上游未给到期时间 —— 不按「永久」渲染，也不按「已过期」渲染。'}>
+        <Tooltip title={value ? formatIso(value) : undefined}>
           <Text type="secondary" style={{ ...oneLine, fontSize: 12 }}>
             {value ? formatUntil(value) : '未提供'}
           </Text>
@@ -288,11 +274,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
       ),
     },
     {
-      title: (
-        <Tooltip title="三态：自动续费 / 不自动 / 上游根本没给这个字段。合并成两态等于把「供应商没告诉我们」当成「不会自动续费」。">
-          <span>续费</span>
-        </Tooltip>
-      ),
+      title: '续费',
       dataIndex: 'autoRenew',
       width: COLUMN_WIDTHS.renew,
       render: (value: boolean | null) =>
@@ -319,11 +301,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
         ),
     },
     {
-      title: (
-        <Tooltip title="上游给的套餐自带 key 掩码。只读，永不进池、不参与网关路由。">
-          <span>套餐 key（掩码）</span>
-        </Tooltip>
-      ),
+      title: '套餐 key（掩码）',
       dataIndex: 'keyMasked',
       key: 'keyMasked',
       width: COLUMN_WIDTHS.key,
@@ -336,20 +314,18 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
             {value ?? '—'}
           </Text>
           {row.hasKey ? (
-            <Tooltip title="上游表示这个套餐带 key。它只以掩码存在 —— 建行等于造一把不可用凭据，所以不进池。">
-              <Tag
-                bordered={false}
-                style={{
-                  marginInlineEnd: 0,
-                  flex: 'none',
-                  fontSize: 10,
-                  background: tokens.tint.neutral,
-                  color: tokens.color.textSecondary,
-                }}
-              >
-                仅掩码
-              </Tag>
-            </Tooltip>
+            <Tag
+              bordered={false}
+              style={{
+                marginInlineEnd: 0,
+                flex: 'none',
+                fontSize: 10,
+                background: tokens.tint.neutral,
+                color: tokens.color.textSecondary,
+              }}
+            >
+              仅掩码
+            </Tag>
           ) : null}
         </div>
       ),
@@ -370,7 +346,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
       }}
     >
       <Space size={tokens.space.sm} align="center" wrap style={{ marginBottom: tokens.space.md }}>
-        <Text style={{ fontSize: 13, fontWeight: 600 }}>套餐台账（按账号分组）</Text>
+        <Text style={{ fontSize: 13, fontWeight: 600 }}>套餐台账</Text>
         {ledger.data ? (
           <Text type="secondary" style={{ fontSize: 12 }}>
             {day === null
@@ -388,8 +364,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
           message={`套餐台账共 ${formatCount(ledger.data?.total ?? 0)} 条，本页只取回前 ${formatCount(grouped.length)} 条`}
           description={
             <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-              分组表<Text strong style={{ fontSize: 12 }}>不跨页合并</Text> —— 画一个「下一页」会把同一个账号的套餐劈成两页。
-              要看全某个账号：展开账号行或打开它的详情，那里的 `subscriptions[]` 是该账号的全量。
+              分组不跨页合并，看全请进账号详情。
             </Text>
           }
         />
@@ -397,7 +372,7 @@ export function SupplierSubscriptionsTable({ upstreamId, identifierOf }: Supplie
 
       {ledger.error && ledger.data ? (
         <div style={{ marginBottom: tokens.space.md }}>
-          <ErrorState error={ledger.error} onRetry={ledger.reload} title="刷新失败，以下为上一次成功的数据" />
+          <ErrorState error={ledger.error} onRetry={ledger.reload} title="刷新失败，下方为旧数据" />
         </div>
       ) : null}
 

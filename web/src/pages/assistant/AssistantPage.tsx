@@ -111,7 +111,7 @@ export default function AssistantPage() {
   const onClear = useCallback(() => {
     modal.confirm({
       title: '清空对话',
-      content: '对话只存在当前页面内存里，清空后无法恢复，也不会留下任何记录。',
+      content: '对话只在当前页面内存里，清空后无法恢复。',
       okText: '清空',
       okButtonProps: { danger: true },
       cancelText: '取消',
@@ -164,7 +164,7 @@ export default function AssistantPage() {
               ghost={showContext}
               onClick={() => setShowContext((prev) => !prev)}
             >
-              观测上下文{logContext === null ? '' : ' · 已注入'}
+              上下文{logContext === null ? '' : ' · 已注入'}
             </Button>
             <Button
               size="small"
@@ -172,7 +172,7 @@ export default function AssistantPage() {
               disabled={!hasTurns || inFlight}
               onClick={onClear}
             >
-              清空对话
+              清空
             </Button>
           </Space>
         }
@@ -314,7 +314,7 @@ export default function AssistantPage() {
                 <Input.TextArea
                   value={draft}
                   autoSize={{ minRows: 2, maxRows: 6 }}
-                  placeholder="问点什么…（Enter 发送，Shift + Enter 换行）"
+                  placeholder="问点什么…"
                   disabled={inFlight}
                   onChange={(event) => setDraft(event.target.value)}
                   onKeyDown={(event) => {
@@ -343,9 +343,9 @@ export default function AssistantPage() {
                   >
                     {inFlight
                       ? slowFirstByte
-                        ? '仍在等待上游 —— 首字已超过 15s，不判失败；可继续等或取消'
-                        : '正在生成 —— 可随时取消，取消即 abort 上游'
-                      : `本轮模型：${model ?? '服务端缺省'}${logContext === null ? ' · 不注入日志' : ' · 注入命中的错误事件'}`}
+                        ? '仍在等待上游…'
+                        : '正在生成…'
+                      : `本轮模型：${model ?? '缺省'}${logContext === null ? '' : ' · 已注入日志'}`}
                   </Text>
                   <Space size={tokens.space.sm}>
                     {inFlight ? (
@@ -384,8 +384,7 @@ export default function AssistantPage() {
             <Panel
               size="sm"
               title="错误日志汇总"
-              description="一行一条错误事件，随窗口滚动更新；整行可复制，点一行把条件交给助手。"
-              hint="表里的行是错误事件端点的原样响应（默认近 1 小时、按时间倒序），归因那一列不裁切。顶上一排是各分型在计数窗口内的条数，点一下就能按那个分型问助手 —— 它的计数来自健康指标，和表里的行数不是同一个窗口，所以两个窗口分开标。"
+              description="点一行，把这一行的条件交给助手。"
               style={{ flex: '1 1 auto', minHeight: 320, overflow: 'auto' }}
             >
               <ErrorSummaryPanel

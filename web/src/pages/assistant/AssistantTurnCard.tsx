@@ -42,7 +42,7 @@ function CitationList({ citations }: { citations: readonly AssistantCitation[] }
       }}
     >
       <Text type="secondary" style={{ fontSize: 11, letterSpacing: '0.04em' }}>
-        数据引用 · {citations.length} 条
+        引用 · {citations.length} 条
       </Text>
 
       <div
@@ -98,11 +98,9 @@ function CitationList({ citations }: { citations: readonly AssistantCitation[] }
                   {formatIso(item.ts)}
                 </Text>
                 {item.model === null ? (
-                  <Tooltip title="未过鉴权的请求没有 clientModel，不是缺数据">
-                    <Text type="secondary" style={{ fontSize: 11 }}>
-                      模型未知
-                    </Text>
-                  </Tooltip>
+                  <Text type="secondary" style={{ fontSize: 11 }}>
+                    未知
+                  </Text>
                 ) : (
                   <Text style={{ fontFamily: tokens.font.mono, fontSize: 11 }}>{item.model}</Text>
                 )}
@@ -283,9 +281,7 @@ export function AssistantTurnCard({
             description={
               <div style={{ fontSize: 12, color: tokens.color.textSecondary }}>
                 <div>
-                  {error.status > 0
-                    ? `该错误码对应 HTTP ${error.status}`
-                    : '客户端侧诊断码（流未开或解析失败）'}
+                  {error.status > 0 ? `HTTP ${error.status}` : '客户端诊断码'}
                 </div>
                 {retryHint(error) === null ? null : <div>{retryHint(error)}</div>}
               </div>
@@ -303,7 +299,7 @@ export function AssistantTurnCard({
             message="响应中断 · 可重试"
             description={
               <span style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-                在收到终止帧前连接断开。已收到的文本保留在上方，重试会重新发这一轮问题。
+                已收到的文本保留在上方。
               </span>
             }
             action={retryButton}
@@ -316,11 +312,6 @@ export function AssistantTurnCard({
             type="warning"
             showIcon
             message="已取消"
-            description={
-              <span style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-                已取消，上游请求同时中断。
-              </span>
-            }
             action={retryButton}
           />
         ) : null}
@@ -334,8 +325,7 @@ export function AssistantTurnCard({
             message="上下文已被截断"
             description={
               <span style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-                本轮命中三重上限之一（messages 24 条 / 单条 8000 token / 总 16000 token / 注入 50 条 ×
-                ≤24h），服务端裁剪后作答 —— 回答不覆盖被裁掉的部分。
+                超出上限后被裁剪，回答不覆盖被裁掉的部分。
               </span>
             }
           />
@@ -343,7 +333,7 @@ export function AssistantTurnCard({
 
         {turn.seqGap ? (
           <div style={{ marginTop: tokens.space.sm }}>
-            <Tooltip title="SSE 帧的 seq 应逐帧加一；跳变说明中间有帧丢失，回答可能缺了一截">
+            <Tooltip title="中间有帧丢失，回答可能缺一截。">
               <Tag
                 bordered={false}
                 style={{

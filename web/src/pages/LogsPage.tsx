@@ -129,13 +129,13 @@ export default function LogsPage() {
     const result = await run('export', () => logsApi.list({ ...JSON.parse(queryKey), page: 1, pageSize: 200 }));
     if (result === null) return;
     if (result.items.length === 0) {
-      message.warning('当前筛选条件下没有记录可导出');
+      message.warning('没有可导出的记录');
       return;
     }
     const stamp = dayjs().format('YYYYMMDD-HHmmss');
     downloadCsv(toCsv(result.items), `sub-logs-${stamp}.csv`);
     if (result.total > result.items.length) {
-      message.warning(`当前筛选条件共 ${result.total} 条，本次导出前 ${result.items.length} 条（分页上限 200）`);
+      message.warning(`共 ${result.total} 条，本次导出前 ${result.items.length} 条`);
     } else {
       message.success(`已导出 ${result.items.length} 条`);
     }
@@ -220,11 +220,9 @@ export default function LogsPage() {
               {formatCount(row.tokens.prompt)} / {formatCount(row.tokens.completion)}
             </Text>
             {row.tokens.isEstimated ? (
-              <Tooltip title="上游未返回用量，按字符估算（is_estimated=1）。已计入配额，但不是上游真实报数。">
-                <Tag bordered={false} style={{ marginInlineEnd: 0, fontSize: 10, background: tokens.tint.warning, color: tokens.color.warning }}>
-                  估算
-                </Tag>
-              </Tooltip>
+              <Tag bordered={false} style={{ marginInlineEnd: 0, fontSize: 10, background: tokens.tint.warning, color: tokens.color.warning }}>
+                估算
+              </Tag>
             ) : null}
           </Space>
         </div>
@@ -342,7 +340,7 @@ export default function LogsPage() {
                   void exportCsv();
                 }}
               >
-                导出 CSV
+                导出
               </Button>
             ) : null}
             <Button
@@ -418,46 +416,40 @@ export default function LogsPage() {
                       setPage(1);
                     }}
                   />
-                  <Tooltip title="按模型名精确匹配">
-                    <Input.Search
-                      size="small"
-                      allowClear
-                      style={{ width: 190 }}
-                      placeholder="模型名"
-                      onSearch={(value) => {
-                        setModel(value);
-                        setPage(1);
-                      }}
-                    />
-                  </Tooltip>
-                  <Tooltip title="只支持精确状态码匹配">
-                    <Select
-                      allowClear
-                      size="small"
-                      style={{ width: 150 }}
-                      placeholder="全部状态码"
-                      value={status}
-                      options={STATUS_OPTIONS.map((value) => ({ label: String(value), value }))}
-                      onChange={(value: number | undefined) => {
-                        setStatus(value);
-                        setPage(1);
-                      }}
-                    />
-                  </Tooltip>
-                  <Tooltip title="默认不查已删除的上游 / key / 组；打开后按 id 过滤仍可命中">
-                    <Segmented
-                      size="small"
-                      value={includeDeleted ? 'with' : 'without'}
-                      options={[
-                        { label: '不含已删', value: 'without' },
-                        { label: '含已删', value: 'with' },
-                      ]}
-                      onChange={(value) => {
-                        setIncludeDeleted(value === 'with');
-                        setPage(1);
-                      }}
-                    />
-                  </Tooltip>
+                  <Input.Search
+                    size="small"
+                    allowClear
+                    style={{ width: 190 }}
+                    placeholder="模型名（精确）"
+                    onSearch={(value) => {
+                      setModel(value);
+                      setPage(1);
+                    }}
+                  />
+                  <Select
+                    allowClear
+                    size="small"
+                    style={{ width: 150 }}
+                    placeholder="全部状态码"
+                    value={status}
+                    options={STATUS_OPTIONS.map((value) => ({ label: String(value), value }))}
+                    onChange={(value: number | undefined) => {
+                      setStatus(value);
+                      setPage(1);
+                    }}
+                  />
+                  <Segmented
+                    size="small"
+                    value={includeDeleted ? 'with' : 'without'}
+                    options={[
+                      { label: '不含已删', value: 'without' },
+                      { label: '含已删', value: 'with' },
+                    ]}
+                    onChange={(value) => {
+                      setIncludeDeleted(value === 'with');
+                      setPage(1);
+                    }}
+                  />
                   <Text type="secondary" style={{ fontSize: 12 }}>
                     共 {formatCount(logs.data?.total ?? 0)} 条
                   </Text>
@@ -465,7 +457,7 @@ export default function LogsPage() {
 
                 {logs.error && logs.data ? (
                   <div style={{ marginBottom: tokens.space.md }}>
-                    <ErrorState error={logs.error} onRetry={logs.reload} title="刷新失败，以下为上一次成功的数据" />
+                    <ErrorState error={logs.error} onRetry={logs.reload} title="刷新失败，下方为旧数据" />
                   </div>
                 ) : null}
 
@@ -512,7 +504,7 @@ export default function LogsPage() {
               <>
                 {audit.error && audit.data ? (
                   <div style={{ marginBottom: tokens.space.md }}>
-                    <ErrorState error={audit.error} onRetry={audit.reload} title="刷新失败，以下为上一次成功的数据" />
+                    <ErrorState error={audit.error} onRetry={audit.reload} title="刷新失败，下方为旧数据" />
                   </div>
                 ) : null}
 

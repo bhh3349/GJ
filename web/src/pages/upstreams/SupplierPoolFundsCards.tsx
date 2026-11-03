@@ -13,7 +13,7 @@
  *   剩余 Token**，调用基础模型时扣减，1 个 = 1 个 Token。所以这一格**只给 Token 计数
  *   （「万」为主单位）、绝不折元**；三个池子也因此**绝不可相加**（两个是钱、一个是量）。
  */
-import { Tooltip, Typography } from 'antd';
+import { Typography } from 'antd';
 import type { ReactNode } from 'react';
 
 import { supplierCapabilities, type Upstream } from '@/api/types';
@@ -34,14 +34,13 @@ interface PoolCardProps {
   caption: ReactNode;
   /** 尺寸档：钱包 > 高级额度 > 基础额度，用视觉层级表达"能花的钱"到"不确定的量"。 */
   size: 'lg' | 'md' | 'sm';
-  hint: string;
   /** 数值取不到时的补充文案（比如"合计只覆盖取回的部分"）。 */
   pending?: string | undefined;
 }
 
 const SIZE_FONT: Record<PoolCardProps['size'], number> = { lg: 26, md: 21, sm: 17 };
 
-function PoolCard({ label, unit, value, caption, size, hint, pending }: PoolCardProps) {
+function PoolCard({ label, unit, value, caption, size, pending }: PoolCardProps) {
   return (
     <div
       style={{
@@ -73,21 +72,19 @@ function PoolCard({ label, unit, value, caption, size, hint, pending }: PoolCard
           {unit}
         </span>
       </div>
-      <Tooltip title={hint}>
-        <div
-          style={{
-            fontSize: SIZE_FONT[size],
-            fontWeight: 600,
-            letterSpacing: '-0.02em',
-            fontVariantNumeric: 'tabular-nums',
-            lineHeight: 1.15,
-            color: tokens.color.textPrimary,
-            minHeight: SIZE_FONT[size] * 1.15,
-          }}
-        >
-          {value}
-        </div>
-      </Tooltip>
+      <div
+        style={{
+          fontSize: SIZE_FONT[size],
+          fontWeight: 600,
+          letterSpacing: '-0.02em',
+          fontVariantNumeric: 'tabular-nums',
+          lineHeight: 1.15,
+          color: tokens.color.textPrimary,
+          minHeight: SIZE_FONT[size] * 1.15,
+        }}
+      >
+        {value}
+      </div>
       <div style={{ fontSize: 11, color: tokens.color.textTertiary, lineHeight: 1.5 }}>{caption}</div>
       {pending ? (
         <div style={{ fontSize: 11, color: tokens.color.warning, lineHeight: 1.5 }}>{pending}</div>
@@ -124,17 +121,9 @@ export function SupplierPoolFundsCards({ funds, upstream }: SupplierPoolFundsCar
         <Text style={{ fontSize: 13, fontWeight: 600 }}>
           {hasPlans ? '账号池三个资金池' : '账号池钱包'}
         </Text>
-        <Tooltip
-          title={
-            hasPlans
-              ? '钱包是上游账号里的钱；高级额度是套餐里的钱；基础额度是套餐赠送的剩余 Token（不是钱）。三笔各自花各自的、两个量纲，网关选用 key 时看的也不是这三个数之和。'
-              : '这家上游只有账号钱包一笔钱（没有套餐概念，也就没有套餐额度那两个池子）。'
-          }
-        >
-          <Text type="secondary" style={{ fontSize: 11 }}>
-            {hasPlans ? '互不相通 · 不可相加' : '唯一的钱'}
-          </Text>
-        </Tooltip>
+        <Text type="secondary" style={{ fontSize: 11 }}>
+          {hasPlans ? '互不相通 · 不可相加' : '唯一的钱'}
+        </Text>
         {!funds.complete ? (
           <Text style={{ fontSize: 11, color: tokens.color.warning }}>
             {`只取回 ${formatCount(funds.wallet.countedCount + funds.wallet.unknownCount)} / ${formatCount(funds.accountTotal)} 个账号`}
@@ -160,7 +149,6 @@ export function SupplierPoolFundsCards({ funds, upstream }: SupplierPoolFundsCar
               )}
             </>
           }
-          hint="账号级钱包合计。与 key 级余额是两个口径：这一格的钱不是 key 的余额，两者不相加。"
           pending={walletTotal === null ? partialNote : undefined}
         />
         {!hasPlans ? null : (
@@ -173,10 +161,8 @@ export function SupplierPoolFundsCards({ funds, upstream }: SupplierPoolFundsCar
           caption={
             <>
               {`${formatCount(funds.premium.countedCount)} 条套餐计入合计 · ${formatCount(funds.premium.unknownCount)} 条缺额（未知，不计入）`}
-              <div>套餐额度不是 key 余额，不进任何 key 合计，也不参与网关准入判断。</div>
             </>
           }
-          hint="Σ(套餐 amount_total − amount_used)。任一端缺失即视为未知，不补 0。"
           pending={premiumTotal === null ? partialNote : undefined}
         />
         <PoolCard
@@ -195,10 +181,9 @@ export function SupplierPoolFundsCards({ funds, upstream }: SupplierPoolFundsCar
           caption={
             <>
               {`${formatCount(funds.basic.countedCount)} 条套餐计入 · ${formatCount(funds.basic.unknownCount)} 条缺额（未知，不计入）`}
-              <div>套餐赠送的剩余 Token，调用基础模型时扣减；1M = 100 万 Token，它不是钱。</div>
+              <div>1M = 100 万 Token</div>
             </>
           }
-          hint="套餐赠送的基础额度剩余 = Σ(basic_token_total − basic_token_used)，单位是 Token 个数。调用基础模型时扣减；它不是钱，所以不与上面两个资金池相加。"
           pending={basicTotal === null ? partialNote : undefined}
         />
           </>

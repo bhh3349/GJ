@@ -97,7 +97,7 @@ export function accountHealthOf(account: SupplierAccount): AccountHealth {
       key: 'login-failed',
       label: '登录失败',
       tone: 'error',
-      hint: '这一轮没能登录上游。名下 key 仍在，但账号级的余额与套餐刷不新。',
+      hint: '登录不上，余额与套餐刷不新。',
     };
   }
   if (account.status === 'session_expired') {
@@ -105,7 +105,7 @@ export function accountHealthOf(account: SupplierAccount): AccountHealth {
       key: 'session-expired',
       label: '会话过期',
       tone: 'error',
-      hint: '存档会话已过期。有存档密码的号可以点「重新登录」自动换一本。',
+      hint: '需重新登录才能刷新。',
     };
   }
   if (account.status === 'unknown') {
@@ -113,7 +113,7 @@ export function accountHealthOf(account: SupplierAccount): AccountHealth {
       key: 'never-checked',
       label: '未查询过',
       tone: 'muted',
-      hint: '从没成功查过这个号。「未查询过」不是「正常」，两者在数据上是两件事。',
+      hint: '还没成功查过，不等于正常。',
     };
   }
   const balance = account.balanceCents;
@@ -122,7 +122,7 @@ export function accountHealthOf(account: SupplierAccount): AccountHealth {
       key: 'balance-unknown',
       label: '余额未知',
       tone: 'muted',
-      hint: '账号能登录，但这次没拿到余额。未知不计入任何合计，也不参与低余额提示。',
+      hint: '余额未知，不计入合计。',
     };
   }
   if (balance < 0) {
@@ -130,7 +130,7 @@ export function accountHealthOf(account: SupplierAccount): AccountHealth {
       key: 'exhausted',
       label: '额度耗尽',
       tone: 'orange',
-      hint: '上游侧已触到额度上限。实测超出只有几毛，是封顶特征，不是欠费 —— 名下 key 会开始拿不到流量。',
+      hint: '已触顶，名下 key 开始拿不到流量。',
     };
   }
   if (balance < LOW_BALANCE_CENTS) {
@@ -138,14 +138,14 @@ export function accountHealthOf(account: SupplierAccount): AccountHealth {
       key: 'low',
       label: '余额偏低',
       tone: 'warning',
-      hint: `余额不足 ¥${(LOW_BALANCE_CENTS / 100).toFixed(2)}，还能用一阵，但离停止供应不远了。`,
+      hint: `余额不足 ¥${(LOW_BALANCE_CENTS / 100).toFixed(2)}，快停止供应。`,
     };
   }
   return {
     key: 'ok',
     label: '正常',
     tone: 'success',
-    hint: '能登录，余额也在阈值之上。',
+    hint: '能登录，余额充足。',
   };
 }
 

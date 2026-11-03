@@ -215,9 +215,7 @@ export function GroupModelsDrawer({ group, onClose, onSaved }: GroupModelsDrawer
       }
     >
       <Paragraph type="secondary" style={{ fontSize: 12, marginTop: 0 }}>
-        授权是按<strong>模型名</strong>判定的：这个组下的网关 key 只能调用被授权的模型，
-        其余一律 403。<Text strong>清空选择 = 不限</Text>（可用全部已启用模型）——
-        没有第三种状态，"一个都不许用"请改用禁用整个组。
+        清空选择 = 不限。要「一个都不许用」请禁用整个组。
       </Paragraph>
 
       {conflict ? (
@@ -229,12 +227,7 @@ export function GroupModelsDrawer({ group, onClose, onSaved }: GroupModelsDrawer
           description={
             <Space direction="vertical" size={tokens.space.xs}>
               <Text style={{ fontSize: 12 }}>
-                授权与配额共用同一个版本号（<Text code style={{ fontSize: 11 }}>revision</Text>），
-                别人先改过这个组，所以你这一份改动没写进去（<Text code style={{ fontSize: 11 }}>REVISION_MISMATCH</Text>）。
-              </Text>
-              <Text style={{ fontSize: 12 }}>
-                点下面的「重读最新」拿回服务端当前授权与版本号，再重新选一次 ——
-                重读会<strong>丢弃你这次的选择</strong>，这里不替你自动合并（谁合并都可能合掉对方的意思）。
+                重读会<strong>丢弃你这次的选择</strong>。
               </Text>
               <Button size="small" loading={isPending(`reread:${groupId ?? ''}`)} onClick={() => { void reread(); }}>
                 重读最新
@@ -251,7 +244,7 @@ export function GroupModelsDrawer({ group, onClose, onSaved }: GroupModelsDrawer
           message="候选模型列表读取失败"
           description={
             <Space direction="vertical" size={tokens.space.xs}>
-              <Text style={{ fontSize: 12 }}>授权现状照常显示，但要改动需要候选列表。</Text>
+              <Text style={{ fontSize: 12 }}>要改动需要候选列表。</Text>
               <Button size="small" onClick={() => { models.reload(); upstreams.reload(); }}>
                 重试
               </Button>
@@ -264,7 +257,7 @@ export function GroupModelsDrawer({ group, onClose, onSaved }: GroupModelsDrawer
         <ErrorState
           error={current.error}
           onRetry={current.reload}
-          title="授权读取失败（`GET /api/groups/:id/models`）"
+          title="授权读取失败"
         />
       ) : (
         <>
@@ -287,10 +280,7 @@ export function GroupModelsDrawer({ group, onClose, onSaved }: GroupModelsDrawer
               description={
                 <Text style={{ fontSize: 12 }}>
                   <Text code style={{ fontSize: 11 }}>{offList.join('、')}</Text>
-                  {' '}不在「已启用模型档案 ∩ 已启用上游」里，所以在下面的选择框里看不到。
-                  它们仍保留在授权中（授权是长期策略，停用可能只是今天的事），
-                  但现在打不通 —— 要恢复就把档案/上游重新启用，要去掉就取消勾选后保存
-                  （取消勾选会从授权里移除它）。
+                  {' '}不在可选列表里，仍留在授权中；取消勾选并保存才移除。
                 </Text>
               }
             />
@@ -298,7 +288,7 @@ export function GroupModelsDrawer({ group, onClose, onSaved }: GroupModelsDrawer
           <Select
             mode="multiple"
             style={{ width: '100%' }}
-            placeholder="选择该组可调用的模型；留空 = 不限"
+            placeholder="选择模型；留空 = 不限"
             value={draft ?? []}
             onChange={(next: string[]) => setDraft(next)}
             options={[
@@ -315,7 +305,7 @@ export function GroupModelsDrawer({ group, onClose, onSaved }: GroupModelsDrawer
                   <span>{option.label}</span>
                   {count > 1 ? (
                     <Text type="secondary" style={{ fontSize: 11 }}>
-                      （{count} 条档案已授权）
+                      （{count} 条档案）
                     </Text>
                   ) : null}
                 </Space>
@@ -326,13 +316,13 @@ export function GroupModelsDrawer({ group, onClose, onSaved }: GroupModelsDrawer
             notFoundContent={
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="没有已启用的模型档案。先在「模型档案」页启用，再来授权。"
+                description="没有已启用的模型档案。"
               />
             }
           />
           {draft !== undefined && draft.length === 0 && current.data?.models !== null ? (
             <Paragraph type="warning" style={{ fontSize: 12, marginTop: tokens.space.sm, marginBottom: 0 }}>
-              保存后将清空该组的全部授权行（组恢复为「不限」）。
+              保存将清空该组全部授权行（恢复「不限」）。
             </Paragraph>
           ) : null}
           {current.data !== null && current.data.authorizedModels.length > 0 ? (
@@ -356,10 +346,7 @@ export function GroupModelsDrawer({ group, onClose, onSaved }: GroupModelsDrawer
             message="改动立即生效"
             description={
               <Text style={{ fontSize: 12, color: tokens.color.textSecondary }}>
-                网关按请求实时读授权：保存后该组的 key 打未授权模型会立刻收到 403
-                （<Text code style={{ fontSize: 11 }}>MODEL_NOT_AUTHORIZED</Text>），不需要重启或等待。
-                授权与配额共用同一个版本号 —— 若保存时提示版本冲突，说明别人刚改过这个组，
-                重开抽屉即可拿到最新授权。
+                保存后该组的 key 打未授权模型会立刻收到 403。
               </Text>
             }
           />

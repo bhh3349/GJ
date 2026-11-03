@@ -143,11 +143,7 @@ export function ChangePasswordModal({ open, onClose }: ChangePasswordModalProps)
             showIcon
             message="密码已改"
             description={
-              <Text style={{ fontSize: 12 }}>
-                该账号在<Text strong>其他设备</Text>上的会话已经全部失效（这正是改密码的作用）。
-                你现在这一条会话保留着，所以不会被弹回登录页 —— 但下次登录要用
-                <Text strong>新密码</Text>。
-              </Text>
+              <Text style={{ fontSize: 12 }}>其他设备的会话已全部失效；本会话保留，下次登录用新密码。</Text>
             }
           />
         </Space>
@@ -194,7 +190,7 @@ export function ChangePasswordModal({ open, onClose }: ChangePasswordModalProps)
                 { required: true, message: '请输入新密码' },
                 { min: MIN_LENGTH, message: `至少 ${MIN_LENGTH} 位` },
               ]}
-              extra={`至少 ${MIN_LENGTH} 位（与建号同一把尺子，判据在服务端）。`}
+              extra={`至少 ${MIN_LENGTH} 位`}
             >
               <Input.Password autoComplete="new-password" placeholder="••••••••" />
             </Form.Item>

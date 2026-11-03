@@ -84,10 +84,10 @@ export function deleteUpstream({ modal, upstream, onDeleted, onFailure }: Delete
         if (!force && isApiError(error) && error.code === 'UPSTREAM_HAS_KEYS') {
           const counts = detailCounts(error.details, upstream);
           modal.confirm({
-            title: `「${upstream.name}」下还有从属资源，确定一并删除？`,
+            title: `删除「${upstream.name}」及其从属资源？`,
             width: 480,
             content: <DeleteUpstreamBody name={upstream.name} counts={counts} />,
-            okText: '连同从属资源删除',
+            okText: '一并删除',
             okButtonProps: { danger: true },
             cancelText: '取消',
             onOk: () => {

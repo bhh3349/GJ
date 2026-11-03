@@ -1152,7 +1152,7 @@ export default function SupplierAccountsPage() {
                       }}
                     />
                     {/* 废号池三态（§21.4 v1.19.0）：与左边状态、本地筛都是正交的筛选轴。 */}
-                    <Tooltip title="废号池 = 套餐余量与账号余额同时见底的号（或套餐过期且余额见底），名下 key 已全部停用；进池是粘性标记，只有人工移出才出池。">
+                    <Tooltip title="判据同「废号」列；出池只能人工">
                       <Segmented
                         size="small"
                         disabled={localRows !== null}

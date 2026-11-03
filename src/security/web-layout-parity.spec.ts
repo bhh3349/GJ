@@ -319,6 +319,31 @@ describe('web 排版防回退锁（2026-10-12 事故）', () => {
     expect(1662).toBeGreaterThan(AVAIL_WIDTH);
   });
 
+  it('「标签 / Key」列只画标签 + 掩码，不掺调用状态（业主 2026-11-03：调用跟标签没关系）', () => {
+    // 事故本体：建 key 自动首调保活（v1.25.0 / ADR-0050）落地后，最"顺手"的错法就是把
+    // 「未调用 / 已调用 / 试调结果」画到标签旁边。业主原话：「跟标签状态什么的没关系，
+    // 别把调用这个改到标签上面好吗？以前的显示套餐名称挺好的」。
+    // 口径：标签列只答"这把 key 是谁"（套餐 key 的标签后端落 `套餐-<planTitle>`，如「套餐-轻享版」）；
+    // 调用状态归独立的「首次调用」列与行内「试调」结果，两者都不许渗进这一列。
+    const page = readFileSync(join(webSrcRoot, 'pages', 'KeysPage.tsx'), 'utf8');
+    const start = page.indexOf("title: '标签 / Key'");
+    expect(start).toBeGreaterThan(0);
+    const seg = page.slice(start, page.indexOf("title: '上游'", start));
+
+    // 正腿：这一列的数据面只有 label 与 maskedKey。
+    expect(seg).toMatch(/row\.label/);
+    expect(seg).toMatch(/row\.maskedKey/);
+
+    const leaksCallState = (s: string): string[] =>
+      ['probeById', 'firstUsedAt', 'PROBE_LABEL', '未调用', '已调用', '试调'].filter((k) => s.includes(k));
+    expect(leaksCallState(seg)).toEqual([]);
+
+    // 变异样本：把试调结果塞进标签列，同一判据必须当场报出来（否则这条锁是恒真摆设）。
+    const mutated = seg.replace('{row.maskedKey}', '{probeById[row.id]?.short}');
+    expect(mutated).not.toBe(seg);
+    expect(leaksCallState(mutated)).toEqual(['probeById']);
+  });
+
   it('账号池表：操作列右冻结、首列不冻（业主 2026-11-03 纠正：成对冻结撤左腿）', () => {
     // 事故本体：`scroll={{ x: 1894 }}` + 11 列清一色给宽，1440 视口（实测可用 1166px）白白滚一屏；
     // 操作列在横向滚动时滑出视野，业主原话「把操作那一列变成冻结列，永远常在」。

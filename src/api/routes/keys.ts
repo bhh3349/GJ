@@ -20,12 +20,12 @@ import {
 } from '../../db/repo/keys.js';
 import { clearKeyDepletedAndEnable } from '../../db/repo/depletion-latch.js';
 import { ApiError } from '../errors.js';
-import { auditWrite } from '../http.js';
+import { auditWrite, captureAuditActor } from '../http.js';
 import { idParam, includeDeletedProp, nullableInteger, nullableString, pageProps, revisionProp } from '../schemas.js';
 import { assertQueryable } from '../services/balance-query.js';
 import { countRefreshableKeys, refreshBalances } from '../services/balance-refresh.js';
 import { runKeyBalanceTest, describeTestForAudit } from '../services/balance-selftest.js';
-import { probeKey } from '../services/key-probe.js';
+import { probeKey, probeKeyOnce } from '../services/key-probe.js';
 import { startTask } from '../task-runner.js';
 import type { ApiContext } from '../app.js';
 
@@ -195,6 +195,10 @@ export function registerKeyRoutes(app: FastifyInstance, ctx: ApiContext): void {
         targetId: created.id,
         detail: created.maskedKey,
       });
+      // 建 key 自动保活（ADR-0050 / 契约 §3.1）：新 key 落库后**立刻用真 key 打一次上游**。
+      // fire-and-forget —— 不阻塞这个 201、不重试、不碰 first_used_at / 健康态，
+      // 结论只落一条 `key.probe` 审计（detail 前缀 `auto=1`）。
+      probeKeyOnce(db, created.id, config.masterKey, ctx.supplier.fetchImpl, captureAuditActor(req, config));
       return reply.code(201).send(created);
     },
   );

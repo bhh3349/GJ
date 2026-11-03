@@ -147,6 +147,17 @@ function cookieOf(call: Call, name: string): string | null {
 /** TokenRhythm 驱动器该打（与不该打）的全部路径 —— 分发对错的唯一判据。 */
 const TR_PATHS = new Set(['/api/me', '/api/wallet/summary', '/api/api-keys']);
 
+/**
+ * 数据面路径：**不属于任何驱动器的分发面**。
+ *
+ * v1.25.0 起，建 key 落库后会立刻用新 key 真打一次上游（建 key 首调保活，ADR-0050）——
+ * 那一发是 `key-probe` 打的，走的是 OpenAI 兼容的数据面端点（无白名单时 `/v1/models`），
+ * 不是 TokenRhythm 驱动器。判据因此把它按**精确路径**摘出去，驱动器的管理面路径仍必须
+ * 全部落在 `TR_PATHS` 里（写死这两条而不是放宽成 `/v1/` 前缀，正是为了让"驱动器误打
+ * 数据面"这件事仍然会被抓住）。
+ */
+const KEEPALIVE_PATHS = new Set(['/v1/models', '/v1/chat/completions']);
+
 // ---------------------------------------------------------------------------
 // 夹具
 // ---------------------------------------------------------------------------
@@ -317,7 +328,7 @@ function accountRow(db: Db, id: string): Record<string, unknown> {
 
 /** 断言：发出的请求**全部**落在 TokenRhythm 的路径集里 —— TierFlow 的路径一条都不该出现。 */
 function assertOnlyTokenrhythmPaths(h: Harness): void {
-  const foreign = h.upstream.calls.filter((c) => !TR_PATHS.has(c.path));
+  const foreign = h.upstream.calls.filter((c) => !TR_PATHS.has(c.path) && !KEEPALIVE_PATHS.has(c.path));
   expect(
     foreign.map((c) => `${c.method} ${c.path}`),
     '分发到了 TokenRhythm 之外的路径',

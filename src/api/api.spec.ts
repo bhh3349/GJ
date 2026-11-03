@@ -20,11 +20,20 @@ import { sha256Hex } from '../db/crypto.js';
 import { findGroupByGatewayKeyHash } from '../db/repo/groups.js';
 import { upsertKeyRuntimeStates } from '../db/repo/key-runtime.js';
 import { upsertModelFromSync } from '../db/repo/models.js';
+import { createKey as seedKeyRow } from '../db/repo/keys.js';
+import { createUpstream as seedUpstreamRow } from '../db/repo/upstreams.js';
 import { buildApp } from './app.js';
 import { bootstrapAdmin } from './auth.js';
 
 const ADMIN_USER = 'admin';
 const ADMIN_PASS = 'probe-admin-pass-1';
+/** 与 `makeConfig` 里那把一致：用仓储层种 key 行时要用它加密，路由读到的才是同一份。 */
+const MASTER_KEY = Buffer.from('2a'.repeat(32), 'hex');
+
+/** 缺省出站桩：**一叫就炸**。本套用例一个真网络请求都不发。 */
+const offlineFetch = (async (input: unknown) => {
+  throw new Error(`用例不该出站：${String(input)}`);
+}) as unknown as typeof fetch;
 
 /** 运行时拼装的假上游 key：形状像真的，但源码里没有这个字面量。 */
 function probeSecret(): string {
@@ -124,7 +133,9 @@ async function setup(
     // 出站缝在 `buildApp` 那一刻定格。要换掉它只能从这里注入，**不能**事后
     // `vi.stubGlobal('fetch', …)`：那对已经拿定重放的缺省值无效，用例会打到真网络上，
     // 然后以"超时"的形式红 —— 红得与契约毫无关系。
-    ...(opts.fetchImpl === undefined ? {} : { supplier: { fetchImpl: opts.fetchImpl } }),
+    // **缺省给一叫就炸的桩**而不是真 fetch：建 key 自动首调（ADR-0050）之后，
+    // 任何一条建 key 路径都会出站一次 —— 没桩的用例会在 cleanup 里等真网络超时。
+    supplier: { fetchImpl: opts.fetchImpl ?? offlineFetch },
     ...(opts.adminWebDist === undefined ? {} : { adminWebDist: opts.adminWebDist }),
   });
   bootstrapAdmin(db, { ADMIN_USERNAME: ADMIN_USER, ADMIN_PASSWORD: ADMIN_PASS });
@@ -1204,7 +1215,9 @@ describe('余额自测（契约 §2 · M6-A）：同步、诊断语义、绝不�
     const h = await setup({ fetchImpl: probeFetch });
     const upstreamId = await createUpstream(h);
     const secret = probeSecret();
-    const key = await createKey(h, upstreamId, { key: secret });
+    // 仓储层种 key：本用例测的是**手动**探活端点。走 POST /api/keys 会先触发建 key 首调
+    // （v1.25.0 / ADR-0050），把 10s 频控与一条 auto=1 审计都占掉 —— 那是下一个用例的事。
+    const key = seedKeyRow(h.db, { upstreamId, key: secret, category: 'balance' }, MASTER_KEY);
     const before = h.db.prepare('SELECT revision, updated_at FROM upstream_keys WHERE id = ?').get(key.id);
 
     const res = await h.app.inject({
@@ -1234,7 +1247,8 @@ describe('余额自测（契约 §2 · M6-A）：同步、诊断语义、绝不�
   it('key 探活：未知 key 404、model 不在白名单 400（details.field=model）', async () => {
     const h = await setup();
     const upstreamId = await createUpstream(h);
-    const key = await createKey(h, upstreamId, { key: probeSecret() });
+    // 仓储层种 key（同上一条理由：不给建 key 首调占掉 10s 频控）
+    const key = seedKeyRow(h.db, { upstreamId, key: probeSecret(), category: 'balance' }, MASTER_KEY);
     h.db.prepare('UPDATE upstream_keys SET model_limits = ? WHERE id = ?').run('allowed-model', key.id);
 
     const missing = await h.app.inject({ method: 'POST', url: '/api/keys/key_ghost/probe', headers: auth(h) });
@@ -1250,6 +1264,63 @@ describe('余额自测（契约 §2 · M6-A）：同步、诊断语义、绝不�
     const err = badModel.json() as { code: string; details?: { field?: string } };
     expect(err.code).toBe('INVALID_PARAM');
     expect(err.details?.field).toBe('model');
+    await closeHarness(h);
+  });
+
+  it('建 key 自动首调（v1.25.0 / ADR-0050）：落库即真打一次上游，审计 auto=1，不阻塞 201、不写 first_used_at', async () => {
+    const probeCalls: string[] = [];
+    const probeFetch = (async (input: unknown) => {
+      probeCalls.push(String(input));
+      return new Response(JSON.stringify({ object: 'list', data: [{ id: 'm1' }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as unknown as typeof fetch;
+    const h = await setup({ fetchImpl: probeFetch });
+    const upstreamId = await createUpstream(h);
+    const secret = probeSecret();
+
+    const res = await h.app.inject({
+      method: 'POST',
+      url: '/api/keys',
+      headers: auth(h),
+      payload: { upstreamId, key: secret, category: 'balance' },
+    });
+    // fire-and-forget：201 不等探活 —— 响应本身一个字都没变
+    expect(res.statusCode, res.body).toBe(201);
+    const keyId = (res.json() as { id: string }).id;
+
+    // 等自动首调的审计落库（后台动作，轮询至多 1s）
+    const deadline = Date.now() + 1_000;
+    let row: { actor: string; result: string; detail: string } | undefined;
+    for (;;) {
+      row = h.db
+        .prepare("SELECT actor, result, detail FROM audit_log WHERE action = 'key.probe' AND target_id = ?")
+        .get(keyId) as { actor: string; result: string; detail: string } | undefined;
+      if (row !== undefined || Date.now() > deadline) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(row, '自动首调的审计 1s 内没有落库').toBeDefined();
+    expect(row!.result).toBe('ok');
+    expect(row!.detail).toContain('auto=1');
+    expect(row!.detail).not.toContain(secret);
+    // 手动建 key 记的是操作者（captureAuditActor），不是 'system'
+    expect(row!.actor).toBe('admin');
+
+    // 出站正好一次：无白名单 → 退化为 /v1/models（零 token）
+    expect(probeCalls).toEqual(['https://upstream.example.com/v1/models']);
+
+    // 口径隔离：首调是管理面动作 —— first_used_at（客户流量时刻）与 usage_logs 都不许动
+    expect(h.db.prepare('SELECT first_used_at FROM upstream_keys WHERE id = ?').get(keyId)).toEqual({
+      first_used_at: null,
+    });
+    expect((h.db.prepare('SELECT COUNT(*) AS n FROM usage_logs').get() as { n: number }).n).toBe(0);
+
+    // 频控是共享的：刚自动首调完就手点「试调一次」→ 429 + retryAfterSeconds（"就一次"包括这一次）
+    const again = await h.app.inject({ method: 'POST', url: `/api/keys/${keyId}/probe`, headers: auth(h) });
+    expect(again.statusCode).toBe(429);
+    expect((again.json() as { code: string }).code).toBe('TOO_MANY_ATTEMPTS');
+    expect((again.json() as { details?: { retryAfterSeconds?: number | null } }).details?.retryAfterSeconds).toBeGreaterThan(0);
     await closeHarness(h);
   });
 

@@ -20,7 +20,7 @@ import { sha256Hex } from '../../db/crypto.js';
 import { createUpstream } from '../../db/repo/upstreams.js';
 import { createKey } from '../../db/repo/keys.js';
 import { ApiError } from '../errors.js';
-import { probeKey, probeCooldownMs } from './key-probe.js';
+import { probeKey, probeCooldownMs, probeKeyOnce, AUTO_PROBE_AUDITOR } from './key-probe.js';
 
 const MASTER_KEY = Buffer.from('3b'.repeat(32), 'hex');
 const dirs: string[] = [];
@@ -297,5 +297,126 @@ describe('频控与明文纪律', () => {
     const b = fakeFetch([jsonRes(200, { object: 'list', data: [{ id: 'm2' }] })]);
     const result = await probeKey(db, keyB, MASTER_KEY, b.fetch);
     expect(result.ok).toBe(true);
+  });
+});
+
+/* ------------------------------------------------------------------ */
+/* 建 key 首调保活（ADR-0050）：fire-and-forget，结论只落一条审计        */
+/* ------------------------------------------------------------------ */
+
+interface AutoProbeAuditRow {
+  actor: string;
+  ip: string;
+  action: string;
+  result: string;
+  detail: string;
+}
+
+/** 等那条自动首调审计落库。fire-and-forget 没有返回值，只能从库里看它落没落。 */
+async function waitForAutoProbeAudit(db: Db, keyId: string, deadlineMs = 1_000): Promise<AutoProbeAuditRow> {
+  const started = Date.now();
+  for (;;) {
+    const row = db
+      .prepare("SELECT actor, ip, action, result, detail FROM audit_log WHERE action = 'key.probe' AND target_id = ?")
+      .get(keyId) as AutoProbeAuditRow | undefined;
+    if (row !== undefined) return row;
+    if (Date.now() - started > deadlineMs) throw new Error('自动首调的审计 1s 内没有落库');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+describe('probeKeyOnce（建 key 首调保活）', () => {
+  it('ok 腿：落一条 auto=1 的 key.probe；零 usage_logs、first_used_at 不写、key 行一字不动', async () => {
+    const { db } = setup();
+    const keyId = seedKey(db, 'auto-ok');
+    const before = snapshotKey(db, keyId);
+    const { fetch, calls } = fakeFetch([jsonRes(200, { object: 'list', data: [{ id: 'm1' }] })]);
+
+    probeKeyOnce(db, keyId, MASTER_KEY, fetch, { actor: 'admin-9', ip: '10.0.0.9' });
+    const row = await waitForAutoProbeAudit(db, keyId);
+
+    expect(row.action).toBe('key.probe');
+    expect(row.result).toBe('ok');
+    expect(row.detail).toContain('auto=1');
+    expect(row.detail).toContain('kind=models');
+    expect(row.detail).toContain('ok=1');
+    // 调用者身份原样落库：手动建 key 记的是点按钮的那个人
+    expect(row.actor).toBe('admin-9');
+    expect(row.ip).toBe('10.0.0.9');
+    expect(row.detail).not.toContain('sk-');
+
+    expect(calls).toHaveLength(1);
+    // 口径隔离：首调是**管理面动作**，不是客户流量 —— 首调时刻不许写进 first_used_at
+    const after = snapshotKey(db, keyId);
+    expect(after.first_used_at).toBeNull();
+    expect(after.revision).toBe(before.revision);
+    expect(after.updated_at).toBe(before.updated_at);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM usage_logs').get() as { n: number }).n).toBe(0);
+    expect((db.prepare('SELECT COUNT(*) AS n FROM key_runtime').get() as { n: number }).n).toBe(0);
+  });
+
+  it('fail 腿：上游 401 → result=fail、错码进 detail（不落上游 body 原文）', async () => {
+    const { db } = setup();
+    const keyId = seedKey(db, 'auto-auth');
+    const { fetch } = fakeFetch([jsonRes(401, { error: { message: 'invalid api key', code: 'invalid_api_key' } })]);
+
+    probeKeyOnce(db, keyId, MASTER_KEY, fetch, AUTO_PROBE_AUDITOR);
+    const row = await waitForAutoProbeAudit(db, keyId);
+
+    expect(row.result).toBe('fail');
+    expect(row.detail).toContain('auto=1');
+    expect(row.detail).toContain('ok=0');
+    expect(row.detail).toContain('code=AUTH_REJECTED');
+    expect(row.actor).toBe('system');
+  });
+
+  it('没打出去也留痕：上游连不上（fetch 直接抛）→ code=SKIPPED 的 fail 审计，而不是无声无息', async () => {
+    const { db } = setup();
+    const keyId = seedKey(db, 'auto-offline');
+    const thrower = (async () => {
+      throw new Error('offline');
+    }) as unknown as typeof fetch;
+
+    probeKeyOnce(db, keyId, MASTER_KEY, thrower, AUTO_PROBE_AUDITOR);
+    const row = await waitForAutoProbeAudit(db, keyId);
+
+    // 连不上上游属于"探活跑完了但结论是 fail"，不是"没跑"：走的是正常 fail 腿
+    expect(row.result).toBe('fail');
+    expect(row.detail).toContain('code=UPSTREAM_UNREACHABLE');
+  });
+
+  it('没打出去也留痕：频控挡下的自动首调 → code=SKIPPED 的 fail 审计（10s 频控是共享的）', async () => {
+    const { db } = setup();
+    const keyId = seedKey(db, 'auto-rate');
+    const f = fakeFetch([jsonRes(200, { object: 'list', data: [{ id: 'm1' }] })]);
+
+    probeKeyOnce(db, keyId, MASTER_KEY, f.fetch, AUTO_PROBE_AUDITOR);
+    await waitForAutoProbeAudit(db, keyId);
+
+    // 同一把 key 立刻再触发一次（比如同一批里重复回调）：被 10s 频控挡下 ——
+    // 这正是「就一次」的字面执行，但必须在审计里留痕，而不是无声无息地消失。
+    probeKeyOnce(db, keyId, MASTER_KEY, f.fetch, AUTO_PROBE_AUDITOR);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const rows = db
+      .prepare("SELECT result, detail FROM audit_log WHERE action = 'key.probe' AND target_id = ? ORDER BY ts")
+      .all(keyId) as { result: string; detail: string }[];
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.detail).toContain('ok=1');
+    expect(rows[1]!.detail).toContain('code=SKIPPED');
+    expect(rows[1]!.result).toBe('fail');
+    // 自动首调总共只打了一次上游
+    expect(f.calls).toHaveLength(1);
+  });
+
+  it('绝不抛：库已关（进程收尾 / 用例清理）时也不产生无人接管的 rejection', async () => {
+    const { db } = setup();
+    const keyId = seedKey(db, 'auto-closed');
+    const { fetch } = fakeFetch([jsonRes(200, { object: 'list', data: [{ id: 'm1' }] })]);
+    db.close();
+
+    // 若有未接管的 rejection，vitest 会让本用例红 —— 这条用例的全部价值就在这里
+    probeKeyOnce(db, keyId, MASTER_KEY, fetch, AUTO_PROBE_AUDITOR);
+    await new Promise((resolve) => setTimeout(resolve, 20));
   });
 });

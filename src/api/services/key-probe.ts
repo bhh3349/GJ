@@ -17,6 +17,7 @@
 // 探活测的正是**这一把**，401 就是结论，绝不换把（ADR-0049 决策 2）。
 
 import type { Db } from '../../db/database.js';
+import { appendAudit } from '../../db/repo/audit.js';
 import { decryptedKeyRefs, getKeyRow } from '../../db/repo/keys.js';
 import { getUpstreamRow } from '../../db/repo/upstreams.js';
 import { parseModelLimits } from '../../db/model-limits.js';
@@ -296,4 +297,84 @@ function classifyStatus(status: number, upstreamCode: string | null): KeyProbeCo
   }
   if (status === 404 || status === 400 || status === 422) return 'MODEL_REJECTED';
   return 'UPSTREAM_ERROR';
+}
+
+/* ---------------------- 建 key 自动保活：首调一次（ADR-0050） ---------------------- */
+
+/** 审计里的调用者。 */
+export interface KeyProbeAuditor {
+  actor: string;
+  ip: string;
+}
+
+/**
+ * 管理面自己发起首调时用的审计身份：**网关干的，不冒充人**。
+ *
+ * 手动「试调一次」记的是点按钮的那个人（`captureAuditActor`）；建 key 后的首调发生在
+ * 批量任务里（账号池建 key / 套餐 key 轮换），那一刻没有"请求对象"可读 —— 而它确实
+ * 不是某个人的手点，写成人名会造出一条"某人探活了一把 key"的假记录。它属于哪一批，
+ * 由同时间段那条 `supplier.keys.create` / `supplier.rotate-key` / `key.create` 对上。
+ */
+export const AUTO_PROBE_AUDITOR: KeyProbeAuditor = { actor: 'system', ip: '-' };
+
+/**
+ * 建 key 后的**首调保活**（ADR-0050 / 契约 §3.1）：新 key 落库后立刻用真 key 打一次上游。
+ *
+ * 业主的理由只有一句：一把从来没被调用过的新 key，上游可能按"僵尸 key"处理（封号）。
+ * 所以三处建 key 的路径（`POST /api/keys`、账号池建 key、套餐 key 轮换）各调一次。
+ *
+ * 四条纪律（改这里之前先读）：
+ *   1. **fire-and-forget**：不 await、不挡建 key 的 201/202、**不重试**。失败就是失败，
+ *      结论只落一条审计（`key.probe`，detail 前缀 `auto=1`），响应与业务状态一个字都不变。
+ *   2. **走同一个 `probeKey`**：零 `usage_logs`、不碰 `KeyRuntimeState`、**不写 `first_used_at`**
+ *      —— `firstUsedAt` 记的是**客户流量**，管理面首调不混进去（ADR-0048 / ADR-0049 的口径隔离）。
+ *   3. **10s 频控是共享的**：自动首调也会盖下时间戳，于是刚建完就手点「试调一次」会拿到
+ *      `TOO_MANY_ATTEMPTS`（带 `retryAfterSeconds`）—— "就一次"本来就包括这一次。
+ *   4. **绝不抛**：这条链上的任何异常（解密失败、上游 4xx、库已关）都只落一条 `fail` 审计；
+ *      连写审计都失败就吞掉，后台动作不许把异常抛回进程。
+ */
+export function probeKeyOnce(
+  db: Db,
+  keyId: string,
+  masterKey: Buffer,
+  fetchImpl: typeof fetch,
+  auditor: KeyProbeAuditor,
+): void {
+  void probeKey(db, keyId, masterKey, fetchImpl, {})
+    .then((result) => {
+      writeAutoProbeAudit(db, auditor, keyId, result.ok ? 'ok' : 'fail', {
+        detail:
+          `auto=1 kind=${result.kind} model=${result.model ?? '-'} ok=${result.ok ? 1 : 0} ` +
+          `status=${result.httpStatus ?? '-'} code=${result.probeCode ?? '-'} ${result.durationMs}ms`,
+      });
+    })
+    .catch(() => {
+      // 没打出去（频控 / 解密失败 / key 或上游行不见了）：仍然留一条痕，code=SKIPPED。
+      writeAutoProbeAudit(db, auditor, keyId, 'fail', {
+        detail: 'auto=1 kind=- model=- ok=0 status=- code=SKIPPED -ms',
+      });
+    });
+}
+
+function writeAutoProbeAudit(
+  db: Db,
+  auditor: KeyProbeAuditor,
+  keyId: string,
+  result: 'ok' | 'fail',
+  entry: { detail: string },
+): void {
+  try {
+    appendAudit(db, {
+      actor: auditor.actor,
+      ip: auditor.ip,
+      action: 'key.probe',
+      targetType: 'key',
+      targetId: keyId,
+      result,
+      detail: entry.detail,
+    });
+  } catch {
+    // 库已关 / 写失败：后台动作的最后一道。**再抛出去就是一个没人接管的 rejection**，
+    // 而这条审计缺失不影响任何业务状态（探活本身零落库）。
+  }
 }

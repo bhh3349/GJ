@@ -1,6 +1,6 @@
-# ADR 索引 —— 49 份一行表
+# ADR 索引 —— 50 份一行表
 
-**读法**：先用本表定位，再 `Read docs/adr/NNNN-*.md` 那一份。不要按目录顺序整读（49 份约 8,400 行）。
+**读法**：先用本表定位，再 `Read docs/adr/NNNN-*.md` 那一份。不要按目录顺序整读（50 份约 8,600 行）。
 A Decision Records 是 MADR 格式，文件名 `NNNN-标题.md`。新决策必须落 `docs/adr/`，不许只留在聊天记录（AGENTS.md §7）。
 
 | ADR | 一行结论 | 什么时候必须去读 |
@@ -56,6 +56,8 @@ A Decision Records 是 MADR 格式，文件名 `NNNN-标题.md`。新决策必�
 | [0048](../../../docs/adr/0048-key-first-used-at.md) | **key 首次调用时刻**：落 `upstream_keys.first_used_at`（不落 `key_runtime` —— 镜像会重写、重启归零）；写入方 = 用量攒批 flush 事务里的 `markKeyFirstUsed`（`WHERE first_used_at IS NULL`，同批取最早，**只写一次**）；**不递增 `revision`、不进 `change_log`**（使用态 ≠ 配置）；升级时从现存 `usage_logs` 一次性回填 `MIN(ts)`，之后**永不重算**（保留期裁剪会让重算值越算越晚）；裁光 ⇒ `NULL` = 「未调用」，不编时刻 | 动 `usage-sink` flush / `markKeyFirstUsed` / §3 `firstUsedAt` / 保留期与首次时间的口径 / 做第二批「试调一次」时 |
 
 | [0049](../../../docs/adr/0049-key-probe.md) | **key 探活（「试调一次」）**：`POST /api/keys/:id/probe` 由**管理面直连上游**（不动 `src/gateway`/`ports.ts`），测的正是这一把（401 即结论、绝不换把）；判据与数据面同口径（2xx+`success:false` 也算 fail）；**计量隔离四条**：零 `reportFailure`/`reportSuccess`（防把 `autoDisabled` 的死 key 探活复活）、零 `usage_logs`、零 `upstream_keys`，唯一写入 = 审计 `key.probe`；模型三段（点名→白名单首条→退化 `/v1/models`），**不硬编码默认模型**；频控 10s/把 + 全局并发 2 | 动 `key-probe.ts` / 探活路由 / §3 `ProbeResult` / 想让探活动运行态或健康时 |
+
+| [0050](../../../docs/adr/0050-key-auto-first-call.md) | **建 key 自动首调保活**：三条建 key 路径（`POST /api/keys` / 账号池 `keys` / `rotate-key`）在**落库之后**用新 key 真打一次上游（复用 `probeKey`，`probeKeyOnce` fire-and-forget）——**不 await、不重试、不做 UI 列/标签**（标签列照旧套餐名称）；同样零 `usage_logs` / 零 `key_runtime` / 零 `upstream_keys`、**不写 `firstUsedAt`**（口径隔离）；审计 `key.probe` detail 前缀 `auto=1`，手动建 key 记操作者、账号池/轮换记 `actor=system`；10s 频控共享（刚建完手点试调 → 429） | 动三条建 key 路径 / 想给首调加重试或开关 / 想把调用状态画进前端时 |
 
 ## 维护纪律
 

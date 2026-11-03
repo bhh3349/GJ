@@ -93,6 +93,7 @@ import type {
 } from '../dto.js';
 import { ApiError } from '../errors.js';
 import { startTask } from '../task-runner.js';
+import { AUTO_PROBE_AUDITOR, probeKeyOnce } from './key-probe.js';
 import { REFRESH_CONCURRENCY } from './balance-refresh.js';
 
 /**
@@ -1880,6 +1881,9 @@ async function createKeysForAccount(
       ctx.masterKey,
     );
     linkSupplierAccountKey(ctx.db, cred.id, key.id, key.maskedKey, name);
+    // 建 key 自动保活（ADR-0050）：落库即用真 key 打一次上游，防上游按"僵尸 key"封号。
+    // fire-and-forget：不挡这一批的进度、不重试、不写 first_used_at，结论只落审计（auto=1）。
+    probeKeyOnce(ctx.db, key.id, ctx.masterKey, ctx.fetchImpl, AUTO_PROBE_AUDITOR);
     created.push({ keyId: key.id, maskedKey: key.maskedKey, tokenNo: toTokenNo(data.tokenNo) });
   }
 
@@ -1926,6 +1930,9 @@ function poolRotatedKey(
     ctx.masterKey,
   );
   linkSupplierAccountKey(ctx.db, accountId, key.id, key.maskedKey, `套餐key轮换-${input.subNo}`);
+  // 建 key 自动保活（ADR-0050）：轮换出的新 key 同样要被真实调用一次（同三条路径的口径）。
+  // fire-and-forget：不挡轮换任务、不重试、不写 first_used_at，结论只落审计（auto=1）。
+  probeKeyOnce(ctx.db, key.id, ctx.masterKey, ctx.fetchImpl, AUTO_PROBE_AUDITOR);
   return key.id;
 }
 

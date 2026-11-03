@@ -1319,7 +1319,7 @@ describe('POST /keys', () => {
     await runBatch(h, '/api/supplier-accounts/refresh', { upstreamId: id, ids: [accountId] });
     const selfBefore = h.upstream.count('/api/user/self');
 
-    // 默认桩的创建响应**带 token_no**，所以这一轮只有"创建"那 1 次
+    // 默认桩的创建响应**带 token_no**，所以这一轮只有"创建"那 1 次管理面请求
     // （回查是 §15.5 的 2 次里另一次，仅在创建响应不带它时才发生，见驱动器用例）。
     const before = h.upstream.calls.length;
     await runBatch(h, '/api/supplier-accounts/keys', {
@@ -1329,7 +1329,11 @@ describe('POST /keys', () => {
       unlimited: false,
       quotaCents: 1000,
     });
-    expect(h.upstream.calls.length - before).toBe(1);
+    // v1.25.0（ADR-0050）：建 key 落库后会**额外**出站一次首调保活（数据面 /v1/*，
+    // fire-and-forget，可能已落在 calls 里也可能还在路上）。管理面判据因此按路径过滤，
+    // 不按总数数 —— 该钉住的是"没有为拿比值多打管理面请求"，不是"一个出站都没有"。
+    const managementDelta = h.upstream.calls.slice(before).filter((c) => c.path.startsWith('/api/'));
+    expect(managementDelta.map((c) => c.path)).toEqual(['/api/token/']);
 
     // 关键在这一行：比值是**从库里读的**，这一轮一次 /api/user/self 都没多打。
     // 写死比值的那一版也满足上一行；本行钉住的是"没有为修它而加请求"。

@@ -1,6 +1,6 @@
 # 契约索引 —— `docs/api-contract.md`
 
-**唯一接口事实源**（契约头：状态 v1.0-frozen，当前版本 v1.24.0）。全文 **5,118 行 / 127 个 `##`+`###` 标题**。
+**唯一接口事实源**（契约头：状态 v1.0-frozen，当前版本 v1.25.0）。全文 **5,152 行 / 129 个 `##`+`###` 标题**。
 **不要整读**：在这张表里找行号，然后 `sed -n 'A,Bp' docs/api-contract.md`。
 
 | § | 标题 | 起始行 |
@@ -19,6 +19,8 @@
 | 3 | Key `/api/keys` | 697 |
 | — | Key 对象（`tokenPlan` 含 v1.18.0 `totalTokens` **与 v1.22.0 `amountTotalCents`/`amountUsedCents`**；v1.23.0 `firstUsedAt`）/ 端点 / 手动录余额 / `retryAfterSeconds` / `POST /api/keys` 请求体 | 699 / 764 / 823 / 837 / 847 |
 | — | `POST /api/keys/:id/probe` — 试调一次（v1.24.0 / ADR-0049，`ProbeResult` 判据表 + 计量隔离四条 + 频控） | 780 |
+| — | 建 key 自动首调保活（v1.25.0 / ADR-0050：三条路径 + fire-and-forget + 审计 `auto=1` + 频控共享） | 823 |
+| — | v1.25.0 变更条（建 key 自动首调保活） | 4129 |
 | 4 | 用户组 `/api/groups` | 863 |
 | — | Group 对象 / 端点 / 模型授权（ADR-0037）/ 网关 key 列表项 | 865 / 897 / 951 / 1020 |
 | 5 | 模型 `/api/models` | 1048 |

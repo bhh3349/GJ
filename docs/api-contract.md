@@ -1,6 +1,6 @@
 # API 契约 v1.0-frozen
 
-> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.24.0**　｜
+> 作者：管家 · 管理后端　｜　状态：**v1.0-frozen（PM 已核验冻结，见 ADR-0007）**　｜　｜　当前版本：**v1.25.0**　｜
 > 本文件是**唯一接口事实源**。冻结后任何一方不得单方面改字段；改动走本文件 + `docs/adr/`。
 > 覆盖范围：管理面 `/api/*`（REST + WS）。网关面 `/v1/*` 见 §10。
 >
@@ -766,7 +766,7 @@
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | `GET` | `/api/keys?upstreamId=&category=&enabled=&health=&depleted=&q=&page=&pageSize=&includeDeleted=` | 列表（默认 `maskedKey`，默认不含已软删）。`depleted` 为 **v1.17.0** 新增可选筛选（`true` / `false`，留空 = 不筛），与既有 `enabled` / `health` 同形 |
-| `POST` | `/api/keys` | 建，body `{upstreamId, key, category, label?, weight?, balance?, tokenPlan?}` → `201` |
+| `POST` | `/api/keys` | 建，body `{upstreamId, key, category, label?, weight?, balance?, tokenPlan?}` → `201`。**〔v1.25.0〕落库后自动用新 key 真打一次上游（首调保活，fire-and-forget）**，见本节「建 key 自动首调」 |
 | `GET` | `/api/keys/:id` | 详情；已软删的 key 返回 404 `NOT_FOUND`（`?includeDeleted=true` 显式可查） |
 | `PATCH` | `/api/keys/:id` | 改 `{label?, enabled?, weight?, category?, tokenPlan?, revision}` |
 | `DELETE` | `/api/keys/:id` | 删 → `204` |
@@ -819,6 +819,23 @@
 **状态码**：key 或上游不存在 → `404`；`model` 不在白名单 → `400`；同一把 key `10s` 内重复 → `429 TOO_MANY_ATTEMPTS` + `details.retryAfterSeconds`（**复用既有码，零新增枚举**）；未登录 → `401`；其余诊断性失败一律 `200` + `ok:false`。
 
 **并发与频控计数都在进程内**：全局上限 `2` 路（管理员手点的保险，不是限流器）；同 key `10s` 一次的计数**重启清零**、多实例各算各的（最坏各 `2N` 路，人工按钮的上界无害 —— ADR-0049 决策 5）。
+
+### 建 key 自动首调保活（v1.25.0 / ADR-0050）
+
+**业主动机只有一句**：一把从来没被调用过的新 key，上游可能按"僵尸 key"处理（封号）——所以**每个新 key 都要被真实调用一次，就一次**。三条建 key 路径全部覆盖：
+
+| 路径 | 调用方 | 审计 actor |
+|---|---|---|
+| `POST /api/keys`（手动建 key） | 路由层，`201` 之前发起 | 操作者（`captureAuditActor`） |
+| `POST /api/supplier-accounts/keys`（账号池建 key） | `createKeysForAccount`，每把 key 落库后即发起 | `system` |
+| `POST /api/supplier-accounts/rotate-key`（套餐 key 轮换） | `poolRotatedKey`，新 key 落库后即发起 | `system` |
+
+四条纪律（与实现文件 `src/api/services/key-probe.ts` 的 `probeKeyOnce` 一一对应）：
+
+1. **fire-and-forget**：不 await、不挡响应、**不重试**；失败只落一条审计，响应与任务状态一个字不变。
+2. **走同一个 `probeKey`**：判据 / 模型解析 / 超时 / 频控与手动探活**完全同一套**，计量隔离四条全部继承（零 `usage_logs`、零 `key_runtime`、零 `upstream_keys` 写入、**不写 `firstUsedAt`** —— 首调是管理面动作，不是客户流量）。
+3. **10s 频控共享**：自动首调也盖时间戳 —— 刚建完就手点「试调一次」拿 `429`（带 `retryAfterSeconds`），这是特性不是缺陷。
+4. **审计必留痕**：`detail` 前缀 `auto=1`，与手动探活同形（`kind` / `model` / `ok` / `status` / `code` / 耗时）；没打出去落 `code=SKIPPED`，写审计本身失败则**静默吞掉**（后台动作不许把异常抛回进程）。
 
 ### `PUT /api/keys/:id/balance` — 手动录入
 
@@ -4108,6 +4125,23 @@ spec 三条判据：新库自带、老库真被 ALTER 到、重复跑不抛 dupl
 | ⑨ | 容量口径 | 所有容量数字（`capacity` / `reserveForData` / 每轮 token 数 / §15.5 的 ≈14 min 与重开门槛）都是**「单出口」口径**：出口 > 1 时**逐出口各自成立，不得跨出口加总** |
 
 > **§15.5 连带（v1.8.0 已同批落）**：「27 个账号一轮刷新 ≈ 1 分钟」按 ⑥ 重算为 **≈14 min**（`ceil(54/4)×60s`，单出口口径），0.6s 降为账号级内层纪律，重开门槛（ADR-0017 补遗 6）登记为 §15.5 脚注。本表是那三处改动的唯一口径源。
+>
+> **v1.25.0（2026-11-03，建 key 自动首调保活 —— 业主：「首次生成key的时候，需要每个key都要有一次调用，不然可能被封号，就一次就行」）**：
+> 落笔依据 **ADR-0050**。① **行为变更**：三条建 key 路径（§3 `POST /api/keys`、§15.2 `keys`（账号池建 key）、
+> §15.13 `rotate-key`）在 **key 落库之后**各用**新 key 真实调用上游一次** —— 复用 v1.24.0 的探活实现
+> （`kind` / 模型解析 / 频控 / 超时同一套），因此同样**零 `usage_logs`、零 `key_runtime`、零 `upstream_keys` 写入**，
+> 且**不写 `firstUsedAt`**（那是**客户流量**的时刻，ADR-0048 / ADR-0049 的口径隔离）。
+> ② **fire-and-forget**：不 await、不挡建 key 的 `201` / `202` / 任务进度、**不重试**；上游连不上 / 401 / 无可用模型
+> 都只是"这一次"的结果，不改变任何业务状态（更不许把任务倒置成 failed）。
+> ③ **证据 = 审计 `key.probe`**，`detail` 前缀 `auto=1`，其余字段与手动探活同形（零 key 明文、零上游 body 原文）：
+> 手动建 key 记操作者（`captureAuditActor`）；账号池 / 轮换记 `actor=system`（那一刻**没有请求对象**，
+> 写成人名就是一条假记录 —— 它属于哪一批，由同时间段那条 `supplier.keys.create` / `supplier.rotate-key` 对上）；
+> 没打出去（频控挡下 / 解密失败）落 `code=SKIPPED`，不无声无息。
+> ④ **`10s` 频控是共享的**：刚建完就手点「试调一次」→ `429 TOO_MANY_ATTEMPTS`（带 `details.retryAfterSeconds`）——
+> 「就一次」本来就包括这一次。
+> ⑤ **零端点、零字段、零 DDL、零新增错误码、`/v1/*` 零变更、`src/gateway/` 零改动**；前端**零改动**
+> （这条不进任何列 / 标签 —— 标签列照旧显示套餐名称）。已知代价：一轮建 N 把 key 就多 N 发出站请求，
+> 与 §15.5 的「建 key = 2 次」**分列统计、不合并**。
 >
 > **v1.24.0（2026-11-03，Key「试调一次」`POST /api/keys/:id/probe` —— 业主要求「每个 key 加一个首次调用功能」的第二批）**：
 > 落笔依据 **ADR-0049**。① 新端点**同步**执行：用指定 key 真打一次上游（`max_tokens=1`），

@@ -46,6 +46,15 @@
   main `75f3e61` → 镜像 `57076991e749`（432MB），部署目录 `/root/sub-gateway`（`.env` 600），
   卷 `sub-gateway_sub-gateway-data`。暴露面 = 业主拍板 **C：4101 裸公网 + 强密码**
   （`COOKIE_SECURE=false` 必配，设 true 会话 cookie 发不出去，登录假死）；网关面 4100 公网。
+  当日又迭代三次：`558f0e3`→`5b76b0f60462`、`9b90fa4`→`8da8ac5079bf`、`18bbe14`→
+  `2a50acd7299e`；**重建前先 `VACUUM INTO` 备份**（卷内 + `docker cp` 到 `/root/backups/`），
+  覆 `local` 前把旧镜像打 `sub-gateway:prev` 当回滚锚。流程全文见 `docker-deploy.md` §7。
+- **开工令的「无 DDL」要独立复核**：判据 = `git diff <在役 tip>..<新 tip> -- src/db/schema.ts
+  docker-compose.yml .env.example package.json pnpm-lock.yaml` 为空。实测反例：`18bbe14`
+  批口径写「无 DDL」，实际带 `ALTER TABLE upstream_keys ADD COLUMN first_used_at`（ADR-0048，
+  hasColumn 守卫加列 + 一次性回填，无害但要按「有迁移」报，重启后核回填没跑第二次）。
+- **meatshell 会话别跑长命令**：挂 240s 的 `docker exec` 轮询会把会话通道占满，后续请求全部
+  超时。轮询用 ≤45s 短查询；长构建走 `nohup … > log 2>&1 &` + 短间隔 `tail`。
 - **外部可达性唯一闸是云控制台防火墙**（SWAS → 防火墙），别在服务器本机排查：
   `ufw` inactive、iptables INPUT 全 ACCEPT，但控制台只放 22/80/443 —— 4100/4101 一律
   DROP。判别法（外部探）：80/443 = **REFUSED**（放行但宿主无监听），4100/4101 与随机端口

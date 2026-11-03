@@ -307,6 +307,31 @@ compose **原文件** `--no-build` 起实例（镜像预打 `sub-gateway:local` 
 22/80/443，4100/4101 是 DROP —— 加规则只能在 SWAS 控制台点（判别法与证据见
 references/deploy-ops.md 现场事实），服务器本机 ufw/iptables 都没拦，别在那排查。
 
+**迭代重建实录（2026-11-03，同机同卷）**：首部署之后又滚了三次 —— `558f0e3`→镜像
+`5b76b0f60462`、`9b90fa4`→`8da8ac5079bf`、`18bbe14`→`2a50acd7299e`（均 432MB；
+`up -d --no-build` 后 20–22s `(healthy)`，`docker restart` 6–10s 回 healthy；命名卷与
+`.env` 全程不动，逐次核对业务表行数全等 —— 业主这轮的原话重点就是「保留之前的数据」）。
+固定动作两条：
+
+- **重建前先备份**：只读连接 `VACUUM INTO '/app/data/backup-<UTC时间戳>.db'`（落在卷里），
+  再 `docker cp` 一份到 `/root/backups/` 并 `sha256sum` 记进回执。数据在命名卷理论上不会丢，
+  但快照在手才敢 `up`；直接 `cp` 库文件会拿到撕裂库（见 §4）。
+- **回滚锚点用 tag**：覆 `sub-gateway:local` 之前先 `docker tag <旧镜像 id> sub-gateway:prev`，
+  回滚就是 `up -d --no-build` 前把 `image` 指回 `prev`。别指望旧镜像不悬空。
+
+**开工令里的「无 DDL / 无新环境变量」必须自己复核**，判据是这一条 diff 为空：
+
+```bash
+git diff <在役 tip>..<新 tip> -- src/db/schema.ts docker-compose.yml .env.example \
+  env.production.example package.json pnpm-lock.yaml
+```
+
+实测反例（2026-11-03，`18bbe14` 批）：开工令写的「无 DDL」，但 `schema.ts` 里带着
+`ALTER TABLE upstream_keys ADD COLUMN first_used_at TEXT` + 一次性回填（ADR-0048；
+`hasColumn()` 守卫 ⇒ 只补缺失列、不动既有列，`SCHEMA_VERSION` 不递增）。加列本身无害，
+但**回执要按「有迁移」报**，并在重启后再核对一次回填没有二次执行
+（`select count(*) from upstream_keys where first_used_at is not null` 前后同值）。
+
 | # | 项 | 实测结果 |
 |---|---|---|
 | ① | 体积对比（同机同基座） | `docker images`：单阶段 **922MB → multi-stage 432MB**（基座 329MB；基座之上的部分 593MB → 103MB）。`docker save \| gzip`：**209MB → 94MB**（三包实际传输量）。旧文档的"235MB"是另一台机器的口径，**别跨机比绝对值** |

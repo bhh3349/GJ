@@ -740,7 +740,7 @@
 | `models` | `string[]` \| `null` | **v1.4.2 新增**。该 key 的**模型白名单**，取自上游 `model_limits` CSV（TierFlow `model_limits_enabled=true` 时）。`null` = **无白名单、不限模型**（老 key 恒为 `null`，行为与 v1.4.1 逐字相同）。**`[]` 与 `null` 同义**：网关冻结件 `matchesModel()` 对二者同判为"不限"（`src/gateway/key-pool.ts`，v1.1 口径"留空即按 upstream 继承"），本契约**不制造一个实现不了的三态** —— 空 CSV 在落库时归一化为 `NULL`，库里不会出现空串。**只读**：`PATCH /api/keys/:id` 不收该字段。生效范围见 §5「白名单口径」 |
 | `balance` | `int`(分) \| `null` | `null` = **未知**（查不到或从未录入）。前端显示"未知"，不得显示 0。`unlimited=true` 时 `null` 表示"无限"，要看 `unlimited` 才分得清（§15.6） |
 | `balanceSource` | `"manual"` \| `"template"` \| `null` | 数据来源，用于 UI 标注可信度 |
-| `tokenPlan` | 对象 \| `null` | **v1.18.0 修订**：`{ "remainingTokens": int\|null, "totalTokens": int\|null, "amountTotalCents": int\|null, "amountUsedCents": int\|null, "expiresAt": ISO8601\|null }`。**`remainingTokens: null` = 未同步**（余量未知 ≠ 0；网关按「未知」哨兵排序，ADR-0030），**v1.18.0 起不再塌成 0** —— §3 与 `balance` 同一条纪律：**0 和 null 是两个值，前端不得渲染成同一个东西**（0 = 查到过且烧干；null = 从未同步过）。`totalTokens` = 归属账号**当前套餐**的基础 Token 总量（`supplier_account_subscriptions.basic_token_total`，按 `key_masked` 匹配本 key 掩码取**唯一**行，撞号/无归属/多套餐同掩码 → `null`，宁缺勿假）；前端据此渲染「剩余 / 总量」（如 `6.2M / 8M`），两个都 null 只渲染「未同步」。**`amountTotalCents` / `amountUsedCents`（v1.22.0 / ADR-0046 新增，单位分）**：同一份套餐台账的**钱额度**面（`amount_total_cents` / `amount_used_cents`），与 `totalTokens` **同一唯一匹配条件**；三格**各自透传**（token 未知不拖累金额、金额未知不拖累 token），`null` = 无归属 / 撞号 / 上游没给。业主要求两个额度面一起可见 —— 只给 token 会把「台账有 ¥29.90、Key 管理什么都没有」读成没同步。**`expiresAt` 参与网关选路排序**（v1.20.0 / ADR-0044）：到期升序优先烧；`null` / 不可解析 = 未知到期，排在所有已知到期之后，仍参与选路、不被过滤 |
+| `tokenPlan` | 对象 \| `null` | **v1.18.0 修订**：`{ "remainingTokens": int\|null, "totalTokens": int\|null, "amountTotalCents": int\|null, "amountUsedCents": int\|null, "expiresAt": ISO8601\|null }`。**`remainingTokens: null` = 未同步**（余量未知 ≠ 0；网关按「未知」哨兵排序，ADR-0030），**v1.18.0 起不再塌成 0** —— §3 与 `balance` 同一条纪律：**0 和 null 是两个值，前端不得渲染成同一个东西**（0 = 查到过且烧干；null = 从未同步过）。`totalTokens` = 归属账号**当前套餐**的基础 Token 总量（`supplier_account_subscriptions.basic_token_total`，按 `key_masked` 匹配本 key 掩码取**唯一**行，撞号/无归属/多套餐同掩码 → `null`，宁缺勿假）；前端据此渲染「剩余 / 总量」（如 `6.2M / 8M`），两个都 null 只渲染「未同步」。**`amountTotalCents` / `amountUsedCents`（v1.22.0 / ADR-0046 新增，单位分）**：同一份套餐台账的**钱额度**面（`amount_total_cents` / `amount_used_cents`），与 `totalTokens` **同一唯一匹配条件**；三格**各自透传**（token 未知不拖累金额、金额未知不拖累 token），`null` = 无归属 / 撞号 / 上游没给。业主要求两个额度面一起可见 —— 只给 token 会把「台账有 ¥29.90、Key 管理什么都没有」读成没同步。**`expiresAt` 参与网关选路排序**（v1.20.0 / ADR-0044）：到期升序优先烧；`null` / 不可解析 = 未知到期，排在所有已知到期之后，仍参与选路、不被过滤。**〔v1.24.0 补记 · 呈现口径〕** 套餐 key 的金额格**主行 = 钱额度 + 总量**（如 `¥29.9 / 8M`，即 `amountTotalCents` / `totalTokens`），剩余量与到期放次行、全量进 tooltip —— 业主原话「套餐key就显示套餐金额和赠送的8M啊（29.9/8M）」；`null` 照旧不塌成 `0`。余额类 key 的金额格仍只画余额（账号型画 `account.balanceCents` 只读镜像）。 |
 | `health` | `"healthy"` \| `"cooling"` \| `"disabled"` | **网关运行态**，管理端只读。`disabled` 优先于 `cooling` |
 | `cooldownUntil` | ISO8601 \| `null` | `health=cooling` 时非空 |
 | `consecutiveFailures` | int | 连续失败次数，决定冷却档位 |
@@ -754,8 +754,8 @@
 > `health` 是**网关进程内**的运行时状态。管理端**不能写** `health`，只能写 `enabled`。`enabled=false` ⇒ 后端返回 `health="disabled"`，即使此前在冷却中。
 >
 > **`depleted` 是另一根轴，不是第四个 `health` 值**（v1.17.0，§20.1）：`health` 滞后 ≤1s、重启归零（ADR-0010），
-> 而透支是**落库的资金事实**、跨重启存活、只有人工能清。前端在 `depleted=true` 时**不得只画三灯**
-> —— 那等于把"没钱"渲染成"可用"。运行态三分（`healthy+cooling+disabled=total`）与 `depleted` 计数**不得相加**（§12.2）。
+> 而透支是**落库的资金事实**、跨重启存活、只有人工能清。前端在 `depleted=true` 时**不得只画三灯** —— 那等于把"没钱"渲染成"可用"；
+> **反向也不许**（〔v1.24.0 补记〕业主原话"都透支了还健康呢"）：不得把「健康」绿灯与「透支」并排成两个同等标签 —— **主 chip 必须是「透支」**，运行态细节（冷却 / 连续失败）降为次行或 tooltip，与「不得只画三灯」同一条理由。运行态三分（`healthy+cooling+disabled=total`）与 `depleted` 计数**不得相加**（§12.2）。
 >
 > **这四个字段的来源与新鲜度（ADR-0010）**：网关进程是 `key_runtime` 表的**唯一写者**，它按约 **1s** 一次的节奏把内存里的运行态批量镜像进去（攒批、去重、只在值真的变了才写，且**不在 `/v1/*` 请求线程上**执行）。因此：管理端读到的运行态**最多滞后 1s**；`?health=cooling` 筛选与健康灯的口径由此表提供，而不是「永远 health」。
 > **重启后归零**：`key_runtime` **不参与冷启动**——网关启动时不恢复冷却与连续失败计数，第一个镜像周期会把全量状态（含归零的那些）写回，管理端在重启后 1s 内看到的就是归零后的真实值。这是**既定降级**，理由与备选方案见 ADR-0010。
@@ -4930,9 +4930,9 @@ CREATE TABLE IF NOT EXISTS group_models (
 | 运行态 | `health` / `cooldownUntil` / `consecutiveFailures` | 网关进程（1s 批量镜像，ADR-0010） | `key_runtime`，**滞后 ≤1s、重启归零** | 网关此刻有没有把它按住（冷却 / 自动禁用） |
 | **资金事实** | **`depleted` / `depletedAt` / `depletedReason`** | **判定腿**（余额 / 余量落库时）；人工解除 | `upstream_keys.depleted_at` / `_reason`，**落库、跨重启、跨部署** | 它有没有钱付账 |
 
-**硬约束（前端）**：`depleted=true` 时**不得只画三灯**。三灯答的是运行态，一把 `enabled=true` +
-`health=healthy` + `depleted=true` 的 key 是**完全合法的组合** —— 它没被停用、没在冷却，
-只是没钱了、网关不会选它。只画三灯等于把"没钱"渲染成"可用"。
+**硬约束（前端）**：`depleted=true` 时**不得只画三灯**，也**不得把「健康」绿灯与「透支」并排成两个同等标签**
+（〔v1.24.0 补记〕业主原话"都透支了还健康呢"—— 主 chip 必须是「透支」，运行态细节降为次行 / tooltip）。三灯答的是运行态，
+一把 `enabled=true` + `health=healthy` + `depleted=true` 的 key 是**完全合法的组合** —— 它没被停用、没在冷却，只是没钱了、网关不会选它。只画三灯等于把"没钱"渲染成"可用"；只画绿灯再把透支并排，等于把"没钱"说成"健康和没钱各占一半"。
 
 `depleted` **不参与** §12.2 的 `healthy + cooling + disabled = total` 那套划分（那一套是运行态的三分），
 计数单独一格，**不得相加**。

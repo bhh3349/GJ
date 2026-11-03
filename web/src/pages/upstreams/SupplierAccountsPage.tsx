@@ -652,7 +652,9 @@ export default function SupplierAccountsPage() {
         </Tooltip>
       ),
       dataIndex: 'identifier',
-      width: 168,
+      /** 横向滚时**左冻结**（业主 2026-11-03：只冻右边不冻左边，滚到中段就分不清那行是谁）。宽度按 mono 两行实值给。 */
+      fixed: 'left' as const,
+      width: 120,
       render: (_: unknown, row) => (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           <Text style={{ fontFamily: tokens.font.mono, fontSize: 12 }}>{row.identifier}</Text>
@@ -669,7 +671,7 @@ export default function SupplierAccountsPage() {
         </Tooltip>
       ),
       dataIndex: 'status',
-      width: 104,
+      width: 80,
       render: (_: unknown, row) => (
         <Tooltip
           title={
@@ -708,7 +710,7 @@ export default function SupplierAccountsPage() {
         </Tooltip>
       ),
       key: 'health',
-      width: 168,
+      width: 124,
       render: (_: unknown, row) => {
         const health = accountHealthOf(row);
         const tint = healthTint(health.tone);
@@ -759,7 +761,7 @@ export default function SupplierAccountsPage() {
         </Tooltip>
       ),
       key: 'scrapped',
-      width: 118,
+      width: 80,
       render: (_: unknown, row) =>
         row.scrapped ? (
           <Tooltip
@@ -792,7 +794,8 @@ export default function SupplierAccountsPage() {
         </Tooltip>
       ),
       dataIndex: 'balanceCents',
-      width: 190,
+      /** 最宽不过「¥875.55」(43px)，76 留 17px 余量；匀 12px 给出口列。 */
+      width: 76,
       render: (_: unknown, row) => (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           <BalanceText value={row.balanceCents} strong updatedAt={row.balanceUpdatedAt} />
@@ -806,7 +809,7 @@ export default function SupplierAccountsPage() {
         </Tooltip>
       ),
       key: 'keys',
-      width: 168,
+      width: 92,
       render: (_: unknown, row) => (
         <Space size={tokens.space.xs} align="center" wrap>
           <Text style={{ fontVariantNumeric: 'tabular-nums', fontSize: 12 }}>
@@ -848,7 +851,7 @@ export default function SupplierAccountsPage() {
       ),
       dataIndex: 'subscriptions',
       key: 'subscriptionBalance',
-      width: 132,
+      width: 92,
       align: 'right',
       render: (_: unknown, row) => {
         const sums = accountSubscriptionRemaining(row);
@@ -900,7 +903,8 @@ export default function SupplierAccountsPage() {
         </Tooltip>
       ),
       key: 'egress',
-      width: 150,
+      /** 兜底文案「（不在出口清单里）」自然宽 108px + 16 padding，实测 124 才不挤；从账号余额那栏匀来的 12px。 */
+      width: 124,
       render: (_: unknown, row) => {
         if (row.egressId === null) {
           return (
@@ -943,7 +947,8 @@ export default function SupplierAccountsPage() {
         </Tooltip>
       ),
       key: 'credential',
-      width: 128,
+      /** 两行 mono 短词：最长为「密码型 / 会话型」3 字，56 够（宿出列从这匀 8px）。 */
+      width: 56,
       render: (_: unknown, row) => (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
           <Text style={{ fontSize: 12 }}>{CREDENTIAL_SHORT[row.credentialSource]}</Text>
@@ -956,7 +961,7 @@ export default function SupplierAccountsPage() {
     {
       title: '更新于',
       dataIndex: 'updatedAt',
-      width: 110,
+      width: 76,
       render: (value: string) => (
         <Tooltip title={formatIso(value)}>
           <Text type="secondary" style={{ fontSize: 12 }}>
@@ -968,9 +973,11 @@ export default function SupplierAccountsPage() {
     {
       title: '操作',
       key: 'actions',
-      width: 180,
+      /** 横向滚时**右冻结**：操作列永远常在（业主 2026-11-03）。宽度按最坏行「解除透支 + 绑出口 + 详情」实测。 */
+      fixed: 'right' as const,
+      width: 176,
       render: (_: unknown, row) => (
-        <Space size={tokens.space.sm}>
+        <Space size={tokens.space.xs}>
           {/* 只在真锁着的时候画：一个恒在的「解除透支」会变成噪声，也会让人以为它是常规维护动作。 */}
           {row.depleted ? (
             <Tooltip title="清账号锁 + 清名下被账号连坐停用的 key，并把它们重新启用；自己余额不足的 key 不会被放回池中。余额回升不会自动解锁，只有这个动作能解。">
@@ -1262,14 +1269,16 @@ export default function SupplierAccountsPage() {
                       columns={visibleColumns}
                       dataSource={localRows ?? accounts.data?.items ?? []}
                       loading={accounts.refreshing}
-                      scroll={{ x: 1894 }}
+                      scroll={{ x: 1160 }}
                       rowSelection={{
                         selectedRowKeys: selected,
+                        columnWidth: 32,
                         onChange: (keys) => {
                           setSelected(keys.map((key) => String(key)));
                         },
                       }}
                       expandable={{
+                        columnWidth: 32,
                         expandedRowRender: (row) => (
                           <div
                             style={{

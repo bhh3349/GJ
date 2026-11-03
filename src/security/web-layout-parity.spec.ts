@@ -267,6 +267,44 @@ describe('web 排版防回退锁（2026-10-12 事故）', () => {
     expect(vite).toMatch(/host:\s*true/);
   });
 
+  it('账号池表：列宽收紧后仍在 1440 视口内，左右两列成对冻结（业主 2026-11-03）', () => {
+    // 事故本体：`scroll={{ x: 1894 }}` + 11 列清一色给宽，1440 视口（实测可用 1166px）白白滚一屏；
+    // 操作列在横向滚动时滑出视野，业主原话「把操作那一列变成冻结列，永远常在」。
+    // 锁的不是像素而是两个**结构事实**：表宽不超过 1440 可用宽、冻结成对且带宽度。
+    const page = readFileSync(
+      join(webSrcRoot, 'pages', 'upstreams', 'SupplierAccountsPage.tsx'),
+      'utf8',
+    );
+    const MAX_TABLE_WIDTH = 1166;
+
+    const scrollX = /scroll=\{\{ x: (\d+) \}\}/.exec(page)?.[1];
+    expect(scrollX).toBeTruthy();
+    expect(Number(scrollX)).toBeLessThanOrEqual(MAX_TABLE_WIDTH);
+    // 正对照：事故值 1894 必须被判据抓到，否则这条锁是摆设。
+    expect(Number(/scroll=\{\{ x: (\d+) \}\}/.exec('scroll={{ x: 1894 }}')?.[1])).toBeGreaterThan(
+      MAX_TABLE_WIDTH,
+    );
+
+    // 只冻右边不冻左边，横向滚到中段就分不清那行是谁 —— 两列必须成对冻结，且都得声明宽度
+    // （没宽度的列在 fixed 布局里会被内容挤成面条，2026-10-12 事故同源）。
+    const accountAt = page.indexOf("dataIndex: 'identifier'");
+    const accountCol = page.slice(accountAt, page.indexOf("dataIndex: 'status'", accountAt));
+    expect(accountCol).toMatch(/fixed: 'left'/);
+    expect(accountCol).toMatch(/width: \d+/);
+
+    const actionsAt = page.indexOf("key: 'actions'");
+    expect(actionsAt).toBeGreaterThan(0);
+    const actionCol = page.slice(actionsAt, actionsAt + 240);
+    expect(actionCol).toMatch(/fixed: 'right'/);
+    expect(actionCol).toMatch(/width: \d+/);
+    // 负腿：右侧少了 fixed 的合成样本必须被抓到（判据不是恒真）。
+    expect(/fixed: 'right'/.test("key: 'actions', width: 176,")).toBe(false);
+
+    // 勾选/展开两列默认各 54/36px，收紧到 32 才把省下的宽度让给内容列。
+    expect(page).toMatch(/rowSelection=\{\{[\s\S]{0,160}columnWidth: 32/);
+    expect(page).toMatch(/expandable=\{\{[\s\S]{0,80}columnWidth: 32/);
+  });
+
   it('套餐台账表仍是 fixed 布局 + 全列声明宽度（长文本换行事故的回归位）', () => {
     const src = readFileSync(
       join(webSrcRoot, 'pages', 'upstreams', 'SupplierSubscriptionsTable.tsx'),
